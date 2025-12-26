@@ -111,7 +111,7 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("--model", type=str, choices=["tinylidarnet", "tinylidarnet_small"], default="tinylidarnet", help="Model architecture")
-    parser.add_argument("--input-dim", type=int, default=1080, help="Input dimension size")
+    parser.add_argument("--input-dim", type=int, default=750, help="Input dimension size")
     parser.add_argument("--output-dim", type=int, default=2, help="Output dimension size")
     parser.add_argument("--ckpt", type=Path, required=True, help="Source .pth checkpoint")
     parser.add_argument("--output", type=Path, default=Path("./weights/converted_weights.npy"), help="Destination .npy path")
