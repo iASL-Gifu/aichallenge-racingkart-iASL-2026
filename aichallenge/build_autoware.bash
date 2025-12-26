@@ -22,7 +22,8 @@ source /opt/ros/humble/setup.bash
 source /autoware/install/setup.bash
 
 cd ./workspace || exit
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+# NOTE: gyro_odometer exists in the Autoware underlay, so allow overriding in this overlay workspace.
+colcon build --symlink-install --allow-overriding gyro_odometer --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # colcon build の終了コード（ステータス）を取得
 BUILD_STATUS=$?

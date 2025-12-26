@@ -9,7 +9,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
+
+# Provide a robust `colcon` wrapper which avoids setuptools "entry script"
+# dependency resolution issues (e.g. pkg_resources evaluating __requires__).
+RUN cat >/usr/local/bin/colcon <<'EOF'
+#!/usr/bin/env bash
+exec python3 -c 'from colcon_core.command import main; import sys; sys.exit(main(argv=sys.argv[1:]))' "$@"
+EOF
+RUN chmod +x /usr/local/bin/colcon
+ENV PATH=/usr/local/bin:${PATH}
 
 # PATH="$PATH:/root/.local/bin"
 # PATH="/usr/local/cuda/bin:$PATH"
@@ -44,11 +53,11 @@ RUN tar zxf /ws/aichallenge_submit.tar.gz -C /aichallenge/workspace/src
 RUN rm -rf /ws
 
 RUN bash -c ' \
-  source /autoware/install/setup.bash; \
-  cd /aichallenge/workspace; \
-  rosdep update; \
-  rosdep install -y -r -i --from-paths src --ignore-src --rosdistro $ROS_DISTRO; \
-  colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release'
+	  source /autoware/install/setup.bash; \
+	  cd /aichallenge/workspace; \
+	  rosdep update; \
+	  rosdep install -y -r -i --from-paths src --ignore-src --rosdistro $ROS_DISTRO; \
+	  python3 -c \"from colcon_core.command import main; import sys; sys.exit(main())\" build --symlink-install --allow-overriding gyro_odometer --cmake-args -DCMAKE_BUILD_TYPE=Release'
 
 ENTRYPOINT []
 CMD ["bash", "/aichallenge/run_evaluation.bash"]
