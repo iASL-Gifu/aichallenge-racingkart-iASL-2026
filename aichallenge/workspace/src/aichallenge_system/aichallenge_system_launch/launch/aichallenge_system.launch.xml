@@ -6,7 +6,8 @@
     <arg name="sensor_model" default="racing_kart_sensor_kit"/>
     <arg name="launch_vehicle_interface" default="true"/>
     <arg name="domain_id" default="0"/>
-    <arg name="multiple_vehicle" default="true"/>
+    <!-- Disable multi-vehicle features on the base domain (0). -->
+    <arg name="multiple_vehicle" default="$(eval $(var domain_id)!=0)"/>
 
     <let name="domain_id" value="$(var domain_id)"/>
     <let name="rviz_config" value="$(find-pkg-share aichallenge_system_launch)/config/autoware_vehicle.rviz"/>
