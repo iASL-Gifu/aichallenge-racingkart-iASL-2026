@@ -136,3 +136,4 @@ tiny_lidar_net/outputs/
 datasets/
 train/
 val/
+weights/
