@@ -8,7 +8,8 @@ if [[ -e /dev/nvidia0 ]]; then
     opts=()
 else
     echo "[INFO] No NVIDIA GPU detected → running on headless mode"
-    opts=("-headless")
+    # opts=("-headless")
+    opts=("--camera" "false" "--lidar" "false")
 fi
 
 case "${mode}" in
@@ -21,10 +22,6 @@ case "${mode}" in
 *) ;;
 esac
 
-# shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
-# shellcheck disable=SC1091
-source /autoware/install/setup.bash
 # shellcheck disable=SC1091
 source /aichallenge/workspace/install/setup.bash
 sudo ip link set multicast on lo
