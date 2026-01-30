@@ -12,16 +12,35 @@ Toward the competition, we will update the following pages to provide informatio
 
 - [日本語ページ](https://automotiveaichallenge.github.io/aichallenge-documentation-racingkart/)
 - [English Page](https://automotiveaichallenge.github.io/aichallenge-documentation-racingkart/en/)
-- [スクリプト設計メモ（評価/ビルド/起動）](aichallenge/Readme.md)
+- [スクリプト設計メモ（評価/ビルド/起動）](aichallenge/README.md)
 
 ## Docker Compose（推奨）
 
-- `cp .env.example .env`（必要に応じて編集）
-- ビルド: `./docker_build.sh dev`
-- Autoware(overlay) ビルド: `make build-autoware`
-- 評価（`aichallenge/run_evaluation.bash` 相当）: `make run-sim-eval`
-  - オプション例: `make run-sim-eval DEVICE=gpu DOMAIN_ID=1 ROSBAG=true CAPTURE=false RESULT_WAIT_SECONDS=10`
-  - 出力: `output/<timestamp>/d<domain_id>/`（`output/latest` は可能ならシンボリックリンク）
-- 個別起動: `make sim` / `make autoware-sim` / `make autoware-vehicle`
-- GPU: 自動検出（強制: `DEVICE=gpu`、CPU強制: `DEVICE=cpu`）
-- ウィンドウ移動の調整: `MOVE_WINDOW_DEBUG=1 MOVE_WINDOW_QUIET=0 make run-sim-eval`（必要なら `AWSIM_*_REGEX` / `RVIZ_*_REGEX` を指定）
+### 全体像（開発: Makefile / 個別起動）
+
+```text
+Host (you)
+  ├─ make autoware-build / make eval / make dev / make simulator ...
+  └─ docker compose
+        ├─ simulator        (AWSIM)
+        ├─ autoware         (Autoware)
+        ├─ autoware-command (ros2 service/topic の単発操作)
+        └─ output/ にログ・結果を出力（output/latest は最新runへのsymlink）
+```
+
+## 複数提出物の並列起動（run_parallel_submissions）
+
+```text
+Host: ./run_parallel_submissions.bash --submit <tar.gz> [<tar.gz> ...]
+      DEVICE=auto|gpu|cpu ./run_parallel_submissions.bash --submit <tar.gz> [<tar.gz> ...]
+
+  1) submitごとに eval イメージをビルド（Dockerfile target=eval）
+  2) simulator を1回だけ起動
+  3) autoware-d1..dN を並列起動（domain id は submit 順に 1..N）
+
+主な出力:
+  output/<run_id>/awsim.log
+  output/<run_id>/<script_name>.log
+  output/<run_id>/dN/autoware.log
+  output/<run_id>/compose.autoware_multi.yml
+```
