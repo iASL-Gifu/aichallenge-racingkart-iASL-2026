@@ -1,8 +1,8 @@
-# aichallenge-2025
+# aichallenge-racingkart
 
-本リポジトリでは、2025年度に実施される自動運転AIチャレンジでご利用いただく開発環境を提供します。参加者の皆様には、Autoware Universe をベースとした自動運転ソフトウェアを開発し、予選大会では End to End シミュレーション空間を走行するレーシングカートにインテグレートしていただきます。開発した自動運転ソフトウェアで、安全に走行しながらタイムアタックに勝利することが目標です。また、決勝大会では本物のレーシングカートへのインテグレーションを行っていただきます。
+本リポジトリでは、自動運転AIチャレンジでご利用いただく開発環境を提供します。参加者の皆様には、Autoware Universe をベースとした自動運転ソフトウェアを開発し、予選大会では End to End シミュレーション空間を走行するレーシングカートにインテグレートしていただきます。開発した自動運転ソフトウェアで、安全に走行しながらタイムアタックに勝利することが目標です。また、決勝大会では本物のレーシングカートへのインテグレーションを行っていただきます。
 
-This repository provides a development environment use in the Automotive AI Challenge which will be held in 2025. For the preliminaries, participants will develop autonomous driving software based on Autoware Universe and integrate it into a racing kart that drives in the End to End simulation space. The goal is to win in time attack while driving safely with the developed autonomous driving software. Also, for the finals, qualifiers will integrate it into a real racing kart.
+This repository provides a development environment use in the Automotive AI Challenge. For the preliminaries, participants will develop autonomous driving software based on Autoware Universe and integrate it into a racing kart that drives in the End to End simulation space. The goal is to win in time attack while driving safely with the developed autonomous driving software. Also, for the finals, qualifiers will integrate it into a real racing kart.
 
 ## ドキュメント / Documentation
 
@@ -20,7 +20,7 @@ Toward the competition, we will update the following pages to provide informatio
 
 ```text
 Host (you)
-  ├─ make autoware-build / make eval / make dev / make simulator ...
+  ├─ make autoware-build / ./run_evaluation.bash / make dev / make simulator ...
   └─ docker compose
         ├─ simulator        (AWSIM)
         ├─ autoware         (Autoware)
@@ -28,19 +28,23 @@ Host (you)
         └─ output/ にログ・結果を出力（output/latest は最新runへのsymlink）
 ```
 
-## 複数提出物の並列起動（run_parallel_submissions）
+## まずは読んでほしいもの
 
-```text
-Host: ./run_parallel_submissions.bash --submit <tar.gz> [<tar.gz> ...]
-      DEVICE=auto|gpu|cpu ./run_parallel_submissions.bash --submit <tar.gz> [<tar.gz> ...]
+[初学者向けセットアップ資料](./design_docs/HowToSetup.md)
 
-  1) submitごとに eval イメージをビルド（Dockerfile target=eval）
-  2) simulator を1回だけ起動
-  3) autoware-d1..dN を並列起動（domain id は submit 順に 1..N）
+[初学者向け説明資料](./design_docs/Introduction.md)
 
-主な出力:
-  output/<run_id>/awsim.log
-  output/<run_id>/<script_name>.log
-  output/<run_id>/dN/autoware.log
-  output/<run_id>/compose.autoware_multi.yml
+## OSS貢献にあたって
+
+`pre-commit run -a`を必ず通すこと
+
+```.sh
+check for merge conflicts................................................Passed
+check xml................................................................Passed
+check yaml...............................................................Passed
+detect private key.......................................................Passed
+fix end of files.........................................................Passed
+mixed line ending........................................................Passed
+shellcheck...............................................................Passed
+shfmt....................................................................Passed
 ```

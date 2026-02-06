@@ -10,15 +10,12 @@ x-autoware-base: &autoware-base
     - XAUTHORITY=${XAUTHORITY}
     - QT_X11_NO_MITSHM=1
     - TZ=Asia/Tokyo
-    - RUN_MODE=
-    - CMD=
-    - AWSIM_TITLE_REGEX=${AWSIM_TITLE_REGEX:-}
-    - AWSIM_CLASS_REGEX=${AWSIM_CLASS_REGEX:-}
-    - RVIZ_TITLE_REGEX=${RVIZ_TITLE_REGEX:-}
-    - RVIZ_CLASS_REGEX=${RVIZ_CLASS_REGEX:-}
-    - MOVE_WINDOW_DEBUG=${MOVE_WINDOW_DEBUG:-0}
-    - MOVE_WINDOW_PREFER_LARGEST=${MOVE_WINDOW_PREFER_LARGEST:-1}
-    - MOVE_WINDOW_QUIET=${MOVE_WINDOW_QUIET:-1}
+    - RUN_MODE=${RUN_MODE:-}
+    - SIM_MODE=${SIM_MODE:-}
+    - CMD=${CMD:-}
+    - COLCON_TRACE=${COLCON_TRACE:-}
+    - AIC_CAPTURE=${AIC_CAPTURE:-false}
+    - AIC_ROSBAG=${AIC_ROSBAG:-false}
     # GPU (set by Makefile when DEVICE enables GPU, otherwise empty)
     - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-}
     - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-}
@@ -65,7 +62,7 @@ services:
     <<: *autoware-base 
     stop_grace_period: 0.1s
     working_dir: ${OUTPUT_RUN_DIR:-/aichallenge}
-    command: ["bash", "-lc", "if [ \"${EVAL_RUN:-0}\" = \"1\" ]; then exec /aichallenge/run_autoware.bash ${RUN_MODE:-awsim} ${DOMAIN_ID:-1} >autoware.log 2>&1; else exec /aichallenge/run_autoware.bash ${RUN_MODE:-awsim} ${DOMAIN_ID:-1}; fi"]
+    command: ["bash", "-lc", "exec /aichallenge/run_autoware.bash ${RUN_MODE:-awsim} ${DOMAIN_ID:-1} >\"${OUTPUT_RUN_DIR:-/output}/autoware.log\" 2>&1"]
 
   # Autoware service
   autoware-build:
@@ -77,19 +74,12 @@ services:
     <<: *autoware-base 
     stop_grace_period: 0.1s
     working_dir: ${OUTPUT_RUN_DIR:-/aichallenge}
-    command: ["bash", "-lc", "if [ \"${EVAL_RUN:-0}\" = \"1\" ]; then exec /aichallenge/run_simulator.bash ${SIM_MODE:-} >awsim.log 2>&1; else exec /aichallenge/run_simulator.bash ${SIM_MODE:-}; fi"]
+    command: ["bash", "-lc", "exec /aichallenge/run_simulator.bash ${SIM_MODE:-} >\"${OUTPUT_RUN_DIR:-/output}/awsim.log\" 2>&1"]
 
   autoware-command:
     <<: *autoware-base 
     stop_grace_period: 0.1s
-    command: ["bash", "-lc", "source /aichallenge/workspace/install/setup.bash && cd ${CMD_WORKDIR:-/aichallenge} && exec ${CMD:-}"]
-
-  autoware-rosbag:
-    <<: *autoware-base
-    stop_signal: SIGINT
-    stop_grace_period: 30s
-    working_dir: ${OUTPUT_RUN_DIR:-/aichallenge}
-    command: ["bash", "-lc", "exec env ROS_DOMAIN_ID=${DOMAIN_ID:-1} /aichallenge/utils/record_rosbag.bash"]
+    command: ["bash", "-lc", "source /aichallenge/workspace/install/setup.bash && cd ${CMD_WORKDIR:-/aichallenge} && exec bash -lc \"${CMD:-}\""]
 
 #### vehicle specific services can be added here ####
   # Zenoh service

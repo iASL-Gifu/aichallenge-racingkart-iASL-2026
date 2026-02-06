@@ -6,8 +6,6 @@
 ## 設計方針（読みやすさ優先）
 
 - 1コマンド1責務: `run_evaluation.bash` はオーケストレーション、`utils/publish.bash` は「単発のROS操作」に寄せる
-- 失敗は終了コードで返す: 呼び出し側は `$?` か `run_or_exit` で一貫して判定できる
-- 無限待ちを避ける: `timeout` を基本にして、待ち/サービス呼び出しのハングを防ぐ
 - Ctrl+C で確実に止まる: `EXIT` の cleanup と `SIGINT/SIGTERM` のハンドラを分けて扱う
 - Domain ID の副作用を局所化: できるだけ `env ROS_DOMAIN_ID=... <cmd>` で「そのコマンドだけ」切り替える
 - ビルドはコンテナ内で完結: ホスト（src環境）でのビルドは前提にしない
@@ -43,10 +41,10 @@
 ## `aichallenge/` 配下の主要ファイル（設計思想）
 
 - `aichallenge/run_evaluation.bash`: 評価オーケストレータ。起動→待機→初期化→収集→後処理までを1本で管理
-- `aichallenge/utils/publish.bash`: 単発のROS操作CLI（サービス呼び出し/トピック待ち）。終了コードをそのまま返す
+- `aichallenge/utils/publish.bash`: 単発のROS操作CLI（トピック待ち/リセット等）。終了コードをそのまま返す
 - `aichallenge/utils/move_window.bash`: （可能なら）AWSIM/RViz のウィンドウ位置調整。`wmctrl` がない場合は何もしない
 - `aichallenge/build_autoware.bash`: overlay(`aichallenge/workspace/`) のビルド。必要なら `clean` で `build/install/log` を削除
-- `aichallenge/run_simulator.bash`: AWSIM の起動。GPU有無で headless を切り替え、SIM側 Domain を固定（`ROS_DOMAIN_ID=0`）
+- `aichallenge/run_simulator.bash`: AWSIM の起動。GPUデバイスの有無で headless を切り替え、SIM側 Domain を固定（`ROS_DOMAIN_ID=0`）
 - `aichallenge/run_autoware.bash`: Autoware の起動。`awsim/vehicle/rosbag` などモード別に launch 引数を整理
 - `aichallenge/utils/run_rviz.bash`: RViz の起動補助（ローカル/実車/remote 用）。可視化は本質ではないので簡易スクリプトで十分
 - `aichallenge/utils/record_rosbag.bash`: rosbag 記録。`SIGINT/SIGTERM/EXIT` で `ros2 bag record` を止める
@@ -55,16 +53,6 @@
 
 ## 評価フロー（現状）
 
-以下の流れで評価をオーケストレーションします。
+評価の詳細（オーケストレーション）は、`autostart_orchestrator_py` 側のドキュメントに集約しました。
 
-1. 出力ディレクトリ作成（`/output/<timestamp>/d<domain_id>`、`/output/latest` シンボリックリンク）
-2. ROS/Autoware/overlay 環境の `source` と `ROS_DOMAIN_ID` の設定
-3. ネットワーク設定（`sudo -n ...` を best-effort 実行）
-4. AWSIM 起動（`run_simulator.bash eval` を起動）
-5. AWSIM 準備待ち（`utils/publish.bash check-awsim`。`/clock` を1回受け取るまで待つ）
-6. Autoware 起動（`run_autoware.bash awsim <domain>` を起動）
-7. （可能なら）ウィンドウ移動（`wmctrl` がある場合のみ、タイムアウト付き）
-8. 初期姿勢/制御要求（`utils/publish.bash request-initialpose` → `request-control`）
-9. 任意で画面キャプチャ・rosbag 開始（フラグ指定時）
-10. AWSIM 終了待ち → 結果変換（`result-details.json` を最大待ち）→ 終了
-11. 終了時後処理（キャプチャ停止/rosbag停止/権限調整）
+- `aichallenge/workspace/src/aichallenge_system/autostart_orchestrator_py/README.md`

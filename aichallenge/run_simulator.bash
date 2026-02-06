@@ -2,6 +2,7 @@
 AWSIM_DIRECTORY=/aichallenge/simulator/AWSIM
 
 mode="${1}"
+echo "[INFO] Starting AWSIM in '${mode}' mode"
 
 if [[ -e /dev/nvidia0 ]]; then
     echo "[INFO] NVIDIA GPU detected"
@@ -18,6 +19,9 @@ case "${mode}" in
     ;;
 "eval")
     opts+=("--vehicles" "1" "--laps" "6" "--timeout" "600")
+    ;;
+"test")
+    opts+=("--vehicles" "1" "--laps" "1" "--timeout" "90")
     ;;
 "2p")
     opts+=("--vehicles" "2" "--laps" "6" "--timeout" "1200")

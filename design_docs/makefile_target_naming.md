@@ -8,7 +8,7 @@
 - **文字種**: `a-z` / `0-9` / `-` のみ（小文字）。`_` は使わない
 - **語順**: 先頭は必ず *service*（`build-*` / `run-*` のような動詞始まりは避ける）
 - **意味の粒度**: 1ターゲット = 1責務（複数サービスを束ねる場合は `system-*` / `workflow-*` に寄せる）
-- **オプションは変数で渡す**: `make eval DOMAIN_IDS=1,2,3,4` のように、原則は環境変数で分岐する
+- **オプションは変数で渡す**: `DOMAIN_IDS=1,2,3,4 ./run_evaluation.bash` のように、原則は環境変数で分岐する
 
 ## 2. docker compose との対応
 
@@ -20,7 +20,6 @@
 - `autoware-build`（overlay build）
 - `simulator`
 - `autoware-command`（単発コマンド実行用）
-- `autoware-rosbag`
 - `driver`
 - `zenoh`
 - `rviz2`
@@ -51,7 +50,6 @@ service は「操作対象のまとまり」を表します（docker compose の
 - `eval` : 評価オーケストレーション（複数サービスを束ねる）
 - `dev` : 開発用（AWSIM + Autoware 起動のみ）
 - `rviz2` : 可視化（RViz2）
-- `autoware-rosbag` : 記録
 - `driver` : racing_kart_interface
 - `zenoh` : Zenoh bridge
 - `compose` : docker compose の直操作（`compose-ps` / `compose-down` など）
