@@ -470,28 +470,13 @@ bootstrap_repo_targets() {
         sudo_refresh
     fi
 
-    local dc_override=""
     if [ "$use_sudo" -eq 1 ]; then
-        local compose_file="${COMPOSE_FILE:-docker-compose.yml}"
-        local compose_gpu_file="${COMPOSE_GPU_FILE:-docker-compose.gpu.yml}"
-        local device="${DEVICE:-auto}"
-        local gpu_enabled=0
-        if [ "${device}" = "gpu" ]; then
-            gpu_enabled=1
-        elif [ "${device}" = "auto" ] && [ -e /dev/nvidia0 ]; then
-            gpu_enabled=1
-        fi
-
-        dc_override="sudo docker compose -f ${compose_file}"
-        if [ "$gpu_enabled" -eq 1 ]; then
-            dc_override="${dc_override} -f ${compose_gpu_file}"
-        fi
         warn "${WARN} docker daemon not reachable as user yet; using sudo docker for post-setup steps"
     fi
 
     if [ "${do_make_autoware_build}" = "1" ]; then
         if [ "$use_sudo" -eq 1 ]; then
-            (cd "${repo_dir}" && DC="${dc_override}" make autoware-build) || {
+            (cd "${repo_dir}" && make autoware-build) || {
                 warn "${FAIL} make autoware-build failed"
                 return 0
             }
@@ -525,7 +510,7 @@ bootstrap_repo_targets() {
 
     if [ "${do_make_dev}" = "1" ]; then
         if [ "$use_sudo" -eq 1 ]; then
-            (cd "${repo_dir}" && DC="${dc_override}" make dev DOMAIN_ID="${domain_id}") || warn "${WARN} make dev failed"
+            (cd "${repo_dir}" && make dev DOMAIN_ID="${domain_id}") || warn "${WARN} make dev failed"
         else
             (cd "${repo_dir}" && make dev DOMAIN_ID="${domain_id}") || warn "${WARN} make dev failed"
         fi
@@ -785,6 +770,8 @@ EOF
 
     if is_repo_root_dir "${dest_dir}"; then
         run_step_if "${do_repo_doctor}" "Run repo preflight: ./setup.bash doctor" bash "${dest_dir}/setup.bash" doctor || true
+        # Create .env with GPU/CPU selection
+        (cd "${dest_dir}" && bash ./setup.bash env) || true
     fi
 
     if [ "$skip_pull_image" -ne 1 ]; then
@@ -802,7 +789,7 @@ EOF
                     warn "${WARN} docker not usable as user yet; building with sudo docker (will chown logs back to you)"
                     (cd "${dest_dir}" && sudo bash ./docker_build.sh dev) || true
                     # Fix ownership if the script had to run under sudo.
-                    (cd "${dest_dir}" && sudo chown -R "${owner_user}:${owner_group}" output/_host 2>/dev/null) || true
+                    (cd "${dest_dir}" && sudo chown -R "${owner_user}:${owner_group}" output/docker 2>/dev/null) || true
                 fi
             fi
         else
@@ -877,7 +864,7 @@ EOF
 }
 
 download_awsim() {
-    local default_url='https://tier4inc-my.sharepoint.com/:u:/g/personal/taiki_tanaka_tier4_jp/IQDzMkqmmLp_Q5ZDn_y4RJseAcoFkFTGG32sKmziiod3pZ4?e=Z55wK8'
+    local default_url='https://tier4inc-my.sharepoint.com/:u:/g/personal/taiki_tanaka_tier4_jp/IQAINoHHCdx9Sr3rYMutSlGtAdldeCbyishT1RmDGbW62tE?e=eg0tUi'
     local url="${AWSIM_ZIP_URL:-$default_url}"
 
     local force=0
@@ -1010,8 +997,13 @@ ensure_env() {
         return 1
     fi
     cp .env.example .env
-    log "${OK} Created .env from .env.example"
-    log "${INFO} Edit .env if needed (NTRIP_*, VEHICLE_ID, ...)"
+
+    if [ -e /dev/nvidia0 ]; then
+        sed -i 's/^#\s*COMPOSE_FILE=/COMPOSE_FILE=/' .env
+        log "${OK} .env created (GPU)"
+    else
+        log "${OK} .env created (CPU)"
+    fi
 }
 
 preflight() {
