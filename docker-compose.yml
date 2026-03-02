@@ -17,6 +17,8 @@ x-autoware-base: &autoware-base
     - COLCON_TRACE=${COLCON_TRACE:-}
     - AIC_CAPTURE=${AIC_CAPTURE:-false}
     - AIC_ROSBAG=${AIC_ROSBAG:-false}
+    - ROS_HOME=${ROS_HOME:-}
+    - ROS_LOG_DIR=${ROS_LOG_DIR:-}
   volumes:
     - ./output:${OUTPUT_ROOT:-/output}
     - ./aichallenge:/aichallenge

@@ -1,56 +1,44 @@
-# HowToSetup: まず「試せる状態」まで持っていく
+# 環境構築
 
-技術的な仕組みの説明はせず、**セットアップで「何をやるか」**だけを書いたチェックリストです。  
-迷ったらこの順に上から進めてください。
-
-> 想定: Ubuntu（推奨は 22.04）。まずは **CPUで動作確認**できればOKです（GPUは後回し）。
-
----
+> 想定: Ubuntu 22.04。まずは CPU で動作確認できれば OK です（GPU は後回し）。
 
 ## 0) まずこれ（入口）
 
-まずは「とにかく一回動くか」を試します。**ホームディレクトリ（`~/aichallenge-racingkart/...`）に環境を作って試走**できる入口です。
+以下のコマンドで、環境構築から起動確認まで対話形式で一括実行できます。
 
 ```bash
+sudo apt update && sudo apt install -y curl
 curl -fsSL "https://raw.githubusercontent.com/AutomotiveAIChallenge/aichallenge-racingkart/main/setup.bash" | bash
 ```
 
-このコマンドで起きること（ざっくり）:
-
-- 現在位置で `preflight`（環境診断）を実行します
-- 初期セットアップを進める場合は `./setup.bash bootstrap` を実行します
 - `bootstrap` では必要ステップを **y/N で確認**しながら進められます
+- すべての確認が終わると自動でセットアップが進みます
 
-> PR版（Testing）を入口にしたい場合（必要な時だけ）: PRのIDを入れてください
->
-> ```bash
-> curl -fsSL "https://raw.githubusercontent.com/AutomotiveAIChallenge/aichallenge-racingkart/refs/pull/<PR_ID>/head/setup.bash" | bash -s -- preflight
-> ```
+## 1) setup.bash bootstrap が行うステップ
 
----
-
-## 1) セットアップでやること一覧（超ハイレベル）
-
-1. **今のPCが足りているか診断する**
-2. **Docker を使える状態にする**
-3. **リポジトリを用意する**
-4. **AWSIM（シミュレータのデータ）を用意する**
-5. **開発用Dockerイメージを用意する**
-6. **ワークスペースをビルドする**
-7. **起動して、止められることを確認する**
-
----
+| #  | ステップ                      | 対応コマンド（個別実行時）       |
+|----|-------------------------------|----------------------------------|
+| 1  | 基本パッケージの導入          | `sudo apt install -y ...`        |
+| 2  | Docker の導入                 | bootstrap 内で自動実行           |
+| 3  | rocker の導入                 | `pip install rocker`             |
+| 4  | docker グループへの追加       | `sudo usermod -aG docker $USER`  |
+| 5  | リポジトリの取得              | `git clone ...`                  |
+| 6  | 環境診断                      | `./setup.bash doctor`            |
+| 7  | .env 作成（GPU/CPU 自動検出） | `./setup.bash env`               |
+| 8  | Autoware ベースイメージ取得   | `./setup.bash pull image`        |
+| 9  | AWSIM ダウンロード・展開      | `./setup.bash download awsim`    |
+| 10 | 開発用イメージのビルド        | `./docker_build.sh dev`          |
+| 11 | ワークスペースビルド          | `make autoware-build`            |
+| 12 | 起動確認                      | `make dev` → 停止: `make down`   |
 
 ## 2) チェックリスト（上から順にやるだけ）
-
-ここは「やること」→「代表コマンド1つ」→「完了の目安」だけを書きます。
 
 ### (A) 診断する（最初に必ず）
 
 - やること: 足りないものを洗い出す
 - 代表コマンド:
-  - `./setup.bash preflight`
-- 完了の目安: “Docker” や “Repository” の欄で、次に何をすべきかが分かる
+  - `./setup.bash doctor`
+- 完了の目安: "Docker" や "Repository" の欄で、次に何をすべきかが分かる
 
 ### (B) `.env` を作成する（GPU / CPU の選択）
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2015  # A && B || C: B is always a simple assignment, so C never runs on A-success.
 set -euo pipefail
 
 SCRIPT_PATH="${BASH_SOURCE[0]:-${0-}}"
@@ -251,16 +252,15 @@ run_step_if() {
 usage() {
     cat <<'EOF'
 Usage:
-  ./setup.bash                # run preflight checks (no install)
+  ./setup.bash                # run doctor (environment check + next steps)
   curl -fsSL https://raw.githubusercontent.com/AutomotiveAIChallenge/aichallenge-racingkart/main/setup.bash | bash
                             # bootstrap a fresh Ubuntu host (installs Docker if missing)
-  ./setup.bash preflight      # same as default
+  ./setup.bash doctor         # environment check + next steps summary
   ./setup.bash bootstrap      # install Docker if missing + clone repo + run setup (for fresh PCs)
   ./setup.bash test [BRANCH]  # bootstrap into /tmp (kept by default; default: origin/test)
   ./setup.bash pull image     # docker pull Autoware base image (recommended)
   ./setup.bash download awsim # download & extract AWSIM.zip (repo-local)
   ./setup.bash env            # create .env from .env.example (safe, repo-local)
-  ./setup.bash doctor         # run preflight + next steps summary
   ./setup.bash bootstrap --yes
                             # non-interactive bootstrap (auto-yes)
   ./setup.bash bootstrap --temp-dir [--keep-dir]
@@ -373,6 +373,22 @@ install_base_packages() {
         make \
         python3 \
         python3-pip
+}
+
+install_rocker() {
+    if cmd_exists rocker; then
+        log "${OK} rocker already installed"
+        return 0
+    fi
+    pip3 install --user rocker
+    # Ensure ~/.local/bin is on PATH
+    if ! echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
+        # shellcheck disable=SC2016
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >>~/.bashrc
+        export PATH="$HOME/.local/bin:$PATH"
+        log "${INFO} Added ~/.local/bin to PATH in ~/.bashrc"
+    fi
+    log "${OK} Installed rocker"
 }
 
 install_docker_if_missing() {
@@ -649,6 +665,7 @@ EOF
 
     local do_install_base=0
     local do_install_docker=0
+    local do_install_rocker=0
     local do_docker_group=0
     local do_clone_repo=0
     local do_repo_doctor=0
@@ -658,79 +675,44 @@ EOF
     local do_make_autoware_build=0
     local do_make_dev=0
 
-    log "${INFO} Planned steps (answer y/N for each, then execution starts):"
-    log "  1) Install base packages (apt)"
-    log "  2) Install Docker (if missing)"
-    log "  3) Add user to docker group (recommended)"
-    log "  4) Clone/update repository (branch=${branch}) -> ${dest_dir}"
-    log "  5) Repo preflight: ./setup.bash doctor (requires repo)"
-    if [ "$skip_pull_image" -ne 1 ]; then
-        log "  6) Pull Autoware base image (requires repo)"
-    else
-        log "  6) Pull Autoware base image (SKIP: --skip-pull-image)"
-    fi
-    if [ "$skip_awsim" -ne 1 ]; then
-        log "  7) Download AWSIM.zip and extract (requires repo)"
-    else
-        log "  7) Download AWSIM.zip and extract (SKIP: --skip-awsim)"
-    fi
-    if [ "$skip_build" -ne 1 ]; then
-        log "  8) Build dev image: ./docker_build.sh dev (requires repo)"
-    else
-        log "  8) Build dev image: ./docker_build.sh dev (SKIP: --skip-build)"
-    fi
-    if [ "$skip_make" -ne 1 ]; then
-        log "  9) make autoware-build (requires repo)"
-        log " 10) make dev DOMAIN_ID=${DOMAIN_ID:-1} (requires repo)"
-    else
-        log "  9) make autoware-build (SKIP: --skip-make)"
-        log " 10) make dev (SKIP: --skip-make)"
-    fi
+    local _n=0
+    log_step() {
+        _n=$((_n + 1))
+        log "$(printf '%3d) %s' "$_n" "$1")"
+    }
+    _skip_note() { [ "${1:-0}" -ne 1 ] && echo "(requires repo)" || echo "(SKIP: $2)"; }
 
-    if confirm_step "Install base packages (apt)"; then
-        do_install_base=1
-    fi
-    if confirm_step "Install Docker (if missing)"; then
-        do_install_docker=1
-    fi
-    if confirm_step "Add user to docker group (recommended)"; then
-        do_docker_group=1
-    fi
+    log "${INFO} Planned steps (answer y/N for each, then execution starts):"
+    log_step "Install base packages (apt)"
+    log_step "Install Docker (if missing)"
+    log_step "Install rocker (pip)"
+    log_step "Add user to docker group (recommended)"
+    log_step "Clone/update repository (branch=${branch}) -> ${dest_dir}"
+    log_step "Repo doctor: ./setup.bash doctor (requires repo)"
+    log_step "Create .env (GPU/CPU auto-detect)"
+    log_step "Pull Autoware base image $(_skip_note "$skip_pull_image" "--skip-pull-image")"
+    log_step "Download AWSIM.zip and extract $(_skip_note "$skip_awsim" "--skip-awsim")"
+    log_step "Build dev image: ./docker_build.sh dev $(_skip_note "$skip_build" "--skip-build")"
+    log_step "make autoware-build $(_skip_note "$skip_make" "--skip-make")"
+    log_step "make dev DOMAIN_ID=${DOMAIN_ID:-1} $(_skip_note "$skip_make" "--skip-make")"
+
+    confirm_step "Install base packages (apt)" && do_install_base=1 || true
+    confirm_step "Install Docker (if missing)" && do_install_docker=1 || true
+    confirm_step "Install rocker (pip)" && do_install_rocker=1 || true
+    confirm_step "Add user to docker group (recommended)" && do_docker_group=1 || true
 
     local repo_exists_now=0
-    if is_repo_root_dir "${dest_dir}"; then
-        repo_exists_now=1
-    fi
+    is_repo_root_dir "${dest_dir}" && repo_exists_now=1 || true
+    confirm_step "Clone/update repository (branch=${branch}) -> ${dest_dir}" && do_clone_repo=1 || true
 
-    if confirm_step "Clone/update repository (branch=${branch}) -> ${dest_dir}"; then
-        do_clone_repo=1
-    fi
-
-    local repo_planned=0
     if [ "${repo_exists_now}" -eq 1 ] || [ "${do_clone_repo}" -eq 1 ]; then
-        repo_planned=1
-    fi
-
-    if [ "${repo_planned}" -eq 1 ]; then
-        if confirm_step "Run repo preflight: ./setup.bash doctor"; then
-            do_repo_doctor=1
-        fi
-        if [ "$skip_pull_image" -ne 1 ] && confirm_step "Pull Autoware base image"; then
-            do_pull_image=1
-        fi
-        if [ "$skip_awsim" -ne 1 ] && confirm_step "Download AWSIM.zip and extract"; then
-            do_download_awsim=1
-        fi
-        if [ "$skip_build" -ne 1 ] && confirm_step "Build dev image: ./docker_build.sh dev"; then
-            do_build_dev_image=1
-        fi
+        confirm_step "Run repo doctor: ./setup.bash doctor" && do_repo_doctor=1 || true
+        [ "$skip_pull_image" -ne 1 ] && confirm_step "Pull Autoware base image" && do_pull_image=1 || true
+        [ "$skip_awsim" -ne 1 ] && confirm_step "Download AWSIM.zip and extract" && do_download_awsim=1 || true
+        [ "$skip_build" -ne 1 ] && confirm_step "Build dev image: ./docker_build.sh dev" && do_build_dev_image=1 || true
         if [ "$skip_make" -ne 1 ]; then
-            if confirm_step "Run make autoware-build (this can take a while)"; then
-                do_make_autoware_build=1
-            fi
-            if confirm_step "Run make dev DOMAIN_ID=${DOMAIN_ID:-1}"; then
-                do_make_dev=1
-            fi
+            confirm_step "Run make autoware-build (this can take a while)" && do_make_autoware_build=1 || true
+            confirm_step "Run make dev DOMAIN_ID=${DOMAIN_ID:-1}" && do_make_dev=1 || true
         fi
     else
         log "${INFO} Repo steps skipped (repo not selected / not present)"
@@ -744,6 +726,7 @@ EOF
 
     run_step_if "${do_install_base}" "Install base packages (apt)" install_base_packages
     run_step_if "${do_install_docker}" "Install Docker (if missing)" install_docker_if_missing
+    run_step_if "${do_install_rocker}" "Install rocker (pip)" install_rocker
     run_step_if "${do_docker_group}" "Add user to docker group (recommended)" ensure_docker_group
 
     # Best-effort verification (avoid hard-fail on network issues)
@@ -769,9 +752,9 @@ EOF
     fi
 
     if is_repo_root_dir "${dest_dir}"; then
-        run_step_if "${do_repo_doctor}" "Run repo preflight: ./setup.bash doctor" bash "${dest_dir}/setup.bash" doctor || true
+        run_step_if "${do_repo_doctor}" "Run repo doctor: ./setup.bash doctor" bash "${dest_dir}/setup.bash" doctor || true
         # Create .env with GPU/CPU selection
-        (cd "${dest_dir}" && bash ./setup.bash env) || true
+        (cd "${dest_dir}" && AIC_ASSUME_YES="${SETUP_ASSUME_YES}" bash ./setup.bash env) || true
     fi
 
     if [ "$skip_pull_image" -ne 1 ]; then
@@ -989,8 +972,11 @@ PY
 
 ensure_env() {
     if [ -f .env ]; then
-        log "${OK} .env already exists"
-        return 0
+        if ! confirm_step ".env already exists. Replace with fresh .env.example?"; then
+            log "${OK} Keeping existing .env"
+            return 0
+        fi
+        rm -f .env
     fi
     if [ ! -f .env.example ]; then
         warn "${FAIL} .env.example not found"
@@ -1006,8 +992,20 @@ ensure_env() {
     fi
 }
 
-preflight() {
+doctor() {
     local failed=0
+    # _chk LEVEL "message" ["hint"] — print result, set failed=1 on FAIL
+    _chk() {
+        local icon msg="$2" hint="${3-}"
+        case "$1" in OK) icon="$OK" ;; WARN) icon="$WARN" ;; FAIL)
+            icon="$FAIL"
+            failed=1
+            ;;
+        *) icon="$INFO" ;; esac
+        echo "${icon} ${msg}"
+        [ -n "$hint" ] && echo "    ${hint}"
+        return 0
+    }
 
     echo "=== Host / OS ==="
     local os
@@ -1016,44 +1014,28 @@ preflight() {
         echo "${WARN} Cannot read /etc/os-release"
     else
         echo "${INFO} OS: ${os}"
-        if [ "$os" != "ubuntu:22.04" ]; then
-            echo "${WARN} Recommended: ubuntu:22.04 (current: ${os})"
-        else
-            echo "${OK} Ubuntu 22.04 detected"
-        fi
+        [ "$os" = "ubuntu:22.04" ] && _chk OK "Ubuntu 22.04 detected" || _chk WARN "Recommended: ubuntu:22.04 (current: ${os})"
     fi
 
     echo ""
     echo "=== Tools ==="
     for c in bash curl git make python3 sudo; do
         if cmd_exists "$c"; then
-            echo "${OK} ${c} found"
+            _chk OK "${c} found"
         else
-            echo "${FAIL} ${c} not found"
+            local hint=""
             case "$c" in
-            git)
-                echo "    Fix: sudo apt update && sudo apt install -y git"
-                ;;
-            curl)
-                echo "    Fix: sudo apt update && sudo apt install -y curl ca-certificates"
-                ;;
-            python3)
-                echo "    Fix: sudo apt update && sudo apt install -y python3"
-                ;;
-            make)
-                echo "    Fix: sudo apt update && sudo apt install -y make"
-                ;;
-            sudo)
-                echo "    Fix: install sudo (or run as root)"
-                ;;
-            *) ;;
+            git) hint="Fix: sudo apt update && sudo apt install -y git" ;;
+            curl) hint="Fix: sudo apt update && sudo apt install -y curl ca-certificates" ;;
+            python3) hint="Fix: sudo apt update && sudo apt install -y python3" ;;
+            make) hint="Fix: sudo apt update && sudo apt install -y make" ;;
+            sudo) hint="Fix: install sudo (or run as root)" ;;
             esac
-            failed=1
+            _chk FAIL "${c} not found" "$hint"
         fi
     done
     if cmd_exists python3 && ! python3 -m pip --version >/dev/null 2>&1; then
-        echo "${WARN} python3-pip not found (optional, needed for rocker)"
-        echo "    Fix: sudo apt update && sudo apt install -y python3-pip"
+        _chk WARN "python3-pip not found (optional, needed for rocker)" "Fix: sudo apt update && sudo apt install -y python3-pip"
     fi
 
     echo ""
@@ -1061,87 +1043,47 @@ preflight() {
     if cmd_exists docker; then
         echo "${OK} docker found: $(command -v docker)"
         if docker_as_user_ok; then
-            echo "${OK} docker daemon reachable (user)"
+            _chk OK "docker daemon reachable (user)"
         elif docker_as_sudo_ok; then
-            echo "${WARN} docker daemon reachable only via sudo (recommended: add user to docker group)"
+            _chk WARN "docker daemon reachable only via sudo (recommended: add user to docker group)"
         else
-            echo "${FAIL} docker daemon not reachable (is docker running? permissions?)"
-            failed=1
+            _chk FAIL "docker daemon not reachable (is docker running? permissions?)"
         fi
-
-        if docker_compose_run_no_prompt version >/dev/null 2>&1; then
-            echo "${OK} docker compose plugin available"
-        else
-            echo "${FAIL} docker compose plugin not available (install docker-compose-plugin)"
-            failed=1
-        fi
-
-        if in_group docker; then
-            echo "${OK} user is in docker group"
-        else
-            echo "${WARN} user is NOT in docker group (recommended)"
-            echo "    Fix: sudo usermod -aG docker \"$USER\" && newgrp docker"
-        fi
+        docker_compose_run_no_prompt version >/dev/null 2>&1 &&
+            _chk OK "docker compose plugin available" ||
+            _chk FAIL "docker compose plugin not available (install docker-compose-plugin)"
+        in_group docker &&
+            _chk OK "user is in docker group" ||
+            _chk WARN "user is NOT in docker group (recommended)" "Fix: sudo usermod -aG docker \"$USER\" && newgrp docker"
     else
-        echo "${FAIL} docker not found"
-        echo "    Next: ./setup.bash bootstrap"
-        failed=1
+        _chk FAIL "docker not found" "Next: ./setup.bash bootstrap"
     fi
 
     echo ""
     echo "=== Repo ==="
-    if [ -f docker-compose.yml ]; then
-        echo "${OK} docker-compose.yml exists"
-    else
-        echo "${FAIL} docker-compose.yml missing (run from repo root)"
-        failed=1
-    fi
-    if [ -f .env ]; then
-        echo "${OK} .env exists"
-    else
-        echo "${INFO} .env not found (optional)"
-        echo "    Tip: ./setup.bash env   (or: cp .env.example .env)"
-    fi
-    if [ -x ./docker_build.sh ]; then
-        echo "${OK} ./docker_build.sh is executable"
-    else
-        echo "${WARN} ./docker_build.sh not executable"
-        echo "    Fix: chmod +x ./docker_build.sh"
-    fi
-    if cmd_exists git && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        echo "${OK} git repository detected"
-    else
-        echo "${INFO} git repository not detected (optional)"
-        echo "    Tip: clone repository first, then run ./setup.bash doctor"
-    fi
+    [ -f docker-compose.yml ] && _chk OK "docker-compose.yml exists" || _chk FAIL "docker-compose.yml missing (run from repo root)"
+    [ -f .env ] && _chk OK ".env exists" || _chk INFO ".env not found (optional)" "Tip: ./setup.bash env   (or: cp .env.example .env)"
+    [ -x ./docker_build.sh ] && _chk OK "./docker_build.sh is executable" || _chk WARN "./docker_build.sh not executable" "Fix: chmod +x ./docker_build.sh"
+    cmd_exists git && git rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+        _chk OK "git repository detected" ||
+        _chk INFO "git repository not detected (optional)" "Tip: clone repository first, then run ./setup.bash doctor"
     if cmd_exists docker; then
-        if docker_run_no_prompt image inspect aichallenge-2025-dev >/dev/null 2>&1; then
-            echo "${OK} image exists: aichallenge-2025-dev"
-        else
-            echo "${INFO} image missing: aichallenge-2025-dev"
-            echo "    Next: ./docker_build.sh dev"
-        fi
-        if docker_run_no_prompt image inspect ghcr.io/automotiveaichallenge/autoware-universe:humble-latest >/dev/null 2>&1; then
-            echo "${OK} base image exists: ghcr.io/automotiveaichallenge/autoware-universe:humble-latest"
-        else
-            echo "${INFO} base image not found (will be pulled during build)"
-            echo "    Tip: ./setup.bash pull image"
-        fi
+        docker_run_no_prompt image inspect aichallenge-2025-dev >/dev/null 2>&1 &&
+            _chk OK "image exists: aichallenge-2025-dev" ||
+            _chk INFO "image missing: aichallenge-2025-dev" "Next: ./docker_build.sh dev"
+        docker_run_no_prompt image inspect ghcr.io/automotiveaichallenge/autoware-universe:humble-latest >/dev/null 2>&1 &&
+            _chk OK "base image exists: ghcr.io/automotiveaichallenge/autoware-universe:humble-latest" ||
+            _chk INFO "base image not found (will be pulled during build)" "Tip: ./setup.bash pull image"
     fi
 
     echo ""
     echo "=== AWSIM asset ==="
     local awsim_bin="./aichallenge/simulator/AWSIM/AWSIM.x86_64"
     if [ -f "$awsim_bin" ]; then
-        if [ -x "$awsim_bin" ]; then
-            echo "${OK} AWSIM binary exists and is executable: ${awsim_bin}"
-        else
-            echo "${WARN} AWSIM binary exists but is NOT executable: ${awsim_bin}"
-            echo "    Fix: chmod +x ${awsim_bin}"
-        fi
+        [ -x "$awsim_bin" ] && _chk OK "AWSIM binary: ${awsim_bin}" ||
+            _chk WARN "AWSIM binary NOT executable: ${awsim_bin}" "Fix: chmod +x ${awsim_bin}"
     else
-        echo "${WARN} AWSIM binary not found: ${awsim_bin}"
-        echo "    Next: ./setup.bash download awsim"
+        _chk WARN "AWSIM binary not found: ${awsim_bin}" "Next: ./setup.bash download awsim"
     fi
 
     echo ""
@@ -1152,15 +1094,6 @@ preflight() {
         echo "    https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
     else
         echo "${INFO} nvidia-smi not found (CPU-only is OK)"
-    fi
-
-    return "$failed"
-}
-
-doctor() {
-    local rc=0
-    if ! preflight; then
-        rc=1
     fi
 
     echo ""
@@ -1174,7 +1107,7 @@ doctor() {
     echo "${INFO} 7) Start dev:          make dev DOMAIN_ID=1"
     echo "${INFO} 8) Dev shell:          docker compose run --rm -it --entrypoint bash autoware"
 
-    return "$rc"
+    return "$failed"
 }
 
 main() {
@@ -1209,9 +1142,6 @@ main() {
             test_branch="$(select_branch_from_remote "${repo_url}" "main")"
         fi
         bootstrap --branch "${test_branch}" --temp-dir "$@"
-        ;;
-    preflight)
-        preflight
         ;;
     doctor)
         doctor

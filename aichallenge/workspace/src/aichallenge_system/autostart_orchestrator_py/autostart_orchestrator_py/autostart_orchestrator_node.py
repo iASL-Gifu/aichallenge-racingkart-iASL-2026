@@ -29,6 +29,7 @@ class AutostartOrchestrator(Node):
     _STATE_REQUEST_CONTROL_MODE = "REQUEST_CONTROL_MODE"
     _STATE_IDLE = "IDLE"
     _STATE_WAIT_START = "WAIT_START"
+    _STATE_RUNNING = "RUNNING"
     _STATE_RECORDING = "RECORDING"
     _STATE_WAIT_STOP = "WAIT_STOP"
     _STATE_AUTO_STOP_DISABLED = "AUTO_STOP_DISABLED"
@@ -42,6 +43,7 @@ class AutostartOrchestrator(Node):
         _STATE_REQUEST_CONTROL_MODE,
         _STATE_IDLE,
         _STATE_WAIT_START,
+        _STATE_RUNNING,
         _STATE_RECORDING,
         _STATE_WAIT_STOP,
         _STATE_AUTO_STOP_DISABLED,
@@ -893,8 +895,19 @@ class AutostartOrchestrator(Node):
             self._do_start_initialization(call_initial_pose, request_control_mode)
 
             if not (enable_capture or enable_rosbag):
-                self._set_workflow_state(self._STATE_IDLE, "capture and rosbag are both disabled")
-                self.get_logger().info("capture/rosbag are disabled; orchestrator is idle")
+                self._set_workflow_state(self._STATE_RUNNING, "running without recording")
+                self.get_logger().info("capture/rosbag are disabled; running without recording")
+
+                if stop_on:
+                    ok, last = self._wait_for_vehicle_state(stop_on)
+                    if ok:
+                        self._set_workflow_state(self._STATE_FINISHED, "stop condition met (no recording)")
+                        if exit_on_finish:
+                            self._shutdown()
+                    else:
+                        self._set_workflow_state(self._STATE_ERROR, f"failed waiting stop: expected={stop_on} last={last}")
+                        self._set_exit_code(3)
+                        self._shutdown()
                 return
 
             self._set_workflow_state(self._STATE_RECORDING, "start condition met")
