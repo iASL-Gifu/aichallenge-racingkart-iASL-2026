@@ -535,7 +535,8 @@ bootstrap_repo_targets() {
 }
 
 bootstrap() {
-    local repo_url_default="https://github.com/AutomotiveAIChallenge/aichallenge-racingkart.git"
+    #local repo_url_default="https://github.com/AutomotiveAIChallenge/aichallenge-racingkart.git"
+    local repo_url_default="https://github.com/iASL-Gifu/aichallenge-racingkart-iASL-2026.git"
     local repo_url="${AIC_REPO_URL:-$repo_url_default}"
     local repo_url_explicit=0
     if [ -n "${AIC_REPO_URL-}" ]; then
@@ -546,7 +547,8 @@ bootstrap() {
     if [ -n "${AIC_BRANCH-}" ]; then
         branch_explicit=1
     fi
-    local dest_dir="${AIC_DIR:-$HOME/aichallenge-racingkart}"
+    #local dest_dir="${AIC_DIR:-$HOME/aichallenge-racingkart}"
+    local dest_dir="${AIC_DIR:-$HOME/aichallenge-racingkart-iASL-2026}"
     local skip_pull_image=0
     local skip_awsim=0
     local skip_build=0
@@ -608,9 +610,11 @@ Usage:
   ./setup.bash bootstrap [options]
 
 Options:
-  --repo URL            Repo URL (default: https://github.com/AutomotiveAIChallenge/aichallenge-racingkart.git)
+  #--repo URL            Repo URL (default: https://github.com/AutomotiveAIChallenge/aichallenge-racingkart.git)
+  --repo URL            Repo URL (default: https://github.com/iASL-Gifu/aichallenge-racingkart-iASL-2026.git)
   --branch NAME         Git branch (default: main)
-  --dir PATH            Clone destination (default: ~/aichallenge-racingkart)
+  #--dir PATH            Clone destination (default: ~/aichallenge-racingkart)
+  --dir PATH            Clone destination (default: ~/aichallenge-racingkart-iASL-2026)
   --temp-dir            Use a temporary directory for --dir (kept by default)
   --keep-dir            Keep --temp-dir directory (default)
   --skip-pull-image     Skip pulling Autoware base image
@@ -643,7 +647,8 @@ EOF
     if [ "${use_temp_dir}" -eq 1 ]; then
         # Keep temp dirs by default so users can inspect logs/workspace after bootstrap.
         keep_dir=1
-        dest_dir="$(mktemp -d /tmp/aichallenge-racingkart-test.XXXXXX)"
+        dest_dir="$(mktemp -d /tmp/aichallenge-racingkart-iASL-2026-test.XXXXXX)"
+        #dest_dir="$(mktemp -d /tmp/aichallenge-racingkart-test.XXXXXX)"
         SETUP_TEST_DIR="${dest_dir}"
         SETUP_TEST_KEEP_DIR="${keep_dir}"
         trap cleanup_test_dir EXIT
@@ -1153,7 +1158,8 @@ main() {
             shift
         else
             # Interactive selection from remote branches.
-            local repo_url_default="https://github.com/AutomotiveAIChallenge/aichallenge-racingkart.git"
+            #local repo_url_default="https://github.com/AutomotiveAIChallenge/aichallenge-racingkart.git"
+            local repo_url_default="https://github.com/iASL-Gifu/aichallenge-racingkart-iASL-2026.git"
             local repo_url="${AIC_REPO_URL:-$repo_url_default}"
             test_branch="$(select_branch_from_remote "${repo_url}" "main")"
         fi
