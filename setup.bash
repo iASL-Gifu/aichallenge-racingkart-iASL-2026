@@ -253,7 +253,8 @@ usage() {
     cat <<'EOF'
 Usage:
   ./setup.bash                # run doctor (environment check + next steps)
-  curl -fsSL https://raw.githubusercontent.com/AutomotiveAIChallenge/aichallenge-racingkart/main/setup.bash | bash
+  #curl -fsSL https://raw.githubusercontent.com/AutomotiveAIChallenge/aichallenge-racingkart/main/setup.bash | bash
+  https://github.com/iASL-Gifu/aichallenge-racingkart-iASL-2026/blob/main/setup.bash
                             # bootstrap a fresh Ubuntu host (installs Docker if missing)
   ./setup.bash doctor         # environment check + next steps summary
   ./setup.bash bootstrap      # install Docker if missing + clone repo + run setup (for fresh PCs)
