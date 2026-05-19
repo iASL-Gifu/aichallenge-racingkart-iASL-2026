@@ -13,7 +13,7 @@
   <arg name="pointcloud_map_file" default="pointcloud_map.pcd" description="pointcloud map file name"/>
 
   <!-- Vehicle -->
-  <arg name="launch_vehicle_interface" default="false"/>
+  <arg name="launch_vehicle_interface" default="$(eval &quot;'$(var simulation)' == 'false'&quot;)"/>
   <log message="echo launch param use_sim_time: $(var use_sim_time) launch_vehicle_interface: $(var launch_vehicle_interface) sensor_model: $(var sensor_model)"/>
 
   <!-- Control method -->

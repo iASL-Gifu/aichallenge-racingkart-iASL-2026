@@ -199,15 +199,13 @@ class AutostartOrchestrator(Node):
                 except queue.Full:
                     pass
         else:
-            # フォールバック: Qt 未起動時は従来ログとして可視化
-            state_text_lines = []
-            for item in self._WORKFLOW_STATES:
-                if item == state:
-                    state_token = f"{self._ANSI_BOLD}{self._ANSI_BLUE}[{item}]{self._ANSI_RESET}"
-                else:
-                    state_token = item
-                state_text_lines.append(state_token)
-
+            # フォールバック: Qt 未起動時はワンライナーログ。
+            # 旧実装は WORKFLOW_STATES を全件改行してから " | detail=…" を続けて
+            # 出力していたため、最終要素 "ERROR" が details と同じ行に流れ込み
+            # ros2 launch ログ上で `... ERROR | vehicle=…` と error 風に見えていた。
+            # 状態は active 1 件 + 残りを括弧書きでまとめた 1 行に圧縮する。
+            highlighted = f"{self._ANSI_BOLD}{self._ANSI_BLUE}[{state}]{self._ANSI_RESET}"
+            others = ",".join(item for item in self._WORKFLOW_STATES if item != state)
             detail_fragments = [
                 f"vehicle={self._vehicle_label}",
                 f"vehicle_topic={self._vehicle_state_topic}",
@@ -217,7 +215,9 @@ class AutostartOrchestrator(Node):
             ]
             if detail:
                 detail_fragments.append(f"detail={detail}")
-            self.get_logger().info("workflow:\n" + "\n".join(state_text_lines) + " | " + ", ".join(detail_fragments))
+            self.get_logger().info(
+                f"workflow {highlighted} ({others}) | " + ", ".join(detail_fragments)
+            )
 
     def _start_debug_visualization(self) -> None:
         self._debug_panel_stop_event = threading.Event()

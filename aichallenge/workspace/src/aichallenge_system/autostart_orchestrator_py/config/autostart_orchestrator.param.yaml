@@ -12,7 +12,7 @@
     capture_service: /debug/service/capture_screen
     enable_debug_visualization: true
     rosbag_topics:
-      - /awsim/control_cmd
+      - /control/command/control_cmd
       - /clock
       - /localization/acceleration
       - /localization/kinematic_state

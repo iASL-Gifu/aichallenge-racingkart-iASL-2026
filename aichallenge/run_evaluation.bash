@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-domain_id="${ROS_DOMAIN_ID:-${DOMAIN_ID:-1}}"
+domain_id="${ROS_DOMAIN_ID:-1}"
 ts="$(date +%Y%m%d-%H%M%S)"
 out_dir="/output/${ts}/d${domain_id}"
 

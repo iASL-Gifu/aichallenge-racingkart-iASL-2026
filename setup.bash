@@ -209,24 +209,6 @@ confirm_step() {
     done
 }
 
-run_step() {
-    local label="$1"
-    shift
-    if confirm_step "${label}"; then
-        local had_errexit=0
-        case $- in *e*) had_errexit=1 ;; esac
-        set +e
-        "$@"
-        local rc=$?
-        if [ "${had_errexit}" -eq 1 ]; then
-            set -e
-        fi
-        return "${rc}"
-    else
-        log "${INFO} Skipped: ${label}"
-    fi
-}
-
 run_step_if() {
     local enabled="${1:-0}"
     local label="${2-}"
@@ -262,6 +244,9 @@ Usage:
   ./setup.bash pull image     # docker pull Autoware base image (recommended)
   ./setup.bash download awsim # download & extract AWSIM.zip (repo-local)
   ./setup.bash env            # create .env from .env.example (safe, repo-local)
+  ./setup.bash network-if [name]
+                            # add network interface to cyclonedds.xml
+  ./setup.bash network-if   # remove all ai-challenge-added interfaces from cyclonedds.xml
   ./setup.bash bootstrap --yes
                             # non-interactive bootstrap (auto-yes)
   ./setup.bash bootstrap --temp-dir [--keep-dir]
@@ -475,62 +460,21 @@ clone_or_update_repo() {
 
 bootstrap_repo_targets() {
     local repo_dir="$1"
-    local domain_id="${2:-1}"
-    local do_make_autoware_build="${3:-0}"
-    local do_make_dev="${4:-0}"
+    local do_make_autoware_build="${2:-0}"
+    local do_make_dev="${3:-0}"
 
     require_cmd make || return 1
 
-    local use_sudo=0
-    if ! docker_as_user_ok && cmd_exists sudo && cmd_exists docker; then
-        use_sudo=1
-        sudo_refresh
-    fi
-
-    if [ "$use_sudo" -eq 1 ]; then
-        warn "${WARN} docker daemon not reachable as user yet; using sudo docker for post-setup steps"
+    if ! docker_as_user_ok; then
+        warn "${WARN} docker not reachable as user (not installed, daemon down, or docker group not applied yet — re-login may help); make targets will likely fail."
     fi
 
     if [ "${do_make_autoware_build}" = "1" ]; then
-        if [ "$use_sudo" -eq 1 ]; then
-            (cd "${repo_dir}" && make autoware-build) || {
-                warn "${FAIL} make autoware-build failed"
-                return 0
-            }
-        else
-            (cd "${repo_dir}" && make autoware-build) || {
-                warn "${FAIL} make autoware-build failed"
-                return 0
-            }
-        fi
-
-        {
-            local build_cid=""
-            build_cid="$(
-                cd "${repo_dir}" 2>/dev/null || exit 0
-                docker_compose_run ps -q --all autoware-build 2>/dev/null || true
-            )"
-            if [ -n "${build_cid}" ]; then
-                docker_run logs -f "${build_cid}" || true
-                local build_rc=""
-                build_rc="$(docker_run wait "${build_cid}" 2>/dev/null || true)"
-                if [ -n "${build_rc}" ] && [ "${build_rc}" -ne 0 ]; then
-                    warn "${FAIL} autoware-build failed (exit=${build_rc})"
-                else
-                    log "${OK} autoware-build finished"
-                fi
-            else
-                warn "${WARN} Could not resolve autoware-build container id (skip wait/log follow)"
-            fi
-        }
+        (cd "${repo_dir}" && make autoware-build) || warn "${FAIL} make autoware-build failed"
     fi
 
     if [ "${do_make_dev}" = "1" ]; then
-        if [ "$use_sudo" -eq 1 ]; then
-            (cd "${repo_dir}" && make dev DOMAIN_ID="${domain_id}") || warn "${WARN} make dev failed"
-        else
-            (cd "${repo_dir}" && make dev DOMAIN_ID="${domain_id}") || warn "${WARN} make dev failed"
-        fi
+        (cd "${repo_dir}" && make dev) || warn "${WARN} make dev failed"
     fi
 }
 
@@ -636,9 +580,9 @@ EOF
         esac
     done
 
-    if [ "${repo_url_explicit}" -ne 1 ] && cmd_exists git && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ "${repo_url_explicit}" -ne 1 ] && [ -n "${REPO_ROOT}" ] && cmd_exists git; then
         local origin_url=""
-        origin_url="$(git remote get-url origin 2>/dev/null || true)"
+        origin_url="$(git -C "${REPO_ROOT}" remote get-url origin 2>/dev/null || true)"
         if [ -n "${origin_url}" ]; then
             repo_url="${origin_url}"
         fi
@@ -700,7 +644,7 @@ EOF
     log_step "Download AWSIM.zip and extract $(_skip_note "$skip_awsim" "--skip-awsim")"
     log_step "Build dev image: ./docker_build.sh dev $(_skip_note "$skip_build" "--skip-build")"
     log_step "make autoware-build $(_skip_note "$skip_make" "--skip-make")"
-    log_step "make dev DOMAIN_ID=${DOMAIN_ID:-1} $(_skip_note "$skip_make" "--skip-make")"
+    log_step "make dev (ROS_DOMAIN_ID from .env) $(_skip_note "$skip_make" "--skip-make")"
 
     confirm_step "Install base packages (apt)" && do_install_base=1 || true
     confirm_step "Install Docker (if missing)" && do_install_docker=1 || true
@@ -718,7 +662,7 @@ EOF
         [ "$skip_build" -ne 1 ] && confirm_step "Build dev image: ./docker_build.sh dev" && do_build_dev_image=1 || true
         if [ "$skip_make" -ne 1 ]; then
             confirm_step "Run make autoware-build (this can take a while)" && do_make_autoware_build=1 || true
-            confirm_step "Run make dev DOMAIN_ID=${DOMAIN_ID:-1}" && do_make_dev=1 || true
+            confirm_step "Run make dev (ROS_DOMAIN_ID from .env)" && do_make_dev=1 || true
         fi
     else
         log "${INFO} Repo steps skipped (repo not selected / not present)"
@@ -787,7 +731,7 @@ EOF
     fi
 
     if [ "$skip_make" -ne 1 ]; then
-        bootstrap_repo_targets "${dest_dir}" "${DOMAIN_ID:-1}" "${do_make_autoware_build}" "${do_make_dev}" || true
+        bootstrap_repo_targets "${dest_dir}" "${do_make_autoware_build}" "${do_make_dev}" || true
     fi
 
     cat <<EOF
@@ -799,7 +743,7 @@ Repo dir:
 
 Common commands:
   make autoware-build
-  make dev DOMAIN_ID=1
+  make dev        # ROS_DOMAIN_ID is read from .env
   make down_all   # stop/remove all docker containers (sudo)
 EOF
 }
@@ -853,10 +797,9 @@ EOF
 }
 
 download_awsim() {
-    local default_url='https://tier4inc-my.sharepoint.com/:u:/g/personal/taiki_tanaka_tier4_jp/IQAtXfOtrp1LQZxghshalXVhAQ3JYJLyyZaJsOH-npFDoUY?e=lztz8K'
+    local default_url='https://tier4inc-my.sharepoint.com/:u:/g/personal/taiki_tanaka_tier4_jp/IQAnnhyB2tOzTL8AioXUmVtqAS3Js7Ep3cEKuACFESTMimc'
     local url="${AWSIM_ZIP_URL:-$default_url}"
 
-    local force=0
     local keep_zip=0
 
     while [ $# -gt 0 ]; do
@@ -866,7 +809,6 @@ download_awsim() {
             shift 2
             ;;
         --force)
-            force=1
             shift
             ;;
         --keep-zip)
@@ -876,7 +818,7 @@ download_awsim() {
         -h | --help)
             cat <<'EOF'
 Usage:
-  ./setup.bash download awsim [--url URL] [--force] [--keep-zip]
+  ./setup.bash download awsim [--url URL] [--keep-zip]
 
 Environment:
   AWSIM_ZIP_URL  Override the default AWSIM.zip share link.
@@ -897,16 +839,11 @@ EOF
     }
 
     local dest_dir="./aichallenge/simulator"
-    local awsim_bin="${dest_dir}/AWSIM/AWSIM.x86_64"
+    local awsim_dir="${dest_dir}/AWSIM"
+    local awsim_bin="${awsim_dir}/AWSIM.x86_64"
     local zip_path="${dest_dir}/AWSIM.zip"
 
     mkdir -p "$dest_dir"
-
-    if [ -x "$awsim_bin" ] && [ "$force" -ne 1 ]; then
-        log "${OK} AWSIM already present: ${awsim_bin}"
-        log "${INFO} Re-download: ./setup.bash download awsim --force"
-        return 0
-    fi
 
     log "${INFO} Downloading AWSIM.zip..."
     log "${INFO} URL: ${url}"
@@ -950,6 +887,15 @@ if not zipfile.is_zipfile(p):
     print(f"[setup][WARN] Downloaded file is not a zip: {p}", file=sys.stderr)
     sys.exit(2)
 PY
+
+    if [ -e "$awsim_dir" ]; then
+        local backup_n=1
+        while [ -e "${awsim_dir}_${backup_n}" ]; do
+            backup_n=$((backup_n + 1))
+        done
+        log "${INFO} Backing up existing AWSIM to ${awsim_dir}_${backup_n}"
+        mv "$awsim_dir" "${awsim_dir}_${backup_n}"
+    fi
 
     log "${INFO} Extracting AWSIM.zip to ${dest_dir}..."
     ZIP_PATH="$zip_path" DEST_DIR="$dest_dir" python3 - <<'PY'
@@ -1125,10 +1071,97 @@ doctor() {
     echo "${INFO} 4) Build image:        ./docker_build.sh dev"
     echo "${INFO} 5) Build Autoware:     make autoware-build && docker compose logs -f autoware-build"
     echo "${INFO} 6) Run evaluation:     ./run_evaluation.bash  (optional: ROSBAG=true CAPTURE=true)"
-    echo "${INFO} 7) Start dev:          make dev DOMAIN_ID=1"
+    echo "${INFO} 7) Start dev:          make dev   (ROS_DOMAIN_ID is read from .env)"
     echo "${INFO} 8) Dev shell:          docker compose run --rm -it --entrypoint bash autoware"
 
     return "$failed"
+}
+
+_network_if_edit_file() {
+    local file="$1"
+    local iface="$2"
+
+    if [ ! -f "${file}" ]; then
+        log "${INFO} Skipped (not found): ${file}"
+        return 0
+    fi
+
+    local use_sudo=0
+    if [ ! -w "${file}" ]; then
+        if cmd_exists sudo; then
+            use_sudo=1
+        else
+            warn "${WARN} Write permission denied and sudo not available, skipping: ${file}"
+            return 0
+        fi
+    fi
+
+    if ! confirm_step "Overwrite ${file}?"; then
+        log "${INFO} Skipped: ${file}"
+        return 0
+    fi
+
+    local sed_cmd="sed"
+    [ "${use_sudo}" -eq 1 ] && sed_cmd="sudo sed"
+
+    if [ -n "${iface}" ]; then
+        if grep -qF "name=\"${iface}\"" "${file}"; then
+            log "${INFO} '${iface}' already exists in ${file}"
+            return 0
+        fi
+        if ! ${sed_cmd} -i "/<\/Interfaces>/i\\        <NetworkInterface autodetermine=\"false\" name=\"${iface}\" priority=\"default\" multicast=\"default\" /> <!-- added by ai-challenge -->" "${file}"; then
+            warn "${FAIL} Failed to edit (permission denied?): ${file}"
+            return 0
+        fi
+        log "${OK} Added '${iface}' to ${file}"
+    else
+        if ! ${sed_cmd} -i '/<!-- added by ai-challenge -->/d' "${file}"; then
+            warn "${FAIL} Failed to edit (permission denied?): ${file}"
+            return 0
+        fi
+        log "${OK} Removed ai-challenge entries from ${file}"
+    fi
+}
+
+add_network_interface() {
+    local iface="${1-}"
+
+    if [ -n "${iface}" ]; then
+        if ! [[ ${iface} =~ ^[A-Za-z0-9._-]+$ ]]; then
+            warn "${FAIL} Invalid interface name: ${iface}"
+            return 1
+        fi
+        if cmd_exists ip && ! ip link show "${iface}" >/dev/null 2>&1; then
+            warn "${WARN} Interface '${iface}' not found on this host (Autoware may fail to start)"
+        fi
+    fi
+
+    local xml_vehicle="${REPO_ROOT:-.}/vehicle/cyclonedds.xml"
+
+    local uri_file=""
+    if [ -n "${CYCLONEDDS_URI-}" ]; then
+        case "${CYCLONEDDS_URI}" in
+        file://*)
+            uri_file="${CYCLONEDDS_URI#file://}"
+            ;;
+        *)
+            log "${INFO} CYCLONEDDS_URI is set but not a file:// URI, skipping: ${CYCLONEDDS_URI}"
+            ;;
+        esac
+    fi
+
+    _network_if_edit_file "${xml_vehicle}" "${iface}"
+
+    if [ -n "${uri_file}" ]; then
+        local v_real u_real
+        v_real="$(realpath "${xml_vehicle}" 2>/dev/null || echo "${xml_vehicle}")"
+        u_real="$(realpath "${uri_file}" 2>/dev/null || echo "${uri_file}")"
+        if [ "${v_real}" = "${u_real}" ]; then
+            log "${INFO} Skipped (same file as vehicle/cyclonedds.xml): ${uri_file}"
+        else
+            _network_if_edit_file "${uri_file}" "${iface}"
+        fi
+    fi
 }
 
 main() {
@@ -1174,6 +1207,10 @@ main() {
         ;;
     env)
         ensure_env
+        ;;
+    network-if)
+        shift
+        add_network_interface "$@"
         ;;
     download)
         case "${2-}" in
