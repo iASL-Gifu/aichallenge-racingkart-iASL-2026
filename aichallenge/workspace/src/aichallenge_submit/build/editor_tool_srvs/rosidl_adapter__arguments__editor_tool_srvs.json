@@ -1,0 +1,8 @@
+{
+  "package_name": "editor_tool_srvs",
+  "non_idl_tuples": [
+    "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/aichallenge-trajectory-editor/editor_tool_srvs:srv/LoadCsv.srv",
+    "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/aichallenge-trajectory-editor/editor_tool_srvs:srv/SelectRange.srv",
+    "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/aichallenge-trajectory-editor/editor_tool_srvs:srv/SaveCsv.srv"
+  ]
+}

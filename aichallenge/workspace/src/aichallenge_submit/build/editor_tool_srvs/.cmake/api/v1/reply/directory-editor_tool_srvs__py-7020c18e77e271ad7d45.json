@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "editor_tool_srvs__py",
+		"source" : "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/editor_tool_srvs/editor_tool_srvs__py"
+	}
+}

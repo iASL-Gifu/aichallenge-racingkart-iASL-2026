@@ -18,7 +18,7 @@ from multi_purpose_mpc_ros.tools.reference_path_generator import ReferencePathGe
 
 
 class ReferencePathVisualizer(Node):
-    WP_SPHERE_ENABLED: bool = False
+    WP_SPHERE_ENABLED: bool = True
     LENGTH_TEXT_ENABLED: bool = False
 
     def __init__(self, config_path: str) -> None:
@@ -92,11 +92,12 @@ class ReferencePathVisualizer(Node):
                 p.z = 0.
                 spheres.points.append(p) #type: ignore
 
-                text_i = copy.deepcopy(text_base)
-                text_i.ns = f"ref_path_length_{i}"
-                text_i.pose.position = p
-                text_i.text = f"{i}_{length_cum[i]:.2f}"
-                ref_path_marker_array.markers.append(text_i) # type: ignore
+                if i % 10 == 0:
+                    text_i = copy.deepcopy(text_base)
+                    text_i.ns = f"ref_path_length_{i}"
+                    text_i.pose.position = p
+                    text_i.text = f"{i}"
+                    ref_path_marker_array.markers.append(text_i) # type: ignore
 
             ref_path_marker_array.markers.append(spheres) # type: ignore
 

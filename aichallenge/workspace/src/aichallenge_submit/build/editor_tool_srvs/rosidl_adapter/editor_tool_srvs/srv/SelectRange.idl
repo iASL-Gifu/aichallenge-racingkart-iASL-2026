@@ -1,0 +1,15 @@
+// generated from rosidl_adapter/resource/srv.idl.em
+// with input from editor_tool_srvs/srv/SelectRange.srv
+// generated code does not contain a copyright notice
+
+
+module editor_tool_srvs {
+  module srv {
+    struct SelectRange_Request {
+      double velocity;
+    };
+    struct SelectRange_Response {
+      boolean success;
+    };
+  };
+};

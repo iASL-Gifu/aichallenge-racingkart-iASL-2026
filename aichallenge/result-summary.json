@@ -1,0 +1,26 @@
+{
+    "schema_version": "v2",
+    "session": {
+        "required_laps": 6,
+        "timeout": 600.0,
+        "total_vehicles": 1
+    },
+    "vehicles": [
+        {
+            "vehicle_number": 1,
+            "vehicle_name": "GoKart1",
+            "final_position": 1,
+            "finished": false,
+            "lap_count": 0,
+            "laps": [],
+            "min_lap_time": 0.0,
+            "max_lap_time": 0.0,
+            "avg_lap_time": 0.0,
+            "total_lap_time": 0.0
+        }
+    ],
+    "laps": [],
+    "min_time": 0.0,
+    "total_lap_time": 0.0,
+    "num_laps": 0
+}

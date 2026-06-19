@@ -1,0 +1,1 @@
+ament_cmake_symlink_install_targets("TARGET_FILES" "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/laserscan_generator/laserscan_generator_node" "TARGETS" "laserscan_generator_node" "DESTINATION" "lib/laserscan_generator")

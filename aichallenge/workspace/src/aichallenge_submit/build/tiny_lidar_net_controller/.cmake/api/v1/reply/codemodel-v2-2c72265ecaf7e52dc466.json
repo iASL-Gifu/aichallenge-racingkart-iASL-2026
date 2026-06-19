@@ -1,0 +1,88 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-710ac3b6118f086e3420.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3
+					]
+				}
+			],
+			"name" : "",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "tiny_lidar_net_controller",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "ament_cmake_python_build_tiny_lidar_net_controller_egg::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ament_cmake_python_build_tiny_lidar_net_controller_egg-3eda63bc2759e1acac0c.json",
+					"name" : "ament_cmake_python_build_tiny_lidar_net_controller_egg",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ament_cmake_python_symlink_tiny_lidar_net_controller::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ament_cmake_python_symlink_tiny_lidar_net_controller-3d19e20ba92ddd666cd6.json",
+					"name" : "ament_cmake_python_symlink_tiny_lidar_net_controller",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "tiny_lidar_net_controller_uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-tiny_lidar_net_controller_uninstall-a507b7fe0bd30202909d.json",
+					"name" : "tiny_lidar_net_controller_uninstall",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-uninstall-907cad4f0228499f01dc.json",
+					"name" : "uninstall",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/tiny_lidar_net_controller",
+		"source" : "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/tiny_lidar_net_controller"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

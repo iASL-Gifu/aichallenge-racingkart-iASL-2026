@@ -132,6 +132,15 @@
     </group>
   </group>
 
+   <node pkg="editor_tool_server" exec="interactive_server" output="screen" name="editor_tool_server">
+   <param name="csv_file_path" value="/aichallenge/aichallenge-trajectory-editor/csv/35_07092101.csv"/>
+   <param name="publish_on_initialize" value="false"/>
+   <param name="wait_seconds" value="15.0"/>
+   <param name="grad_min_speed" value="0.0"/>
+   <param name="grad_mid_speed" value="15.0"/>
+   <param name="grad_max_speed" value="40.0"/>
+ </node>
+
   <!-- Control -->
   <group if="$(eval &quot;'$(var control_method)' == 'pure_pursuit'&quot;)">
     <include file="$(find-pkg-share aichallenge_submit_launch)/launch/control/pure_pursuit.launch.xml">

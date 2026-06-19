@@ -1,0 +1,22 @@
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from multi_purpose_mpc_ros_msgs/msg/BorderCells.msg
+// generated code does not contain a copyright notice
+
+
+module multi_purpose_mpc_ros_msgs {
+  module msg {
+    struct BorderCells {
+      sequence<float> static_upper_bounds;
+
+      sequence<float> static_lower_bounds;
+
+      sequence<float> dynamic_upper_bounds;
+
+      sequence<float> dynamic_lower_bounds;
+
+      int32 rows;
+
+      int32 cols;
+    };
+  };
+};

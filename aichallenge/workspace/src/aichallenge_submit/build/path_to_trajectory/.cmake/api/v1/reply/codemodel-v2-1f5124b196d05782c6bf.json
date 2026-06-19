@@ -1,0 +1,79 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-18604e5376dae1454011.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "path_to_trajectory",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "path_to_trajectory_node::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-path_to_trajectory_node-439bada0af03bd3cd551.json",
+					"name" : "path_to_trajectory_node",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "path_to_trajectory_uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-path_to_trajectory_uninstall-efb3ccaa57e8c2e4c614.json",
+					"name" : "path_to_trajectory_uninstall",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-uninstall-5ec17129b69308d347da.json",
+					"name" : "uninstall",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/path_to_trajectory",
+		"source" : "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/path_to_trajectory"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

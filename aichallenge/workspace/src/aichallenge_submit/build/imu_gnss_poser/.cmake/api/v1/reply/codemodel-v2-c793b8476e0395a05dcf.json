@@ -1,0 +1,79 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-9e33209d27693e531c8c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "imu_gnss_poser",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "imu_gnss_poser_node::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-imu_gnss_poser_node-799ef39b1fee8a7bcfc8.json",
+					"name" : "imu_gnss_poser_node",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "imu_gnss_poser_uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-imu_gnss_poser_uninstall-cbbc706158c9a9c299d6.json",
+					"name" : "imu_gnss_poser_uninstall",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-uninstall-c2f5b079e33ffad23d80.json",
+					"name" : "uninstall",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/imu_gnss_poser",
+		"source" : "/home/haruki/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/imu_gnss_poser"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

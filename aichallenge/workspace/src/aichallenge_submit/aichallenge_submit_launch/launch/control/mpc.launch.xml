@@ -12,4 +12,10 @@
     <param name="use_obstacle_avoidance" value="$(var use_obstacle_avoidance)"/>
     <param name="use_stats" value="false"/>
   </node>
+
+  <node pkg="multi_purpose_mpc_ros" exec="run_reference_path_visualizer.bash"
+        name="ref_path_visualizer" output="screen"
+        args="--config_path $(find-pkg-share multi_purpose_mpc_ros)/config/config.yaml">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
 </launch>
