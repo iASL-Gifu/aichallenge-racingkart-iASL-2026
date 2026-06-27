@@ -13,7 +13,7 @@ res = info["resolution"]
 img = np.array(Image.open("final_ver3/occupancy_grid_map.pgm"))
 
 traj = np.loadtxt(
-    "final_ver4/traj_mincurv.csv",
+    "env/min_curv/traj_race_cl_mpc.csv",
     delimiter=",",
     skiprows=1
 )

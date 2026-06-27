@@ -373,7 +373,7 @@ class MPCController(Node):
                 cfg_model.width,
                 1.0 / self._cfg.mpc.control_rate) # type: ignore
 
-        def create_mpc(car: BicycleModel) -> Tuple[MPCConfig, MPC]:
+        def create_mpc(car: BicycleModel,N) -> Tuple[MPCConfig, MPC]:
             cfg_mpc = self._cfg.mpc # type: ignore
 
             mpc_cfg = MPCConfig(
@@ -407,7 +407,7 @@ class MPCController(Node):
 
             mpc = MPC(
                 car,
-                mpc_cfg.N,
+                N,
                 mpc_cfg.Q,
                 mpc_cfg.R,
                 mpc_cfg.QN,
@@ -419,6 +419,7 @@ class MPCController(Node):
                 self.USE_OBSTACLE_AVOIDANCE,
                 self._cfg.reference_path.use_path_constraints_topic,
                 mpc_cfg.use_max_kappa_pred)
+
 
             return mpc_cfg, mpc
 
@@ -434,10 +435,22 @@ class MPCController(Node):
             return ReferenceVelocityConfigulator(self, self._config_path, self._ref_vel_config_path)
 
         self._map = create_map()
-        self._reference_path = create_ref_path(self._map)
-        self._car = create_car(self._reference_path)
-        self._mpc_cfg, self._mpc = create_mpc(self._car)
-        compute_speed_profile(self._car, self._mpc_cfg)
+
+        self._reference_pathN = create_ref_path(self._map)
+        self._reference_path10 = create_ref_path(self._map)
+
+        self._carN = create_car(self._reference_pathN)
+        self._car10 = create_car(self._reference_path10)
+
+        self._mpc_cfg, self._mpcN = create_mpc(self._carN,self._cfg.mpc.N)
+        _, self._mpc10 = create_mpc(self._car10, 10)
+        
+        self._car = self._carN
+        self._reference_path = self._reference_pathN
+        self._mpc = self._mpcN
+        
+        compute_speed_profile(self._carN, self._mpc_cfg)
+        compute_speed_profile(self._car10, self._mpc_cfg)
 
         self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = create_ref_vel_configulator()
 
@@ -803,9 +816,30 @@ class MPCController(Node):
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
+        self._car.get_current_waypoint()
+        wp = self._car.wp_id
+        if 205 <= wp <= 245:
+            self._mpc = self._mpc10
+            self._car = self._car10
+            self._reference_path = self._reference_path10
+            #print("using mpc10")
+        else:
+            self._mpc = self._mpcN
+            self._car = self._carN
+            self._reference_path = self._reference_pathN
+
+        pose = odom_to_pose_2d(self._odom)
+
+        self._mpc.previous_steering = self._last_u[1]
+
+        self._car.update_states(pose.x, pose.y, pose.theta)
+        self._car.get_current_waypoint()
+        wp = self._car.wp_id
+        
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
-            # self.get_logger().info(f"u: {u}")
+            #u[0] = 12.5 
+            #self.get_logger().info(f"u: {u}")
 
         if self._ref_vel_configulator is not None:
             ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
@@ -825,6 +859,7 @@ class MPCController(Node):
                 decel_v = last_v_cmd + self._mpc_cfg.a_min * dt
                 u[0] = np.clip(decel_v, 0.0, self._mpc_cfg.v_max)
 
+        #u[0] = 12.5         
         if len(u) == 0:
             self.get_logger().error("No control signal", throttle_duration_sec=1)
             u = [0.0, 0.0]
@@ -851,7 +886,7 @@ class MPCController(Node):
                 self._pred_marker_color = CYAN
         else:
             acc =  self.KP * (u[0] - v)
-            # print(f"v: {v}, u[0]: {u[0]}, acc: {acc}")
+            #print(f"v: {v}, u[0]: {u[0]}, acc: {acc}")
             acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
         # u[0] = np.clip(last_u[0] + acc * dt, 0.0, self._mpc_cfg.v_max)
 

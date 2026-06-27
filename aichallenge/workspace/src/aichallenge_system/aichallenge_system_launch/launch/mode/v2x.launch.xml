@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<launch>
-  <!-- V2X -->
-  <!-- V2XVehiclePositionArray -> MarkerArray for RViz.
-       AWSIM publishes /v2x/vehicle_positions natively per vehicle domain
-       via MultiDomainV2XVehiclePositionFanout, so no domain bridge or
-       per-vehicle gnss_poser is needed here. -->
-  <node pkg="aichallenge_system_launch" exec="v2x_marker_publisher.py" name="v2x_marker_publisher" output="screen"/>
-</launch>

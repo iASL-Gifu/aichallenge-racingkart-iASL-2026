@@ -116,7 +116,7 @@ def test_velocity_above_safety_cap_is_zeroed():
 def test_two_vehicles_tracked_independently():
     tracker = V2XVehicleTracker(v_max_safety=30.0, position_jump_threshold=20.0)
     tracker.update(_msg(0.0, [("d2", 0.0, 0.0), ("d3", 10.0, 10.0)]))
-    tracker.update(_msg(0.5, [("d2", 5.0, 0.0), ("d3", 10.0, 12.5)]))
+    tracker.update(_msg(0.5, [("d2", 5.0, 0.0), ("d3", 10.0, 11.1)]))
 
     assert tracker.velocity("d2") == pytest.approx((10.0, 0.0))
     assert tracker.velocity("d3") == pytest.approx((0.0, 5.0))

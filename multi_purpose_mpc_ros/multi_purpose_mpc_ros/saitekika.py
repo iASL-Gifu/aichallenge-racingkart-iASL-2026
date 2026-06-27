@@ -303,7 +303,10 @@ class MPC:
         else:
             #PはQ,R,QNが変わらないなら固定なので更新しない
             #qは参照(v_refとkappa_ref)によって毎回変わる
-            self.optimizer.update(q=q, l=l, u=u)
+            #self.optimizer.update(q=q, l=l, u=u)
+            # デバッグ用
+            #self.optimizer = osqp.OSQP()
+            #self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=True, verbose=False)
 
     def get_control(self) -> Tuple[np.ndarray, float]:
         """
