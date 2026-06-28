@@ -443,7 +443,7 @@ class MPCController(Node):
         self._car10 = create_car(self._reference_path10)
 
         self._mpc_cfg, self._mpcN = create_mpc(self._carN,self._cfg.mpc.N)
-        _, self._mpc10 = create_mpc(self._car10, 10)
+        _, self._mpc10 = create_mpc(self._car10, 9)
         
         self._car = self._carN
         self._reference_path = self._reference_pathN
@@ -459,10 +459,13 @@ class MPCController(Node):
 
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
+            #固定障害物(地図や事前に定義する)
             self._static_obstacles: List[Obstacle] = create_obstacles()
+            #動的障害物(V2Xなど他車両)
             self._dynamic_obstacles: List[Obstacle] = []
             self._obstacles_updated = bool(self._static_obstacles)
             v2x_cfg = self._cfg.v2x_obstacle_avoidance  # type: ignore
+            #V2Xの位置追跡からtrackingを行うモジュール(id管理、位置のスムージング、ジャンプ除去、速度推定)
             self._v2x_tracker = V2XVehicleTracker(
                 v_max_safety=float(v2x_cfg.v_max_safety),
                 position_jump_threshold=float(v2x_cfg.position_jump_threshold),
@@ -615,15 +618,21 @@ class MPCController(Node):
             predictions, self._v2x_vehicle_radius)
         self._obstacles_updated = True
 
+    #　経路付近の障害物だけをMPCに渡す関数
+    # 一番近いWaypointとの距離をみて近ければ採用
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
         if not obstacles or self._waypoint_xy.size == 0:
             return obstacles
-        thr_sq = self._v2x_corridor_threshold_sq
-        wps = self._waypoint_xy
+        thr_sq = self._v2x_corridor_threshold_sq# 判定距離は2乗で取得している
+        # 車両位置から最も近い40個の点を採用(追い越されるときに経路を譲るのを見越して後ろの点も考慮)
+        wp = self._car.wp_id
+        N = len(self._waypoint_xy)
+        indices = [(wp + i) % N for i in range(-40, 41)]
+        wps = self._waypoint_xy[indices]
         kept: List[Obstacle] = []
         for ob in obstacles:
             dxy = wps - np.array([ob.cx, ob.cy], dtype=np.float64)
-            if np.min(np.einsum('ij,ij->i', dxy, dxy)) <= thr_sq:
+            if np.min(np.einsum('ij,ij->i', dxy, dxy)) <= thr_sq: #もしもあるWaypointとの距離がthr_sq以下なら
                 kept.append(ob)
         return kept
 
@@ -772,11 +781,11 @@ class MPCController(Node):
         self._last_t = now
         self._loop += 1
 
-        # record and print execution stats
+        # MPCの実行時間計測
         if self.use_stats:
             self._stats.record()
 
-        # self.get_logger().info("loop")
+        # 制御周期を維持
         self._control_rate.sleep()
 
         if self._loop % 100 == 0:
@@ -796,29 +805,32 @@ class MPCController(Node):
                 sys.exit(1)
             # plot_reference_path(self._car)
 
+        #メイン更新処理
         if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
             self._obstacles_updated = False
-            self._map.reset_map()
-            filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
-            self._map.add_obstacles(self._static_obstacles + filtered_dynamic)
-            self._reference_path.reset_dynamic_constraints()
+            self._map.reset_map() #毎周期障害物を消して作り直している
+            filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles) #動的障害物フィルタリング.遠い車は消す
+            self._map.add_obstacles(self._static_obstacles + filtered_dynamic) #障害物をマップに追加
+            self._reference_path.reset_dynamic_constraints() #動的制約をリセット
 
-        is_colliding = False
+        #可視化用衝突判定
+        is_colliding = False 
         if self._last_colliding_time is not None:
             elapsed_from_last_colliding = (now - self._last_colliding_time).nanoseconds / 1e9
             if elapsed_from_last_colliding < 5.0:
                 is_colliding = True
-
+        
+        #オドメトリ(x,y,yaw,v)取得
         pose = odom_to_pose_2d(self._odom) # type: ignore
         v = self._odom.twist.twist.linear.x
 
+        #車両モデル更新
         self._car.update_states(pose.x, pose.y, pose.theta)
-        # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
-        # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
+        #MPCの切り替え処理
         self._car.get_current_waypoint()
         wp = self._car.wp_id
-        if 205 <= wp <= 245:
+        if 215 <= wp <= 245:
             self._mpc = self._mpc10
             self._car = self._car10
             self._reference_path = self._reference_path10
@@ -829,13 +841,13 @@ class MPCController(Node):
             self._reference_path = self._reference_pathN
 
         pose = odom_to_pose_2d(self._odom)
-
         self._mpc.previous_steering = self._last_u[1]
 
         self._car.update_states(pose.x, pose.y, pose.theta)
         self._car.get_current_waypoint()
         wp = self._car.wp_id
         
+        # MPCの実行
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
             #u[0] = 12.5 
@@ -850,7 +862,7 @@ class MPCController(Node):
             v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
             self._reference_path.set_v_ref(v_ref)
 
-        # override by brake command if control is disabled
+        # 停止命令がコマンドで入力させたら減速させる
         if not self._enable_control:
             last_v_cmd = self._last_u[0]
             if last_v_cmd < 0.5:
@@ -867,6 +879,9 @@ class MPCController(Node):
 
         acc = 0.
         bug_acc_enabled = False
+
+
+        #boostモードがONのとき
         if self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
@@ -886,11 +901,9 @@ class MPCController(Node):
                 self._pred_marker_color = CYAN
         else:
             acc =  self.KP * (u[0] - v)
-            #print(f"v: {v}, u[0]: {u[0]}, acc: {acc}")
             acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
-        # u[0] = np.clip(last_u[0] + acc * dt, 0.0, self._mpc_cfg.v_max)
 
-        # apply low pass filter to control signal
+        # 加速度と操舵角の平滑化
         acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
         u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
 

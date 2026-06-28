@@ -63,7 +63,7 @@ def intersect_normal_with_polyline(P, n, polyline):
 ##################################
 # Centerlineを等間隔にリサンプル
 ##################################
-def resample_polyline_with_width(points, widths, ds=0.5):
+def resample_polyline_with_width(points, widths, ds=0.02):
 
     d = np.sqrt(np.sum(np.diff(points, axis=0)**2, axis=1))
     s = np.insert(np.cumsum(d), 0, 0)

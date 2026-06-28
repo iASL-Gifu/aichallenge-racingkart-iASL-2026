@@ -27,7 +27,9 @@ reference_path:
 
   resolution: 0.6
   smoothing_distance: 2
-  max_width: 6.0
+  #(ref_max_width / 2.0 + self._v2x_vehicle_radius + 0.5) ** 2
+  #今だとthresholdが4.0だから各waypointから4.0m以内にある障害物だけをMPCに渡す
+  max_width: 6.0 
   circular: true
   use_path_constraints_topic: false
   use_border_cells_topic: false
@@ -49,7 +51,7 @@ mpc:
   a_max: 5.0 # m/s^2
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 2.50 # rad/s max_steering_rate
-  control_rate: 60.0 # Hz Ts=1/control_rate
+  control_rate: 70.0 # Hz Ts=1/control_rate
   steering_tire_angle_gain_var: 1.639
   # steering_tire_angle_gain_var: 1.0
   # accel_low_pass_gain: 0.1

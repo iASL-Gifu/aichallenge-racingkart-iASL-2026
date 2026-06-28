@@ -93,6 +93,10 @@ def has_collision_in_line(map, p0, p1):
     p1m = map.w2m(p1[0], p1[1])
     x_list, y_list, _ = line_aa(p0m[0], p0m[1], p1m[0], p1m[1])
 
+    print("p0m", p0m)
+    print("p1m", p1m)
+    print("num cells", len(x_list))
+
     occupied_indices = map.data[y_list, x_list] == 0
     if np.any(occupied_indices):
         return True
@@ -119,7 +123,7 @@ class Waypoint:
         self.y = y
         self.psi = psi
         self.kappa = kappa
-
+        
         # Reference velocity at this waypoint according to speed profile
         self.v_ref = None
 
@@ -158,6 +162,7 @@ class BorderCells:
         self.dynamic_upper_bounds = []
         self.dynamic_lower_bounds = []
 
+
 class ReferencePath:
     def __init__(self, map, wp_x, wp_y, resolution, smoothing_distance,
                  max_width, circular):
@@ -178,6 +183,8 @@ class ReferencePath:
 
         self.org_wp_x = wp_x
         self.org_wp_y = wp_y
+
+        self.debug_counter = 0
 
         # Precision
         self.eps = 1e-12
@@ -224,9 +231,9 @@ class ReferencePath:
 
     def reset_dynamic_constraints(self):
         for wp in self.waypoints:
-            wp.dynamic_border_cells = copy.deepcopy(wp.static_border_cells)
-            wp.ub_sm = copy.deepcopy(wp.ub)
-            wp.lb_sm = copy.deepcopy(wp.lb)
+            wp.dynamic_border_cells = wp.static_border_cells
+            wp.ub_sm = wp.ub
+            wp.lb_sm = wp.lb
 
     def set_v_ref(self, v_ref: List[float]) -> None:
         for wp, v in zip(self.waypoints, v_ref):
@@ -389,10 +396,11 @@ class ReferencePath:
             # represent center-line of the path
             # Set border cells of waypoint
             wp.static_border_cells = (width_info[1], width_info[3])   # (left_border_cell(x,y), right_border_cell(x,y))
-
+        
         self.reset_dynamic_constraints()
 
     def _get_min_width(self, wp_x_w, wp_y_w, wp_x, wp_y, t_x, t_y, max_width):
+        
         """
         Compute the minimum distance between the current waypoint and the
         orthogonal cell on the border of the path
@@ -407,8 +415,9 @@ class ReferencePath:
         """
 
         min_width = max_width
-        path_x = np.array([])
-        path_y = np.array([])
+        min_cell = self.map.m2w(t_x, t_y)
+        
+        found_any = False
 
         # Search around the target cell for obstacles
         for i in range(-1, 2):
@@ -419,29 +428,37 @@ class ReferencePath:
 
                 # Get the line from the waypoint to the target cell
                 x_list, y_list, _ = line_aa(wp_x, wp_y, t_xi, t_yj)
-                # Check for occupied cells (obstacles)
-                occupied_indices = self.map.data[y_list, x_list] == 0
-
-                if np.any(occupied_indices):
-                    # If there are obstacles, find the nearest one
-                    obstacle_index = np.argmax(occupied_indices)
-                    obstacle_x = x_list[obstacle_index]
-                    obstacle_y = y_list[obstacle_index]
-                    min_cell = self.map.m2w(obstacle_x, obstacle_y)
-                    min_width = np.hypot(wp_x_w - min_cell[0], wp_y_w - min_cell[1])
-                    return min_width, min_cell
+                
+                if len(x_list) == 0:
+                    continue
+                    
+                values = self.map.data[y_list, x_list]
+                
+                # Find first free cell
+                free_indices = np.where(values == 1)[0]
+                if len(free_indices) == 0:
+                    # No free space along this line
+                    width = 0.0
+                    cell = self.map.m2w(wp_x, wp_y)
                 else:
-                    # If no obstacles are found, add free space coordinates
-                    x_list = ma.masked_array(x_list, mask=occupied_indices).compressed()
-                    y_list = ma.masked_array(y_list, mask=occupied_indices).compressed()
-                    path_x = np.append(path_x, x_list)
-                    path_y = np.append(path_y, y_list)
-
-        # If no obstacles are detected, calculate the distance to the farthest free cell
-        if path_x.size > 0 and path_y.size > 0:
-            min_index = np.argmin(np.hypot(path_x - t_x, path_y - t_y))
-            min_cell = self.map.m2w(path_x[min_index], path_y[min_index])
-            min_width = np.hypot(wp_x_w - min_cell[0], wp_y_w - min_cell[1])
+                    first_free_idx = free_indices[0]
+                    # Find first occupied cell after the free cell
+                    occ_indices = np.where(values[first_free_idx:] == 0)[0]
+                    if len(occ_indices) == 0:
+                        # No obstacles after entering free space, bounds are open up to max_width
+                        width = max_width
+                        cell = self.map.m2w(t_xi, t_yj)
+                    else:
+                        boundary_idx = first_free_idx + occ_indices[0]
+                        obstacle_x = x_list[boundary_idx]
+                        obstacle_y = y_list[boundary_idx]
+                        cell = self.map.m2w(obstacle_x, obstacle_y)
+                        width = np.hypot(wp_x_w - cell[0], wp_y_w - cell[1])
+                
+                if not found_any or width < min_width:
+                    min_width = width
+                    min_cell = cell
+                    found_any = True
 
         return min_width, min_cell
 
@@ -686,7 +703,7 @@ class ReferencePath:
 
         # cache to avoid multiple access to self.map.data
         map_data = self.map.data
-
+       
         # Iterate over path from left border to right border
         for x, y in zip(x_list[1:], y_list[1:]):
             cell_value = map_data[y, x]
@@ -821,6 +838,11 @@ class ReferencePath:
         border_cells_hor = []
         border_cells_hor_sm = []
 
+        for n in range(N):
+            wp = self.get_waypoint(wp_id + n)
+            wp.ub_sm = wp.ub
+            wp.lb_sm = wp.lb
+
         def compute_bound(wp, ls):
             # Check sign of bound
             angle = np.mod(np.arctan2(ls[1] - wp.y, ls[0] - wp.x)
@@ -834,6 +856,16 @@ class ReferencePath:
             return bound
 
         def add_constraint(wp, ub_ls, lb_ls):
+            '''
+            print("----------------")
+            print(wp_id)
+            print("before")
+            print("wp.ub", wp.ub)
+            print("wp.lb", wp.lb)
+            print("wp.ub_sm", wp.ub_sm)
+            print("wp.lb_sm", wp.lb_sm)
+            '''
+
             # Compute upper and lower bound of largest drivable area
             ub = compute_bound(wp, ub_ls)
             lb = compute_bound(wp, lb_ls)
@@ -862,6 +894,7 @@ class ReferencePath:
               lb_sm = wp.lb_sm
 
             # Check feasibility of the path after subtracting safety margin
+            #print(f"ub_sm: {ub_sm}, lb_sm: {lb_sm}")
             if ub_sm < lb_sm:
                 # 一つ前のifの判定でboundsは正常になっているはずなので、こちらの判定に入る場合は何らかの実装上の異常がある
                 print("!!!! Infeasible path detected !!!!")
@@ -899,6 +932,14 @@ class ReferencePath:
             wp.ub_sm = ub_sm
             wp.lb_sm = lb_sm
 
+            '''
+            print("computed")
+            print(ub)
+            print(lb)
+            print(ub_sm)
+            print(lb_sm)
+            '''
+
         self.rect_points = []
         self.upper_cols = []
         self.lower_cols = []
@@ -919,7 +960,7 @@ class ReferencePath:
             free_segments_hor.append(free_segments)
             self.free_segs.extend(free_segments)
 
-        # Iterate over horizon
+        # Iterate oNo feasiver horizon
         n = 0
         while n < N:
 
@@ -1002,13 +1043,26 @@ class ReferencePath:
             # Set waypoint coordinates as bound cells if no feasible
             # segment available
             else:
+                '''
                 print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}")
+
+                print("----------------")
+                print(wp_id)
+                print("wp", wp.x, wp.y)
+                print("psi", wp.psi)
+                '''
+
                 ub_ls, lb_ls = (wp.x, wp.y), (wp.x, wp.y)
 
-                # left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
-                #                  2 * math.pi) - math.pi
-                # right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
-                #                    2 * math.pi) - math.pi
+                ''' 
+                print(f"ub_ls={ub_ls}",flush=True)
+                print(f"lb_ls={lb_ls}",flush=True)
+                print(f"width={np.linalg.norm(np.array(ub_ls)-np.array(lb_ls))}",flush=True)
+                '''
+                left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
+                                  2 * math.pi) - math.pi
+                right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
+                                    2 * math.pi) - math.pi
 
                 # ub_ls = (wp.x + min_width * np.cos(left_angle),
                 #          wp.y + min_width * np.sin(left_angle))
