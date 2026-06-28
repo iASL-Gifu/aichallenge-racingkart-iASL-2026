@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import yaml
+import math
 from typing import List, Tuple, Optional, NamedTuple
 import dataclasses
 from scipy import sparse
@@ -534,6 +535,10 @@ class MPCController(Node):
         self._ref_path_pub_dummy = self.create_publisher(
             MarkerArray, "/planning/scenario_planning/lane_driving/behavior_planning/behavior_path_planner/debug/bound", latching_qos)
 
+        # 3車線境界・追い越しゾーン可視化
+        self._lane_marker_pub = self.create_publisher(
+            MarkerArray, "/mpc/lane_bounds", latching_qos)
+
         # Subscribers
         self._odom_sub = self.create_subscription(
             Odometry, "/localization/kinematic_state", self._odom_callback, 1)
@@ -726,6 +731,77 @@ class MPCController(Node):
         self._mpc_pred_pub.publish(pred_marker_array)
         self._mpc_pred_pub_dummy.publish(pred_marker_array)
 
+    def _publish_lane_markers(self, ref_path: ReferencePath, n_lanes: int = 3) -> None:
+        """
+        3車線の境界線と追い越しゾーンをMarkerArrayとしてRvizに描画
+        追い越し許可ゾーン → L0=赤, L1=黄, L2=緑
+        追い越し不可ゾーン → グレー 
+        """
+        import math
+        markers = MarkerArray()
+
+        N = ref_path.n_waypoints
+        has_overtake = hasattr(ref_path, 'overtake_zone')
+
+        # -- 車線境界ごとにLINE_STRIPマーカーを作成 (n_lanes+1 本) --
+        # 各マーカーは全Waypointを縦断し、境界位置の世界座標点列を持つ
+        lane_colors = [
+            ColorRGBA(r=0.9, g=0.2, b=0.2, a=0.85),   # L0 内側  赤
+            ColorRGBA(r=0.9, g=0.8, b=0.1, a=0.85),   # L1 中央  黄
+            ColorRGBA(r=0.2, g=0.85, b=0.3, a=0.85),  # L2 外側  緑
+        ]
+        grey = ColorRGBA(r=0.5, g=0.5, b=0.5, a=0.3)
+
+        # 各車線を独立した LINE_STRIP マーカーとして描く
+        for lane_idx in range(n_lanes):
+            m = Marker()
+            m.header.frame_id = "map"
+            m.ns = f"lane_L{lane_idx}"
+            m.id = lane_idx
+            m.type = Marker.LINE_STRIP
+            m.action = Marker.ADD
+            # ターゲット車線（太く表示）か通常の車線かを判定して太さを決定
+            if hasattr(ref_path, 'target_lane_idx') and ref_path.target_lane_idx == lane_idx:
+                m.scale.x = 0.40   # ターゲット車線 [m]
+            else:
+                m.scale.x = 0.15   # 通常の車線 [m]
+            m.pose.orientation.w = 1.0
+
+            for wp_id in range(N):
+                wp = ref_path.get_waypoint(wp_id)
+                if wp.ub is None or wp.lb is None:
+                    continue
+
+                # このwaypointの車線境界を取得
+                lanes = ref_path.get_lane_bounds(wp_id, n_lanes)
+                if not lanes:
+                    continue
+
+                ub_l, lb_l = lanes[lane_idx]
+                # 車線中心の横オフセット [m] (正=左=ub方向)
+                center_offset = (ub_l + lb_l) / 2.0
+
+                # 世界座標へ変換 (ub方向 = pi/2 + psi)
+                angle_ub = math.fmod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                px = wp.x + center_offset * math.cos(angle_ub)
+                py = wp.y + center_offset * math.sin(angle_ub)
+
+                pt = Point()
+                pt.x = px
+                pt.y = py
+                pt.z = 0.05
+                m.points.append(pt)
+
+                # 追い越しゾーンの場合は車線ごとの色、それ以外はグレー
+                if has_overtake and ref_path.overtake_zone[wp_id]:
+                    m.colors.append(lane_colors[lane_idx])
+                else:
+                    m.colors.append(grey)
+
+            markers.markers.append(m)
+
+        self._lane_marker_pub.publish(markers)
+
     def _publish_ref_path_marker(self, ref_path: ReferencePath):
         WP_SPHERE_ENABLED = False
 
@@ -846,6 +922,80 @@ class MPCController(Node):
         self._car.update_states(pose.x, pose.y, pose.theta)
         self._car.get_current_waypoint()
         wp = self._car.wp_id
+
+        # --- Overtaking Lane Selection Logic ---
+        if not hasattr(self, '_target_lane_idx'):
+            self._target_lane_idx = None
+
+        opponents_info = []
+        if self.USE_OBSTACLE_AVOIDANCE and hasattr(self, '_v2x_tracker'):
+            for vid in self._v2x_tracker.active_vehicle_ids():
+                buf = self._v2x_tracker._samples.get(vid)
+                if buf:
+                    _, opp_x, opp_y = buf[-1]
+                    opp_wp_id = self._car.get_closest_waypoint(opp_x, opp_y)
+                    
+                    opp_wp = self._reference_path.get_waypoint(opp_wp_id)
+                    angle_ub = opp_wp.psi + math.pi / 2.0
+                    dx = opp_x - opp_wp.x
+                    dy = opp_y - opp_wp.y
+                    opp_offset = dx * math.cos(angle_ub) + dy * math.sin(angle_ub)
+                    
+                    opp_radius = self._v2x_vehicle_radius
+                    lanes = self._reference_path.get_lane_bounds(opp_wp_id, n_lanes=3)
+                    for lane_idx, (ub_l, lb_l) in enumerate(lanes):
+                        if max(lb_l, opp_offset - opp_radius) <= min(ub_l, opp_offset + opp_radius):
+                            opponents_info.append((opp_wp_id, lane_idx))
+
+        N_total = self._reference_path.n_waypoints
+        
+        opponent_ahead = None
+        opponent_lane = None
+        min_wp_diff = 99999
+        
+        for opp_wp_id, lane_idx in opponents_info:
+            wp_diff = (opp_wp_id - wp) % N_total
+            if 0 < wp_diff < 35:  # within ~21 meters
+                if wp_diff < min_wp_diff:
+                    min_wp_diff = wp_diff
+                    opponent_ahead = opp_wp_id
+                    opponent_lane = lane_idx
+
+        is_overtake_zone = False
+        if hasattr(self._reference_path, 'overtake_zone'):
+            is_overtake_zone = self._reference_path.overtake_zone[wp]
+
+        if opponent_ahead is not None and is_overtake_zone:
+            blocked_lanes = set()
+            for opp_wp_id, lane_idx in opponents_info:
+                wp_diff = (opp_wp_id - wp) % N_total
+                if 0 < wp_diff < 45:
+                    blocked_lanes.add(lane_idx)
+            
+            free_lanes = [l for l in [0, 1, 2] if l not in blocked_lanes]
+            self.get_logger().info(
+                f"[Overtake] Opponent ahead at wp {opponent_ahead} in lane {opponent_lane}. Blocked: {list(blocked_lanes)}, Free: {free_lanes}", 
+                throttle_duration_sec=1.0
+            )
+            
+            if free_lanes:
+                # If current target lane is blocked or not set, choose a free lane
+                if self._target_lane_idx is None or self._target_lane_idx in blocked_lanes:
+                    if 1 in free_lanes:
+                        self._target_lane_idx = 1
+                    elif 2 in free_lanes:
+                        self._target_lane_idx = 2
+                    else:
+                        self._target_lane_idx = 0
+            else:
+                self._target_lane_idx = None
+        else:
+            self._target_lane_idx = None
+
+        # Apply target lane
+        self._reference_path.target_lane_idx = self._target_lane_idx
+        self._reference_pathN.target_lane_idx = self._target_lane_idx
+        self._reference_path10.target_lane_idx = self._target_lane_idx
         
         # MPCの実行
         with self._stats.time_block("control"):
@@ -924,6 +1074,10 @@ class MPCController(Node):
         # 約 0.25 秒ごとに予測結果を表示
         if (self._mpc.current_prediction is not None) and (self._loop % (self._mpc_cfg.control_rate // 4) == 0):
             self._publish_mpc_pred_marker(self._mpc.current_prediction[0], self._mpc.current_prediction[1]) # type: ignore
+
+        # 約 1 秒ごとに車線境界を表示
+        if self._loop % int(self._mpc_cfg.control_rate) == 0:
+            self._publish_lane_markers(self._reference_path)
 
     def run(self) -> None:
         self._wait_until_clock_received()

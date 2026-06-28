@@ -92,10 +92,9 @@ def has_collision_in_line(map, p0, p1):
     p0m = map.w2m(p0[0], p0[1])
     p1m = map.w2m(p1[0], p1[1])
     x_list, y_list, _ = line_aa(p0m[0], p0m[1], p1m[0], p1m[1])
-
-    print("p0m", p0m)
-    print("p1m", p1m)
-    print("num cells", len(x_list))
+    #print("p0m", p0m)
+    #print("p1m", p1m)
+    #print("num cells", len(x_list))
 
     occupied_indices = map.data[y_list, x_list] == 0
     if np.any(occupied_indices):
@@ -216,6 +215,7 @@ class ReferencePath:
 
         self.path_constraints: Optional[List[np.ndarray]] = None
         self.border_cells = BorderCells()
+        self.target_lane_idx = None
 
         self.COUNT = 0
 
@@ -536,6 +536,9 @@ class ReferencePath:
         else:
             self.waypoints[-1].v_ref = 0.0
 
+        # 速度プロファイル確定後に追い越しゾーンを計算
+        self.compute_overtake_zones()
+
         return True
 
     def get_waypoint(self, wp_id):
@@ -555,6 +558,92 @@ class ReferencePath:
             # exit(1)
 
         return self.waypoints[wp_id]
+
+    # -----------------------------------------------------------------------
+    # Overtake zone & lane boundary utilities
+    # -----------------------------------------------------------------------
+
+    def compute_overtake_zones(
+        self,
+        lookahead: int = 10,
+        kappa_threshold: float = 0.15,
+    ) -> None:
+        """
+        各Waypointについて「前方 lookahead 個のWaypointの中に
+        |kappa| >= kappa_threshold のものが存在しない」場合を
+        追い越し許可ゾーン (overtake_zone=True) とする。
+
+        条件B: 前方にシャープなコーナーがなければ、緩いカーブ中でも追い越し可。
+
+        結果は self.overtake_zone: List[bool] に格納される。
+        パラメータはいつでも再計算で変更可能。
+        """
+        N = self.n_waypoints
+        kappas = np.array([wp.kappa for wp in self.waypoints])
+        ak = np.abs(kappas)
+
+        overtake = []
+        for i in range(N):
+            # 前方 lookahead 個のインデックス（循環対応）
+            ahead_idx = [(i + k) % N for k in range(1, lookahead + 1)]
+            max_ahead_kappa = ak[ahead_idx].max()
+            overtake.append(bool(max_ahead_kappa < kappa_threshold))
+
+        self.overtake_zone: list = overtake
+
+        n_allow = sum(overtake)
+        print(
+            f"[overtake_zone] kappa_thr={kappa_threshold:.3f} lookahead={lookahead}"
+            f"  allowed_wps={n_allow}/{N}",
+            flush=True,
+        )
+
+    def get_lane_bounds(self, wp_id: int, n_lanes: int = 3, max_offset: float = 2.5, lane_width: float = 2.2) -> list:
+        """
+        Waypointの走行可能幅をn_lanes等分して
+        各車線の (ub_lane, lb_lane) を内側→外側の順で返す。
+
+        - L0 (最もlb寄り)
+        - L1 (中央)
+        - L2 (最もub寄り)
+        n_lanes: 分割数
+        max_offset: 基準経路からの最大許容横オフセット [m] (芝生等への侵入を防ぐ)
+        lane_width: ソルバーの実行可能性を保つための各車線の最小保証幅 [m]
+        """
+        wp = self.get_waypoint(wp_id)
+
+        if wp.ub is None or wp.lb is None:
+            return []
+
+        # アスファルト外（芝生など）への侵入を防ぐため、最大オフセットでクリップ
+        ub_clipped = min(wp.ub, max_offset)
+        lb_clipped = max(wp.lb, -max_offset)
+
+        total = ub_clipped - lb_clipped          # 制限後の全幅 [m]
+        
+        lanes = []
+        for i in range(n_lanes):
+            # 車線の中心位置
+            center = lb_clipped + (i + 0.5) * (total / n_lanes)
+            
+            # 中心から指定幅の半分ずつ広げる
+            lb_lane = center - lane_width / 2.0
+            ub_lane = center + lane_width / 2.0
+            
+            # 道路境界にクリップ
+            lb_lane = max(lb_lane, lb_clipped)
+            ub_lane = min(ub_lane, ub_clipped)
+            
+            # 幅が指定幅に満たない場合は壁から拡張して実行可能性を担保
+            if ub_lane - lb_lane < lane_width:
+                if lb_lane == lb_clipped:
+                    ub_lane = min(lb_clipped + lane_width, ub_clipped)
+                elif ub_lane == ub_clipped:
+                    lb_lane = max(ub_clipped - lane_width, lb_clipped)
+            
+            lanes.append((ub_lane, lb_lane))
+
+        return lanes
 
     def show(self, ax, display_drivable_area=True):
         """
@@ -674,22 +763,39 @@ class ReferencePath:
         #     obstacle.show(ax=ax)
 
 
-    def _compute_free_segments(self, wp, min_width):
+    def _compute_free_segments(self, wp, min_width, wp_idx=None):
         """
         Compute free path segments.
         :param wp: waypoint object
         :param min_width: minimum width of valid segment
+        :param wp_idx: index of current waypoint
         :return: segment candidates as list of tuples (ub_cell, lb_cell)
         """
 
         # Candidate segments
         free_segments = []
 
-        # Get waypoint's border cells in map coordinates
-        ub_p = self.map.w2m(wp.static_border_cells[0][0],
-                            wp.static_border_cells[0][1])
-        lb_p = self.map.w2m(wp.static_border_cells[1][0],
-                            wp.static_border_cells[1][1])
+        target_lane = getattr(self, 'target_lane_idx', None)
+
+        if target_lane is not None and wp_idx is not None:
+            # 特定の車線境界を使用する
+            lanes = self.get_lane_bounds(wp_idx, n_lanes=3)
+            if lanes and target_lane < len(lanes):
+                ub_lane, lb_lane = lanes[target_lane]
+                angle_ub = np.mod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                ub_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
+                lb_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
+                ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
+                lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
+            else:
+                ub_p = self.map.w2m(wp.static_border_cells[0][0], wp.static_border_cells[0][1])
+                lb_p = self.map.w2m(wp.static_border_cells[1][0], wp.static_border_cells[1][1])
+        else:
+            # Get waypoint's border cells in map coordinates
+            ub_p = self.map.w2m(wp.static_border_cells[0][0],
+                                wp.static_border_cells[0][1])
+            lb_p = self.map.w2m(wp.static_border_cells[1][0],
+                                wp.static_border_cells[1][1])
 
         # Compute path from left border cell to right border cell
         x_list, y_list, _ = line_aa(ub_p[0], ub_p[1], lb_p[0], lb_p[1])
@@ -932,14 +1038,6 @@ class ReferencePath:
             wp.ub_sm = ub_sm
             wp.lb_sm = lb_sm
 
-            '''
-            print("computed")
-            print(ub)
-            print(lb)
-            print(ub_sm)
-            print(lb_sm)
-            '''
-
         self.rect_points = []
         self.upper_cols = []
         self.lower_cols = []
@@ -956,7 +1054,7 @@ class ReferencePath:
         free_segments_hor = []
         for n in range(N):
             wp = self.get_waypoint(wp_id+n)
-            free_segments = self._compute_free_segments(wp, min_width)
+            free_segments = self._compute_free_segments(wp, min_width, wp_idx=(wp_id+n))
             free_segments_hor.append(free_segments)
             self.free_segs.extend(free_segments)
 
@@ -1043,9 +1141,8 @@ class ReferencePath:
             # Set waypoint coordinates as bound cells if no feasible
             # segment available
             else:
-                '''
                 print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}")
-
+                '''
                 print("----------------")
                 print(wp_id)
                 print("wp", wp.x, wp.y)

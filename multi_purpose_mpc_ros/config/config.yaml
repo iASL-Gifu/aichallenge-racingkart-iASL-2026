@@ -68,7 +68,7 @@ mpc:
 
   v_max: 40.0   # km/h
   ay_max: 14.0  # m/s^2, maximum lateral acceleration in curves
-  Q: [3000000.0, 70000000.0, 2000000.0]
+  Q: [3000000.0, 60000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##mak

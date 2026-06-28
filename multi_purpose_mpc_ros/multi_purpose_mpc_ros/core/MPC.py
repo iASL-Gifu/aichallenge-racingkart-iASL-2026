@@ -315,10 +315,8 @@ class MPC:
         t_constraints2 = time.perf_counter()
 
         # 全ての境界を結合
-        self.l = np.hstack([leq, lineq_basic, lineq_rate])
-        self.u = np.hstack([ueq, uineq_basic, uineq_rate])
-        self.xmin_dyn = xmin_dyn
-        self.xmax_dyn = xmax_dyn
+        l = np.hstack([leq, lineq_basic, lineq_rate])
+        u = np.hstack([ueq, uineq_basic, uineq_rate])
 
         # コスト行列
         P = self.P_base
@@ -335,7 +333,7 @@ class MPC:
         if not self.osqp_initialized:
             #self.optimizer = osqp.OSQP()
             self.A0 = A_full.copy()
-            self.optimizer.setup(P=P, q=q, A=A_full, l=self.l, u=self.u, warm_start=False, verbose=False)
+            self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=False, verbose=False)
             self.osqp_initialized = True
             #print("setup",A_full.nnz,flush=True)
             
@@ -348,9 +346,9 @@ class MPC:
             #print(np.max(np.abs(A_full.data - self.A_data_ref)),flush=True)
 
         
-            #self.optimizer.update(q=q, l=self.l, u=self.u)
+            #self.optimizer.update(q=q, l=l, u=u)
           
-            self.optimizer.update(q=q, l=self.l, u=self.u, Ax=A_full.data)
+            self.optimizer.update(q=q, l=l, u=u, Ax=A_full.data)
 
         t_update = time.perf_counter()
         self.startup +=(t_pref-t_start)
@@ -412,32 +410,26 @@ class MPC:
 
             dec = self.optimizer.solve()
             if self.debug_counter % 20 == 0:
-                print(dec.info.status, flush=True)
+                print(dec.info.status,flush=True)
             t2 = time.perf_counter()
+            
 
-            if dec.x is None or dec.info.status == 'primal infeasible':
-                # Try to relax safety margin to make the problem feasible
+            control_signals = np.array(dec.x[-N*nu:])
+            use_control_signals = control_signals[1::2]
+
+            if not np.all(use_control_signals):
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     self._init_problem(N, relaxed_safety_margin)
                     dec = self.optimizer.solve()
                     t2 = time.perf_counter()
-                    if dec.x is not None and dec.info.status != 'primal infeasible':
-                        if self.last_solved_wp_id != self.model.wp_id:
-                            print(f"Relaxed safety margin by {relaxed_safety_margin:.3f} ({5-i}/5) to solve the problem", flush=True)
-                        break
-                else:
-                    print(f"Relaxation failed completely! status={dec.info.status}", flush=True)
-                    print(f"  Final xmin_dyn[::self.nx] = {self.xmin_dyn[::self.nx][:10]}", flush=True)
-                    print(f"  Final xmax_dyn[::self.nx] = {self.xmax_dyn[::self.nx][:10]}", flush=True)
-                    violating_indices = np.where(self.l > self.u)[0]
-                    if len(violating_indices) > 0:
-                        print(f"  Violating indices (l > u): {violating_indices}", flush=True)
-                        print(f"  l[violating] = {self.l[violating_indices]}", flush=True)
-                        print(f"  u[violating] = {self.u[violating_indices]}", flush=True)
-                    raise TypeError("OSQP solver failed to find a solution")
+                    control_signals = np.array(dec.x[-N*nu:])
+                    use_control_signals = control_signals[1::2]
 
-            control_signals = np.array(dec.x[-N*nu:])
+                    if self.infeasibility_counter == 0 and np.all(use_control_signals):
+                        if self.last_solved_wp_id != self.model.wp_id:
+                            print(f"Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
+                        break
 
             # ステア角の計算と保存
             control_signals[1::2] = np.arctan(control_signals[1::2] * self.model.length)
@@ -467,12 +459,7 @@ class MPC:
             self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
 
-        except (TypeError, ValueError) as e:
-            import traceback
-            print(traceback.format_exc(), flush=True)
-            print(f"Exception caught in mpc solve: {type(e).__name__}: {e}", flush=True)
-            if 'dec' in locals() and hasattr(dec, 'x') and hasattr(dec, 'info'):
-                print(f"dec.x type: {type(dec.x)}, status: {dec.info.status}", flush=True)
+        except (TypeError, ValueError):
             id = nu * (self.infeasibility_counter + 1)
             if id + 2 < len(self.current_control):
                 u = np.array(self.current_control[id:id+2])
@@ -505,8 +492,7 @@ class MPC:
                 f"build={(t1-t0)*1000:.1f}ms "
                 f"solve={(t2-t1)*1000:.1f}ms "
                 f"total={total_ms:.1f}ms "
-                f"target={1000*self.model.Ts:.1f}ms "
-                f"wp_id={self.model.wp_id} x={self.model.temporal_state.x:.3f} y={self.model.temporal_state.y:.3f} e_y={self.model.spatial_state.e_y:.3f} inf_cnt={self.infeasibility_counter}",
+                f"target={1000*self.model.Ts:.1f}ms",
                 flush=True
             )
         
