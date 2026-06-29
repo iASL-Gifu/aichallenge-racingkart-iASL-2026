@@ -692,6 +692,14 @@ class ReferencePath:
         ub_arr = ub_arr - MARGIN
         lb_arr = lb_arr + MARGIN
 
+        # 最低幅の保証（自車の幅 2.0m に対して、最低でも 2.2m の全幅を確保）
+        center = (ub_arr + lb_arr) / 2.0
+        width = ub_arr - lb_arr
+        MIN_ROAD_WIDTH = 2.2
+        narrow_mask = width < MIN_ROAD_WIDTH
+        ub_arr[narrow_mask] = center[narrow_mask] + (MIN_ROAD_WIDTH / 2.0)
+        lb_arr[narrow_mask] = center[narrow_mask] - (MIN_ROAD_WIDTH / 2.0)
+
         # クリッピング (現実的な幅の保証)
         ub_arr = np.clip(ub_arr, 0.3, 8.0)
         lb_arr = np.clip(lb_arr, -8.0, -0.3)
@@ -706,10 +714,11 @@ class ReferencePath:
             self.waypoints[i].ub = float(ub_arr_s[i])
             self.waypoints[i].lb = float(lb_arr_s[i])
 
-    def get_lane_bounds(self, wp_id: int, n_lanes: int = 2, max_half_width: float = 3.8, lane_width: float = 2.5) -> list:
+    def get_lane_bounds(self, wp_id: int, n_lanes: int = 2, max_half_width: float = 3.8, lane_width: float = 1.7) -> list:
         """
         Waypointの走行可能幅を n_lanes 等分し、
         車線間に隙間（間隔）が生じないようにぴったりくっつけて返す。
+        ただし、各車線の幅が最低 lane_width を下回る場合は、実行可能性確保のために拡張する。
         """
         wp = self.get_waypoint(wp_id)
 
@@ -724,9 +733,20 @@ class ReferencePath:
         
         lanes = []
         for i in range(n_lanes):
-            # 車線を均等分割
+            # 基本は均等分割
             lb_lane = lb_clipped + i * (total / n_lanes)
             ub_lane = lb_clipped + (i + 1) * (total / n_lanes)
+            
+            # 幅が最低保証幅 lane_width に満たない場合は、実行可能性担保のために拡張
+            if ub_lane - lb_lane < lane_width:
+                if i == 0:
+                    ub_lane = min(lb_lane + lane_width, ub_clipped)
+                elif i == n_lanes - 1:
+                    lb_lane = max(ub_lane - lane_width, lb_clipped)
+                else:
+                    center = (ub_lane + lb_lane) / 2.0
+                    lb_lane = max(center - lane_width / 2.0, lb_clipped)
+                    ub_lane = min(center + lane_width / 2.0, ub_clipped)
             
             lanes.append((ub_lane, lb_lane))
 
@@ -866,7 +886,7 @@ class ReferencePath:
 
         if target_lane is not None and wp_idx is not None:
             # 特定の車線境界を使用する
-            lanes = self.get_lane_bounds(wp_idx, n_lanes=3)
+            lanes = self.get_lane_bounds(wp_idx)
             if lanes and target_lane < len(lanes):
                 ub_lane, lb_lane = lanes[target_lane]
                 angle_ub = np.mod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
@@ -894,10 +914,9 @@ class ReferencePath:
         # Assume occupied path
         free_cells = False
 
-        # cache to avoid multiple access to self.map.data
-        map_data = self.map.data
-       
         # Iterate over path from left border to right border
+        map_data = self.map.data
+        all_segments = []
         for x, y in zip(x_list[1:], y_list[1:]):
             cell_value = map_data[y, x]
             # If cell is free, update lower bound
@@ -912,17 +931,27 @@ class ReferencePath:
                 # Set lower bound to border cell of segment
                 lb_o = (x, y)
                 # Transform upper and lower bound cells to world coordinates
-                ub_o = self.map.m2w(ub_o[0], ub_o[1])
-                lb_o = self.map.m2w(lb_o[0], lb_o[1])
+                ub_w = self.map.m2w(ub_o[0], ub_o[1])
+                lb_w = self.map.m2w(lb_o[0], lb_o[1])
+                
+                segment_width_sq = (ub_w[0]-lb_w[0])**2 + (ub_w[1]-lb_w[1])**2
+                all_segments.append(((ub_w, lb_w), segment_width_sq))
+                
                 # If segment larger than threshold, add to candidates
-                if ((ub_o[0]-lb_o[0])**2 + (ub_o[1]-lb_o[1])**2) > min_width**2:
-                    free_segments.append((ub_o, lb_o))
+                if segment_width_sq > min_width**2:
+                    free_segments.append((ub_w, lb_w))
                 # Start new segment
                 ub_o = (x, y)
                 free_cells = False
             elif cell_value == 0 and not free_cells:
                 ub_o = (x, y)
                 lb_o = (x, y)
+
+        # もし min_width を満たすセグメントが1つも無い場合は、
+        # 見つかった全てのセグメントの中で最も幅が広いものをフォールバックとして採用する
+        if not free_segments and all_segments:
+            all_segments.sort(key=lambda s: s[1], reverse=True)
+            free_segments.append(all_segments[0][0])
 
         return free_segments
 
@@ -1225,33 +1254,20 @@ class ReferencePath:
                 add_constraint(wp, ub_ls, lb_ls)
                 n += 1  # increment waypoint index
 
-            # Set waypoint coordinates as bound cells if no feasible
-            # segment available
             else:
-                print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}")
-                '''
-                print("----------------")
-                print(wp_id)
-                print("wp", wp.x, wp.y)
-                print("psi", wp.psi)
-                '''
+                print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}. Forcing minimum width.", flush=True)
 
-                ub_ls, lb_ls = (wp.x, wp.y), (wp.x, wp.y)
-
-                ''' 
-                print(f"ub_ls={ub_ls}",flush=True)
-                print(f"lb_ls={lb_ls}",flush=True)
-                print(f"width={np.linalg.norm(np.array(ub_ls)-np.array(lb_ls))}",flush=True)
-                '''
                 left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
                                   2 * math.pi) - math.pi
                 right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
                                     2 * math.pi) - math.pi
 
-                # ub_ls = (wp.x + min_width * np.cos(left_angle),
-                #          wp.y + min_width * np.sin(left_angle))
-                # lb_ls = (wp.x + min_width * np.cos(right_angle),
-                #          wp.y + min_width * np.sin(right_angle))
+                # 左右に 0.8m ずつ強制拡張した境界を定義する（計 1.6m）
+                FORCE_HALF_WIDTH = 0.8
+                ub_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(left_angle),
+                         wp.y + FORCE_HALF_WIDTH * np.sin(left_angle))
+                lb_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(right_angle),
+                         wp.y + FORCE_HALF_WIDTH * np.sin(right_angle))
 
                 add_constraint(wp, ub_ls, lb_ls)
 

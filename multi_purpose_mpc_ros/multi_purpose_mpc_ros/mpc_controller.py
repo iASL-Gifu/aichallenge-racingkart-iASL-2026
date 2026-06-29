@@ -1025,7 +1025,12 @@ class MPCController(Node):
         if not hasattr(self, '_target_lane_idx'):
             self._target_lane_idx = None
 
-        opponents_info = []
+        N_total = self._reference_path.n_waypoints
+        opponent_ahead = None
+        opponent_offset = 0.0
+        opponent_center = 0.0
+        min_wp_diff = 99999
+
         if self.USE_OBSTACLE_AVOIDANCE and hasattr(self, '_v2x_tracker'):
             for vid in self._v2x_tracker.active_vehicle_ids():
                 buf = self._v2x_tracker._samples.get(vid)
@@ -1033,60 +1038,44 @@ class MPCController(Node):
                     _, opp_x, opp_y = buf[-1]
                     opp_wp_id = self._car.get_closest_waypoint(opp_x, opp_y)
                     
-                    opp_wp = self._reference_path.get_waypoint(opp_wp_id)
-                    angle_ub = opp_wp.psi + math.pi / 2.0
-                    dx = opp_x - opp_wp.x
-                    dy = opp_y - opp_wp.y
-                    opp_offset = dx * math.cos(angle_ub) + dy * math.sin(angle_ub)
-                    
-                    opp_radius = self._v2x_vehicle_radius
-                    lanes = self._reference_path.get_lane_bounds(opp_wp_id, n_lanes=3)
-                    for lane_idx, (ub_l, lb_l) in enumerate(lanes):
-                        if max(lb_l, opp_offset - opp_radius) <= min(ub_l, opp_offset + opp_radius):
-                            opponents_info.append((opp_wp_id, lane_idx))
-
-        N_total = self._reference_path.n_waypoints
-        
-        opponent_ahead = None
-        opponent_lane = None
-        min_wp_diff = 99999
-        
-        for opp_wp_id, lane_idx in opponents_info:
-            wp_diff = (opp_wp_id - wp) % N_total
-            if 0 < wp_diff < 35:  # within ~21 meters
-                if wp_diff < min_wp_diff:
-                    min_wp_diff = wp_diff
-                    opponent_ahead = opp_wp_id
-                    opponent_lane = lane_idx
+                    wp_diff = (opp_wp_id - wp) % N_total
+                    if 0 < wp_diff < 35:  # within ~21 meters
+                        if wp_diff < min_wp_diff:
+                            min_wp_diff = wp_diff
+                            opponent_ahead = opp_wp_id
+                            
+                            # 前方車両の横オフセットを算出
+                            opp_wp = self._reference_path.get_waypoint(opp_wp_id)
+                            angle_ub = opp_wp.psi + math.pi / 2.0
+                            dx = opp_x - opp_wp.x
+                            dy = opp_y - opp_wp.y
+                            opponent_offset = dx * math.cos(angle_ub) + dy * math.sin(angle_ub)
+                            
+                            # 2車線の中心線 (境界線) を算出
+                            opponent_center = (opp_wp.ub + opp_wp.lb) / 2.0
 
         is_overtake_zone = False
         if hasattr(self._reference_path, 'overtake_zone'):
             is_overtake_zone = self._reference_path.overtake_zone[wp]
 
         if opponent_ahead is not None and is_overtake_zone:
-            blocked_lanes = set()
-            for opp_wp_id, lane_idx in opponents_info:
-                wp_diff = (opp_wp_id - wp) % N_total
-                if 0 < wp_diff < 45:
-                    blocked_lanes.add(lane_idx)
-            
-            free_lanes = [l for l in [0, 1, 2] if l not in blocked_lanes]
+            # 偏りに応じた追い越し先車線の選択 (2車線設定)
+            if opponent_offset > opponent_center:
+                # 前方車両が左側に偏っている -> 右車線 (L0) を走行する
+                self._target_lane_idx = 0
+                side_str = "left (L1)"
+                target_str = "right (L0)"
+            else:
+                # 前方車両が右側に偏っている -> 左車線 (L1) を走行する
+                self._target_lane_idx = 1
+                side_str = "right (L0)"
+                target_str = "left (L1)"
+                
             self.get_logger().info(
-                f"[Overtake] Opponent ahead at wp {opponent_ahead} in lane {opponent_lane}. Blocked: {list(blocked_lanes)}, Free: {free_lanes}", 
+                f"[Overtake] Opponent ahead at wp {opponent_ahead}. Offset: {opponent_offset:.2f} (Center: {opponent_center:.2f}). "
+                f"Opponent is on the {side_str}. Target: {target_str}.", 
                 throttle_duration_sec=1.0
             )
-            
-            if free_lanes:
-                # If current target lane is blocked or not set, choose a free lane
-                if self._target_lane_idx is None or self._target_lane_idx in blocked_lanes:
-                    if 1 in free_lanes:
-                        self._target_lane_idx = 1
-                    elif 2 in free_lanes:
-                        self._target_lane_idx = 2
-                    else:
-                        self._target_lane_idx = 0
-            else:
-                self._target_lane_idx = None
         else:
             self._target_lane_idx = None
 
