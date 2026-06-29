@@ -598,48 +598,135 @@ class ReferencePath:
             flush=True,
         )
 
-    def get_lane_bounds(self, wp_id: int, n_lanes: int = 3, max_offset: float = 2.5, lane_width: float = 2.2) -> list:
+    def update_boundaries_from_markers(self, left_pts, right_pts):
         """
-        Waypointの走行可能幅をn_lanes等分して
-        各車線の (ub_lane, lb_lane) を内側→外側の順で返す。
+        /map/vector_map_marker から取得した左右の点群（絶対座標系）から、
+        各 waypoint に対する正確な ub / lb 距離を cKDTree を用いて計算して上書きする。
+        """
+        import math
+        from scipy.spatial import cKDTree
 
-        - L0 (最もlb寄り)
-        - L1 (中央)
-        - L2 (最もub寄り)
-        n_lanes: 分割数
-        max_offset: 基準経路からの最大許容横オフセット [m] (芝生等への侵入を防ぐ)
-        lane_width: ソルバーの実行可能性を保つための各車線の最小保証幅 [m]
+        if len(left_pts) == 0 or len(right_pts) == 0:
+            print("[ReferencePath] Warning: update_boundaries_from_markers got empty arrays.", flush=True)
+            return
+
+        # 左右それぞれ KDTree を構築
+        left_tree = cKDTree(left_pts)
+        right_tree = cKDTree(right_pts)
+
+        # waypoints の位置座標と角度
+        wp_x_arr = np.array([wp.x for wp in self.waypoints])
+        wp_y_arr = np.array([wp.y for wp in self.waypoints])
+        wp_psi = np.array([wp.psi for wp in self.waypoints])
+        wp_pts = np.column_stack([wp_x_arr, wp_y_arr])
+        N = len(self.waypoints)
+
+        # 左右それぞれ K=30 近傍点を検索して法線に射影
+        K = 30
+        _, left_idx = left_tree.query(wp_pts, k=min(K, len(left_pts)))
+        _, right_idx = right_tree.query(wp_pts, k=min(K, len(right_pts)))
+
+        ub_list = []
+        lb_list = []
+
+        for i in range(N):
+            P = wp_pts[i]
+            psi = wp_psi[i]
+            # 進行方向ベクトル
+            t_dir = np.array([math.cos(psi), math.sin(psi)])
+            # 左法線ベクトル (psi に対して +90°)
+            n_l = np.array([-math.sin(psi), math.cos(psi)])
+
+            # --- 左側 (ub) ---
+            indices_l = left_idx[i] if isinstance(left_idx[i], (list, np.ndarray)) else [left_idx[i]]
+            candidates_l = []
+            for j in indices_l:
+                pt = left_pts[j]
+                v_lon = float(np.dot(pt - P, t_dir))
+                v_lat = float(np.dot(pt - P, n_l))
+                if v_lat > 0.0:
+                    candidates_l.append((abs(v_lon), v_lat))
+            
+            valid_candidates_l = [c for c in candidates_l if c[0] <= 3.0]
+            if not valid_candidates_l:
+                candidates_l.sort(key=lambda x: x[0])
+                valid_candidates_l = candidates_l[:5]
+            
+            if valid_candidates_l:
+                vals = [c[1] for c in valid_candidates_l]
+                weights = [1.0 / (c[0] + 0.1) for c in valid_candidates_l]
+                d_l = np.average(vals, weights=weights)
+            else:
+                d_l = 2.5
+
+            # --- 右側 (lb) ---
+            indices_r = right_idx[i] if isinstance(right_idx[i], (list, np.ndarray)) else [right_idx[i]]
+            candidates_r = []
+            for j in indices_r:
+                pt = right_pts[j]
+                v_lon = float(np.dot(pt - P, t_dir))
+                v_lat = float(np.dot(pt - P, n_l))
+                if v_lat < 0.0:
+                    candidates_r.append((abs(v_lon), v_lat))
+            
+            valid_candidates_r = [c for c in candidates_r if c[0] <= 3.0]
+            if not valid_candidates_r:
+                candidates_r.sort(key=lambda x: x[0])
+                valid_candidates_r = candidates_r[:5]
+
+            if valid_candidates_r:
+                vals = [c[1] for c in valid_candidates_r]
+                weights = [1.0 / (c[0] + 0.1) for c in valid_candidates_r]
+                d_r = np.average(vals, weights=weights)
+            else:
+                d_r = -2.5
+
+            ub_list.append(d_l)
+            lb_list.append(d_r)
+
+        ub_arr = np.array(ub_list)
+        lb_arr = np.array(lb_list)
+
+        # 車両のマージンを考慮して幅を少し狭める
+        MARGIN = 0.6
+        ub_arr = ub_arr - MARGIN
+        lb_arr = lb_arr + MARGIN
+
+        # クリッピング (現実的な幅の保証)
+        ub_arr = np.clip(ub_arr, 0.3, 8.0)
+        lb_arr = np.clip(lb_arr, -8.0, -0.3)
+
+        # 平滑化（ガタつきをさらに抑制するために移動平均をかける）
+        _window = 15
+        _kernel = np.ones(_window) / _window
+        ub_arr_s = np.convolve(np.tile(ub_arr, 3), _kernel, mode='same')[N:2 * N]
+        lb_arr_s = np.convolve(np.tile(lb_arr, 3), _kernel, mode='same')[N:2 * N]
+
+        for i in range(N):
+            self.waypoints[i].ub = float(ub_arr_s[i])
+            self.waypoints[i].lb = float(lb_arr_s[i])
+
+    def get_lane_bounds(self, wp_id: int, n_lanes: int = 2, max_half_width: float = 3.8, lane_width: float = 2.5) -> list:
+        """
+        Waypointの走行可能幅を n_lanes 等分し、
+        車線間に隙間（間隔）が生じないようにぴったりくっつけて返す。
         """
         wp = self.get_waypoint(wp_id)
 
         if wp.ub is None or wp.lb is None:
             return []
 
-        # アスファルト外（芝生など）への侵入を防ぐため、最大オフセットでクリップ
-        ub_clipped = min(wp.ub, max_offset)
-        lb_clipped = max(wp.lb, -max_offset)
+        # アスファルト外（芝生など）への侵入を防ぐため、最大半幅でクリップ
+        ub_clipped = min(wp.ub, max_half_width)
+        lb_clipped = max(wp.lb, -max_half_width)
 
         total = ub_clipped - lb_clipped          # 制限後の全幅 [m]
         
         lanes = []
         for i in range(n_lanes):
-            # 車線の中心位置
-            center = lb_clipped + (i + 0.5) * (total / n_lanes)
-            
-            # 中心から指定幅の半分ずつ広げる
-            lb_lane = center - lane_width / 2.0
-            ub_lane = center + lane_width / 2.0
-            
-            # 道路境界にクリップ
-            lb_lane = max(lb_lane, lb_clipped)
-            ub_lane = min(ub_lane, ub_clipped)
-            
-            # 幅が指定幅に満たない場合は壁から拡張して実行可能性を担保
-            if ub_lane - lb_lane < lane_width:
-                if lb_lane == lb_clipped:
-                    ub_lane = min(lb_clipped + lane_width, ub_clipped)
-                elif ub_lane == ub_clipped:
-                    lb_lane = max(ub_clipped - lane_width, lb_clipped)
+            # 車線を均等分割
+            lb_lane = lb_clipped + i * (total / n_lanes)
+            ub_lane = lb_clipped + (i + 1) * (total / n_lanes)
             
             lanes.append((ub_lane, lb_lane))
 

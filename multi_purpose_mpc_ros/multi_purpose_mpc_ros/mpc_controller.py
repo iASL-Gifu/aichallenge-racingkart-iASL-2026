@@ -320,6 +320,8 @@ class MPCController(Node):
         self.add_on_set_parameters_callback(param_cb)
 
     def _initialize(self) -> None:
+        self._map_z = 0.02
+
         def create_map() -> Map:
             return Map(self.in_pkg_share(self._cfg.map.yaml_path)) # type: ignore
 
@@ -577,6 +579,16 @@ class MPCController(Node):
                 self._v2x_callback,
                 1)
 
+        # マップ境界線のマーカーを取得するサブスクライバ (TRANSIENT_LOCAL QoS)
+        map_marker_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1
+        )
+        self._map_marker_sub = self.create_subscription(
+            MarkerArray, "/map/vector_map_marker", self._map_marker_callback, map_marker_qos
+        )
+
     def _create_ackerman_control_command(self, stamp, u, acc, bug_acc_enabled):
         v_cmd = u[0]
         steer_cmd = u[1]
@@ -622,6 +634,35 @@ class MPCController(Node):
         self._dynamic_obstacles = predictions_to_obstacles(
             predictions, self._v2x_vehicle_radius)
         self._obstacles_updated = True
+
+    def _map_marker_callback(self, msg: MarkerArray) -> None:
+        left_pts = []
+        right_pts = []
+        road_zs = []
+        for m in msg.markers:
+            if m.ns == 'left_lane_bound':
+                left_pts.extend([[p.x, p.y] for p in m.points])
+            elif m.ns == 'right_lane_bound':
+                right_pts.extend([[p.x, p.y] for p in m.points])
+            elif m.ns == 'road_lanelets':
+                road_zs.extend([p.z for p in m.points])
+
+        if len(road_zs) > 0:
+            self._map_z = float(np.mean(road_zs))
+            self.get_logger().info(f"[MPC] Detected map z-coordinate: {self._map_z:.3f}")
+
+        if len(left_pts) > 0 and len(right_pts) > 0:
+            self.get_logger().info(
+                f"[MPC] Received vector map boundaries. Left pts: {len(left_pts)}, Right pts: {len(right_pts)}"
+            )
+            # reference_path の境界線更新メソッドを呼び出す
+            self._reference_path.update_boundaries_from_markers(
+                np.array(left_pts), np.array(right_pts)
+            )
+            # 1回取得できれば十分なので、このサブスクライバを破棄する
+            self.destroy_subscription(self._map_marker_sub)
+            self._map_marker_sub = None
+
 
     #　経路付近の障害物だけをMPCに渡す関数
     # 一番近いWaypointとの距離をみて近ければ採用
@@ -731,72 +772,129 @@ class MPCController(Node):
         self._mpc_pred_pub.publish(pred_marker_array)
         self._mpc_pred_pub_dummy.publish(pred_marker_array)
 
-    def _publish_lane_markers(self, ref_path: ReferencePath, n_lanes: int = 3) -> None:
+    def _publish_lane_markers(self, ref_path: ReferencePath, n_lanes: int = 2) -> None:
         """
-        3車線の境界線と追い越しゾーンをMarkerArrayとしてRvizに描画
+        3車線の範囲を塗りつぶしたMarkerArray(TRIANGLE_LIST)としてRvizに描画
         追い越し許可ゾーン → L0=赤, L1=黄, L2=緑
         追い越し不可ゾーン → グレー 
+        ターゲット車線はより不透明度を高くして強調表示する
         """
         import math
         markers = MarkerArray()
 
         N = ref_path.n_waypoints
         has_overtake = hasattr(ref_path, 'overtake_zone')
+        limit = N if ref_path.circular else N - 1
 
-        # -- 車線境界ごとにLINE_STRIPマーカーを作成 (n_lanes+1 本) --
-        # 各マーカーは全Waypointを縦断し、境界位置の世界座標点列を持つ
-        lane_colors = [
-            ColorRGBA(r=0.9, g=0.2, b=0.2, a=0.85),   # L0 内側  赤
-            ColorRGBA(r=0.9, g=0.8, b=0.1, a=0.85),   # L1 中央  黄
-            ColorRGBA(r=0.2, g=0.85, b=0.3, a=0.85),  # L2 外側  緑
-        ]
-        grey = ColorRGBA(r=0.5, g=0.5, b=0.5, a=0.3)
-
-        # 各車線を独立した LINE_STRIP マーカーとして描く
         for lane_idx in range(n_lanes):
             m = Marker()
             m.header.frame_id = "map"
             m.ns = f"lane_L{lane_idx}"
             m.id = lane_idx
-            m.type = Marker.LINE_STRIP
+            m.type = Marker.TRIANGLE_LIST
             m.action = Marker.ADD
-            # ターゲット車線（太く表示）か通常の車線かを判定して太さを決定
-            if hasattr(ref_path, 'target_lane_idx') and ref_path.target_lane_idx == lane_idx:
-                m.scale.x = 0.40   # ターゲット車線 [m]
-            else:
-                m.scale.x = 0.15   # 通常の車線 [m]
+            m.scale.x = 1.0
+            m.scale.y = 1.0
+            m.scale.z = 1.0
+            m.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0) # 頂点カラー(m.colors)を表示するために必須
             m.pose.orientation.w = 1.0
 
-            for wp_id in range(N):
+            # ターゲット車線（強調表示）か通常の車線かで不透明度(Alpha)を変える
+            is_target_lane = hasattr(ref_path, 'target_lane_idx') and ref_path.target_lane_idx == lane_idx
+            if is_target_lane:
+                lane_colors = [
+                    ColorRGBA(r=0.9, g=0.2, b=0.2, a=0.55),   # L0 内側  赤
+                    ColorRGBA(r=0.9, g=0.8, b=0.1, a=0.55),   # L1 中央  黄
+                    ColorRGBA(r=0.2, g=0.85, b=0.3, a=0.55),  # L2 外側  緑
+                ]
+                grey = ColorRGBA(r=0.5, g=0.5, b=0.5, a=0.25)
+            else:
+                lane_colors = [
+                    ColorRGBA(r=0.9, g=0.2, b=0.2, a=0.30),   # L0 内側  赤
+                    ColorRGBA(r=0.9, g=0.8, b=0.1, a=0.30),   # L1 中央  黄
+                    ColorRGBA(r=0.2, g=0.85, b=0.3, a=0.30),  # L2 外側  緑
+                ]
+                grey = ColorRGBA(r=0.5, g=0.5, b=0.5, a=0.12)
+
+            for wp_id in range(limit):
+                next_wp_id = (wp_id + 1) % N
+
                 wp = ref_path.get_waypoint(wp_id)
-                if wp.ub is None or wp.lb is None:
+                next_wp = ref_path.get_waypoint(next_wp_id)
+
+                if wp.ub is None or wp.lb is None or next_wp.ub is None or next_wp.lb is None:
                     continue
 
                 # このwaypointの車線境界を取得
                 lanes = ref_path.get_lane_bounds(wp_id, n_lanes)
-                if not lanes:
+                next_lanes = ref_path.get_lane_bounds(next_wp_id, n_lanes)
+                if not lanes or not next_lanes:
                     continue
 
                 ub_l, lb_l = lanes[lane_idx]
-                # 車線中心の横オフセット [m] (正=左=ub方向)
-                center_offset = (ub_l + lb_l) / 2.0
+                next_ub_l, next_lb_l = next_lanes[lane_idx]
 
                 # 世界座標へ変換 (ub方向 = pi/2 + psi)
                 angle_ub = math.fmod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
-                px = wp.x + center_offset * math.cos(angle_ub)
-                py = wp.y + center_offset * math.sin(angle_ub)
+                curr_left_x = wp.x + ub_l * math.cos(angle_ub)
+                curr_left_y = wp.y + ub_l * math.sin(angle_ub)
+                curr_right_x = wp.x + lb_l * math.cos(angle_ub)
+                curr_right_y = wp.y + lb_l * math.sin(angle_ub)
 
-                pt = Point()
-                pt.x = px
-                pt.y = py
-                pt.z = 0.05
-                m.points.append(pt)
+                next_angle_ub = math.fmod(math.pi / 2.0 + next_wp.psi + math.pi, 2 * math.pi) - math.pi
+                next_left_x = next_wp.x + next_ub_l * math.cos(next_angle_ub)
+                next_left_y = next_wp.y + next_ub_l * math.sin(next_angle_ub)
+                next_right_x = next_wp.x + next_lb_l * math.cos(next_angle_ub)
+                next_right_y = next_wp.y + next_lb_l * math.sin(next_angle_ub)
+
+                # 頂点データ
+                p_curr_left = Point(x=curr_left_x, y=curr_left_y, z=self._map_z)
+                p_curr_right = Point(x=curr_right_x, y=curr_right_y, z=self._map_z)
+                p_next_left = Point(x=next_left_x, y=next_left_y, z=self._map_z)
+                p_next_right = Point(x=next_right_x, y=next_right_y, z=self._map_z)
 
                 # 追い越しゾーンの場合は車線ごとの色、それ以外はグレー
                 if has_overtake and ref_path.overtake_zone[wp_id]:
-                    m.colors.append(lane_colors[lane_idx])
+                    color_curr = lane_colors[lane_idx]
                 else:
-                    m.colors.append(grey)
+                    color_curr = grey
+
+                if has_overtake and ref_path.overtake_zone[next_wp_id]:
+                    color_next = lane_colors[lane_idx]
+                else:
+                    color_next = grey
+
+                # 三角形1 (表面 - CCW)
+                m.points.append(p_curr_left)
+                m.colors.append(color_curr)
+                m.points.append(p_next_right)
+                m.colors.append(color_next)
+                m.points.append(p_curr_right)
+                m.colors.append(color_curr)
+
+                # 三角形1 (裏面 - CW)
+                m.points.append(p_curr_left)
+                m.colors.append(color_curr)
+                m.points.append(p_curr_right)
+                m.colors.append(color_curr)
+                m.points.append(p_next_right)
+                m.colors.append(color_next)
+
+                # 三角形2 (表面 - CCW)
+                m.points.append(p_curr_left)
+                m.colors.append(color_curr)
+                m.points.append(p_next_left)
+                m.colors.append(color_next)
+                m.points.append(p_next_right)
+                m.colors.append(color_next)
+
+                # 三角形2 (裏面 - CW)
+                m.points.append(p_curr_left)
+                m.colors.append(color_curr)
+                m.points.append(p_next_right)
+                m.colors.append(color_next)
+                m.points.append(p_next_left)
+                m.colors.append(color_next)
 
             markers.markers.append(m)
 

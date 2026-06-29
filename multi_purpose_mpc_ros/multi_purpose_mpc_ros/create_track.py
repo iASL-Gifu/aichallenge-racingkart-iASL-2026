@@ -63,7 +63,7 @@ def intersect_normal_with_polyline(P, n, polyline):
 ##################################
 # Centerlineを等間隔にリサンプル
 ##################################
-def resample_polyline_with_width(points, widths, ds=0.02):
+def resample_polyline_with_width(points, widths, ds=10.0):
 
     d = np.sqrt(np.sum(np.diff(points, axis=0)**2, axis=1))
     s = np.insert(np.cumsum(d), 0, 0)
@@ -382,6 +382,87 @@ wr = track[:,2]
 wl = track[:,3]
 
 print("track.csv saved")
+
+##################################
+# waypoint_bounds.csv 生成
+# MPC waypoints (traj_race_cl_mpc.csv) の各点に対して、
+# lanelet2 の左右境界ポリライン (left_all / right_all) への
+# 法線方向交点距離 (ub, lb) を直接計算して保存する。
+# reference_path.py はこの CSV を読み込んで wp.ub / wp.lb に直接代入するだけなので
+# track.csv の射影誤差が完全に排除される。
+##################################
+
+import os
+
+# waypoint CSV のパスを自動解決
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_wp_candidates = [
+    os.path.join(_script_dir, "../env/min_curv/traj_race_cl_mpc.csv"),
+    os.path.join(_script_dir, "../../global_racetrajectory_optimization/outputs/traj_race_cl_mpc.csv"),
+]
+_wp_path = None
+for _c in _wp_candidates:
+    if os.path.exists(_c):
+        _wp_path = _c
+        break
+
+if _wp_path is None:
+    print("[waypoint_bounds] WARNING: traj_race_cl_mpc.csv not found. Skipping.")
+else:
+    print(f"[waypoint_bounds] Loading waypoints from: {_wp_path}")
+    _wp_data = np.loadtxt(_wp_path, delimiter=",", skiprows=1)
+    # 列: s_m, x_m, y_m, psi_rad, kappa_radpm, vx_mps, ax_mps3
+    _wp_x   = _wp_data[:, 1]
+    _wp_y   = _wp_data[:, 2]
+    _wp_psi = _wp_data[:, 3]
+
+    # MPC coordinate offset (reference_path.py と同じ値)
+    _X_OFFSET = 5.332886
+    _Y_OFFSET = -75.727413
+    _wp_x = _wp_x + _X_OFFSET
+    _wp_y = _wp_y + _Y_OFFSET
+
+    _ub_list = []
+    _lb_list = []
+
+    for _i in range(len(_wp_x)):
+        _P   = np.array([_wp_x[_i], _wp_y[_i]])
+        _psi = _wp_psi[_i]
+        # waypoint の左法線 (psi + pi/2 方向)
+        _n = np.array([-np.sin(_psi), np.cos(_psi)])
+
+        # 左壁 (left_all) への法線交点 → ub
+        _hit_l, _d_l = intersect_normal_with_polyline(_P,  _n, left_all)
+        # 右壁 (right_all) への法線交点 → lb (負符号)
+        _hit_r, _d_r = intersect_normal_with_polyline(_P, -_n, right_all)
+
+        # フォールバック: 交点が見つからない場合は前の値を使う
+        if _d_l is None or not np.isfinite(_d_l):
+            _d_l = _ub_list[-1] if _ub_list else 3.5
+        if _d_r is None or not np.isfinite(_d_r):
+            _d_r = abs(_lb_list[-1]) if _lb_list else 3.5
+
+        _ub_list.append(float(_d_l))
+        _lb_list.append(-float(_d_r))
+
+    _ub_arr = np.array(_ub_list)
+    _lb_arr = np.array(_lb_list)
+
+    # 外れ値クリップ: コース幅は最大 6m 程度
+    _ub_arr = np.clip(_ub_arr, 0.5, 6.0)
+    _lb_arr = np.clip(_lb_arr, -6.0, -0.5)
+
+    # 出力先を env フォルダに合わせる
+    _out_path = os.path.join(_script_dir, "../env/waypoint_bounds.csv")
+    with open(_out_path, "w", newline="") as _f:
+        _writer = csv.writer(_f)
+        _writer.writerow(["idx", "ub", "lb"])
+        for _i in range(len(_ub_arr)):
+            _writer.writerow([_i, _ub_arr[_i], _lb_arr[_i]])
+
+    print(f"[waypoint_bounds] Saved {len(_ub_arr)} entries to: {_out_path}")
+    print(f"[waypoint_bounds] ub: min={_ub_arr.min():.3f}, max={_ub_arr.max():.3f}")
+    print(f"[waypoint_bounds] lb: min={_lb_arr.min():.3f}, max={_lb_arr.max():.3f}")
 
 
 if np.linalg.norm([x[-1]-x[0], y[-1]-y[0]]) > 1e-9:
