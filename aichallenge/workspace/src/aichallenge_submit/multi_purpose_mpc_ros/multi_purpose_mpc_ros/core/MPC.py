@@ -1,8 +1,12 @@
+import decimal
+import decimal
+from numpy import typing
 from typing import Tuple
 import numpy as np
 import osqp
 from scipy import sparse
 import matplotlib.pyplot as plt
+import time
 
 # Colors
 PREDICTION = '#BA4A00'
@@ -29,17 +33,76 @@ class MPC:
         :param use_path_constraints_topic: flag to use path constraints from topic
         :param max_steering_rate: maximum allowed steering rate in rad/s
         """
+        # MPCの設定値と内部変数を初期化する
         # 既存の初期化パラメータ
-        self.N = N
-        self.Q = Q
-        self.R = R
+        self.N = N #予測ホライズン
+        self.Q = Q #状態誤差の重み
+        self.R = R #入力コスト
+        #R =[[1,0],[0,20]]なら速度変更は許す、操舵変更は嫌う
         self.QN = QN
         self.wp_id_offset = wp_id_offset
         self.use_obstacle_avoidance = use_obstacle_avoidance
         self.use_path_constraints_topic = use_path_constraints_topic
-        self.model = model
+        self.model = model #車両モデル
         self.nx = self.model.n_states
         self.nu = 2
+
+        # setupが済んでいるかどうか
+        self.osqp_initialized = False
+
+        # ステアリングレート制約用の事前計算変数
+        self.nx_N = self.nx * (self.N + 1)
+        self.nu_N = self.nu * self.N
+
+        # ステアリングレート制約行列の作成
+        self.n_rate_constraints = N - 1
+        steering_rate_matrix = sparse.lil_matrix(
+            (self.n_rate_constraints, self.nx_N + self.nu_N)
+        )
+        for i in range(self.n_rate_constraints):
+            steering_rate_matrix[i, self.nx_N + self.nu*i + 1] = -1
+            steering_rate_matrix[i, self.nx_N + self.nu*(i+1) + 1] = 1
+        self.steering_rate_matrix = steering_rate_matrix.tocsc()
+        #sparse.eyeの固定`
+        self.basic_constraint_matrix = sparse.eye(
+            self.nx_N + self.nu_N,
+            format='csc'
+        )
+        self.A_inequality = sparse.vstack([
+            self.basic_constraint_matrix,
+            self.steering_rate_matrix
+        ], format='csc')        
+        
+
+        #Axのsparse.eye()固定
+        self.Ax_base = sparse.kron(
+            sparse.eye(self.N + 1),
+            -sparse.eye(self.nx),
+            format='csc'
+        )
+        #Pも固定
+        self.P_base = sparse.block_diag([
+            sparse.kron(sparse.eye(self.N), self.Q),
+            self.QN,
+            sparse.kron(sparse.eye(self.N), self.R)
+        ], format='csc')
+
+        # A, B行列のスパース構造を完全に固定するためのインデックス事前計算
+        row_A, col_A = [], []
+        row_B, col_B = [], []
+        for n in range(self.N):
+            for i in range(self.nx):
+                for j in range(self.nx):
+                    row_A.append((n+1)*self.nx + i)
+                    col_A.append(n*self.nx + j)
+                for j in range(self.nu):
+                    row_B.append((n+1)*self.nx + i)
+                    col_B.append(n*self.nu + j)
+        self.row_A = np.array(row_A)
+        self.col_A = np.array(col_A)
+        self.row_B = np.array(row_B)
+        self.col_B = np.array(col_B)
+
         self.state_constraints = StateConstraints
         self.input_constraints = InputConstraints
         self.ay_max = ay_max
@@ -56,6 +119,8 @@ class MPC:
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
         self.optimizer = osqp.OSQP()
+
+        self.debug_counter = 0
 
         if not self.use_obstacle_avoidance:
             self.model.reference_path.update_simple_path_constraints(
@@ -84,6 +149,7 @@ class MPC:
         """
         Initialize optimization problem for current time step with steering rate constraints.
         """
+        
         # 既存の制約設定
         umin = self.input_constraints['umin']
         umax = self.input_constraints['umax']
@@ -95,8 +161,8 @@ class MPC:
         nu_N = self.nu * N
 
         # LTV System Matrices
-        A = np.zeros((nx_N, nx_N))
-        B = np.zeros((nx_N, nu_N))
+        A_data = np.zeros(N * self.nx * self.nx)
+        B_data = np.zeros(N * self.nx * self.nu)
 
         # Reference vector
         ur = np.zeros(nu_N)
@@ -127,20 +193,45 @@ class MPC:
 
             # Compute LTV matrices
             f, A_lin, B_lin = self.model.linearize(v_ref, kappa_ref, delta_s)
-            A[(n+1) * self.nx: (n+2)*self.nx, n * self.nx:(n+1)*self.nx] = A_lin
-            B[(n+1) * self.nx: (n+2)*self.nx, n * self.nu:(n+1)*self.nu] = B_lin
+            eps = 1e-9
+            A_lin[np.abs(A_lin) < eps] = eps
+            B_lin[np.abs(B_lin) < eps] = eps
+            #print(np.abs(A_lin) < 1e-12, flush=True)
+            #print(np.count_nonzero(A_lin),flush=True)
+            A_data[n*self.nx*self.nx : (n+1)*self.nx*self.nx] = A_lin.flatten()
+            B_data[n*self.nx*self.nu : (n+1)*self.nx*self.nu] = B_lin.flatten()
 
             # Set reference
             ur[n*self.nu:(n+1)*self.nu] = [v_ref, kappa_ref]
             uq[n * self.nx:(n+1)*self.nx] = B_lin.dot([v_ref, kappa_ref]) - f
 
             # Constrain maximum speed based on curvature
-            if self.use_max_kappa_pred:
-                max_kappa_pred = np.max(np.abs(kappa_pred[n:]))
-                vmax_dyn = np.sqrt(self.ay_max / (np.abs(max_kappa_pred) + 1e-12))
-            else:
-                vmax_dyn = np.sqrt(self.ay_max / (np.abs(kappa_pred[n]) + 1e-12))
-            umax_dyn[self.nu*n] = min(vmax_dyn, umax_dyn[self.nu*n])
+            # 曲率にもとづいた最大速度の制約
+            #if self.use_max_kappa_pred:
+             #   max_kappa_pred = np.max(np.abs(kappa_pred[n:]))
+              #  vmax_dyn = np.sqrt(self.ay_max / (np.abs(max_kappa_pred) + 1e-12))
+            #else:
+             #   vmax_dyn = np.sqrt(self.ay_max / (np.abs(kappa_ref) + 1e-12))
+            #umax_dyn[self.nu*n] = min(vmax_dyn, umax_dyn[self.nu*n])
+
+            umax_dyn[self.nu*n] = self.input_constraints['umax'][0]
+
+            #if self.debug_counter % 20 == 0:
+            #    print(
+            #        f"umin={umin[0]:.2f} "
+            #        f"umax0={umax_dyn[0]:.2f}",
+            #        flush=True
+            #    )
+            #if n == 0:
+            #    self.debug_max_kappa_pred = max_kappa_pred if self.use_max_kappa_pred else kappa_pred[n]
+            #    self.debug_vmax_dyn = vmax_dyn
+
+            #if n == 0 and self.debug_counter % 20 == 0:
+            #    print(
+            #        f"kappa_pred={self.debug_max_kappa_pred:.4f} "
+            #        f"vmax_dyn={self.debug_vmax_dyn:.2f}",
+            #        flush=True
+            #    )
 
         # Update path constraints
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
@@ -164,17 +255,36 @@ class MPC:
                 ub[infeasible_index] = 0.0
                 lb[infeasible_index] = 0.0
 
+        # Relax bounds for the first few steps if the initial state e_y is out of bounds
+        e_y = self.model.spatial_state.e_y
+        for k in range(N):
+            if e_y < lb[k]:
+                alpha = float(N - k) / N
+                lb[k] = alpha * (e_y - 0.2) + (1.0 - alpha) * lb[k]
+            if e_y > ub[k]:
+                alpha = float(N - k) / N
+                ub[k] = alpha * (e_y + 0.2) + (1.0 - alpha) * ub[k]
+
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
+
+        self.current_ub = ub
+        self.current_lb = lb
         xr[self.nx::self.nx] = (lb + ub) / 2
 
         # Get equality matrix
-        Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + sparse.csc_matrix(A)
-        Bu = sparse.csc_matrix(B)
+        A_sparse = sparse.csc_matrix(
+            (A_data, (self.row_A[:len(A_data)], self.col_A[:len(A_data)])),
+            shape=(nx_N, nx_N)
+        )
+        Bu = sparse.csc_matrix((B_data, (self.row_B[:len(B_data)], self.col_B[:len(B_data)])), shape=(nx_N, nu_N))
+        Ax = self.Ax_base + A_sparse
         Aeq = sparse.hstack([Ax, Bu])
 
+        '''
+        # initで初回のみ呼び出す
         # ステアリングレート制約の行列を構築
         n_rate_constraints = N - 1
         steering_rate_matrix = np.zeros((n_rate_constraints, nx_N + nu_N))
@@ -184,12 +294,15 @@ class MPC:
             # 連続する制御入力間の差分に対する係数を設定
             steering_rate_matrix[i, nx_N + self.nu*i + 1] = -1  # 現在のステア角
             steering_rate_matrix[i, nx_N + self.nu*(i+1) + 1] = 1  # 次のステア角
-
+        '''
+        '''
         # 制約行列の結合
         A_inequality = sparse.vstack([
             sparse.eye(nx_N + nu_N),  # 状態と入力の基本的な制約
-            sparse.csc_matrix(steering_rate_matrix)  # ステアリングレート制約
+            self.steering_rate_matrix # ステアリングレート制約
         ])
+        '''
+        A_inequality = self.A_inequality
 
         # 完全な制約行列
         A_full = sparse.vstack([Aeq, A_inequality], format='csc')
@@ -205,19 +318,15 @@ class MPC:
 
         # ステアリングレート制約の境界
         max_delta_change = self.max_steering_rate * self.model.Ts
-        lineq_rate = -max_delta_change * np.ones(n_rate_constraints)
-        uineq_rate = max_delta_change * np.ones(n_rate_constraints)
+        lineq_rate = -max_delta_change * np.ones(self.n_rate_constraints)
+        uineq_rate = max_delta_change * np.ones(self.n_rate_constraints)
 
         # 全ての境界を結合
         l = np.hstack([leq, lineq_basic, lineq_rate])
         u = np.hstack([ueq, uineq_basic, uineq_rate])
 
         # コスト行列
-        P = sparse.block_diag([
-            sparse.kron(sparse.eye(N), self.Q),
-            self.QN,
-            sparse.kron(sparse.eye(N), self.R)
-        ], format='csc')
+        P = self.P_base
 
         q = np.hstack([
             -np.tile(np.diag(self.Q.toarray()), N) * xr[:-self.nx],
@@ -226,8 +335,25 @@ class MPC:
         ])
 
         # オプティマイザの設定
-        self.optimizer = osqp.OSQP()
-        self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, verbose=False)
+        if not self.osqp_initialized:
+            #self.optimizer = osqp.OSQP()
+            self.A0 = A_full.copy()
+            self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=False, verbose=False)
+            self.osqp_initialized = True
+            #print("setup",A_full.nnz,flush=True)
+            
+        else:
+            #PはQ,R,QNが変わらないなら固定なので更新しない
+            #qは参照(v_refとkappa_ref)によって毎回変わるので更新する
+            #A_fullはLTVモデルの更新により毎回変わるためAxも更新する
+            #print("A_full",A_full[:20,:20].toarray())
+            #print("A0",self.A0[:20,:20].toarray())
+            #print(np.max(np.abs(A_full.data - self.A_data_ref)),flush=True)
+
+        
+            #self.optimizer.update(q=q, l=l, u=u)
+          
+            self.optimizer.update(q=q, l=l, u=u, Ax=A_full.data)
 
     def get_control(self) -> Tuple[np.ndarray, float]:
         """
@@ -236,19 +362,31 @@ class MPC:
         nx = self.nx
         nu = self.nu
 
+        #最近傍Waypointを取得
         self.model.get_current_waypoint()
 
         N = min(self.N, self.model.reference_path.n_waypoints - self.model.wp_id) \
             if not self.model.reference_path.circular else self.N
-
+        #世界座標を経路座標へ変換
         self.model.spatial_state = self.model.t2s(
             reference_state=self.model.temporal_state,
             reference_waypoint=self.model.current_waypoint)
 
+        t0 = time.perf_counter()
+
         self._init_problem(N, self.model.safety_margin)
 
+        t1 = time.perf_counter()
+        t2 = t1
+
         try:
+
             dec = self.optimizer.solve()
+            if self.debug_counter % 20 == 0:
+                print(dec.info.status,flush=True)
+            t2 = time.perf_counter()
+            
+
             control_signals = np.array(dec.x[-N*nu:])
             use_control_signals = control_signals[1::2]
 
@@ -257,6 +395,7 @@ class MPC:
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     self._init_problem(N, relaxed_safety_margin)
                     dec = self.optimizer.solve()
+                    t2 = time.perf_counter()
                     control_signals = np.array(dec.x[-N*nu:])
                     use_control_signals = control_signals[1::2]
 
@@ -277,6 +416,7 @@ class MPC:
                 self.previous_steering - max_delta_change,
                 self.previous_steering + max_delta_change
             )
+
             self.previous_steering = delta
 
             # 予測の更新
@@ -292,7 +432,7 @@ class MPC:
             self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
 
-        except TypeError or ValueError:
+        except (TypeError, ValueError):
             id = nu * (self.infeasibility_counter + 1)
             if id + 2 < len(self.current_control):
                 u = np.array(self.current_control[id:id+2])
@@ -305,6 +445,32 @@ class MPC:
 
         if self.infeasibility_counter > (N - 1) and self.infeasibility_counter % 100 == 0:
             print('No control signal computed!')
+
+        self.debug_counter += 1
+
+        '''
+        if self.debug_counter % 20 == 0:
+                    print(
+                        f"status={dec.info.status} "
+                        f"v={v:.3f} "
+                        f"delta={delta:.3f}",
+                        flush=True
+                    )
+        '''
+        if self.debug_counter % 80 == 0:
+            total_ms = (t2-t0)*1000
+
+
+            print(
+                f"N={N} "
+                f"build={(t1-t0)*1000:.1f}ms "
+                f"solve={(t2-t1)*1000:.1f}ms "
+                f"total={total_ms:.1f}ms "
+                f"target={1000*self.model.Ts:.1f}ms"
+                f"Ts={self.model.Ts:.6f}s ",
+                flush=True
+            )
+
 
         return u, max_delta
 

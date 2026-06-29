@@ -476,6 +476,9 @@ class MPCController(Node):
         self._last_lap_time = 0.0
         self._lap_times = [None] * (self.MAX_LAPS + 1) # +1 means include lap 0
 
+        # loop counter (initialized early to avoid race conditions with V2X callbacks)
+        self._loop = 0
+
         # condition
         self._last_condition = None
         self._last_colliding_time = None
@@ -574,12 +577,16 @@ class MPCController(Node):
         cmd = self._create_ackerman_control_command(stamp, u, acc, bug_acc_enabled)
 
         # publish raw control command
-        self._command_raw_pub.publish(cmd)
+        if not self.USE_BUG_ACC:
+            self._command_raw_pub.publish(cmd)
 
         # compensate steering angle for the real vehicle
         # AWSIMにおいても後段のactuation_cmd_converter でgainを考慮した指令を生成するため、実機/sim問わず
         # gain を掛ける
-        cmd.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
+        if self.USE_BUG_ACC:
+            cmd.command.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
+        else:
+            cmd.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
         self._command_pub.publish(cmd)
 
 
@@ -595,11 +602,36 @@ class MPCController(Node):
         self._reference_path.set_path_constraints(
             msg.upper_bounds, msg.lower_bounds, msg.rows, msg.cols)
 
+    def _get_opponent_position_and_id(self) -> Optional[Tuple[Tuple[float, float], str]]:
+        if not self.USE_OBSTACLE_AVOIDANCE:
+            return None
+        import os
+        domain_id = os.environ.get("ROS_DOMAIN_ID", "1")
+        host_id = f"d{domain_id}"
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            if vid != host_id:
+                buf = self._v2x_tracker._samples.get(vid)
+                if buf:
+                    _, x, y = buf[-1]
+                    return (x, y), vid
+        return None
+
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
         self._v2x_tracker.update(msg)
-        predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
-        self._dynamic_obstacles = predictions_to_obstacles(
-            predictions, self._v2x_vehicle_radius)
+        # 最初の数秒間（例: 40Hz制御で最初の120ループ = 約3秒間）は
+        # 他車を障害物として登録せず、スタート時のスタックを防ぐ
+        if self._loop < 120:
+            self._dynamic_obstacles = []
+        else:
+            predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
+            # Filter out the host vehicle's own predictions
+            import os
+            domain_id = os.environ.get("ROS_DOMAIN_ID", "1")
+            host_id = f"d{domain_id}"
+            predictions = {vid: pts for vid, pts in predictions.items() if vid != host_id}
+
+            self._dynamic_obstacles = predictions_to_obstacles(
+                predictions, self._v2x_vehicle_radius)
         self._obstacles_updated = True
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
@@ -830,13 +862,66 @@ class MPCController(Node):
             u = [0.0, 0.0]
             # continue
 
+        # --- Overtake / Follow Mode decision ---
+        is_overtake_mode = False
+        is_follow_mode = False
+        opponent_vel = 0.0
+
+        if self.USE_OBSTACLE_AVOIDANCE:
+            opp_pos_info = self._get_opponent_position_and_id()
+            if opp_pos_info is not None:
+                opp_pos, opp_id = opp_pos_info
+                opp_x, opp_y = opp_pos
+                dx = opp_x - pose.x
+                dy = opp_y - pose.y
+                dist = np.hypot(dx, dy)
+
+                # Get opponent's speed from tracker
+                opp_vel_xy = self._v2x_tracker.velocity(opp_id)
+                opponent_vel = np.hypot(opp_vel_xy[0], opp_vel_xy[1])
+
+                # Local coordinates of the opponent relative to host vehicle heading
+                local_x = dx * np.cos(pose.theta) + dy * np.sin(pose.theta)
+                local_y = -dx * np.sin(pose.theta) + dy * np.cos(pose.theta)
+
+                # Check curvature to determine straight section
+                wp_idx = self._mpc.model.wp_id % len(self._reference_path.waypoints)
+                current_kappa = abs(self._reference_path.waypoints[wp_idx].kappa)
+                is_straight = current_kappa < 0.02
+
+                if dist < 5.0:
+                    if is_straight:
+                        # Overtake condition: laterally offset (passing), steering straight, and mostly ahead/next to us
+                        is_steering_straight = abs(u[1]) < np.deg2rad(8.0)
+                        if abs(local_y) > 0.8 and -2.0 < local_x < 5.0 and is_steering_straight:
+                            is_overtake_mode = True
+                    else:
+                        # Curve condition: follow mode ONLY if opponent is ahead of us
+                        if local_x > 0.0:
+                            is_follow_mode = True
+
         acc = 0.
         bug_acc_enabled = False
         if self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
 
-            if abs(v) > kmh_to_m_per_sec(44.0) or \
+            if is_overtake_mode:
+                # Force overtake boost!
+                bug_acc_enabled = True
+                acc = 500.0
+                self._pred_marker_color = CYAN
+                u[0] = kmh_to_m_per_sec(45.0)
+                self.get_logger().info("🚀 OVERTAKE BOOST ON STRAIGHT! 🚀", throttle_duration_sec=0.5)
+            elif is_follow_mode:
+                # Follow opponent in curve to avoid collision
+                bug_acc_enabled = False
+                u[0] = min(u[0], opponent_vel)
+                acc = self.KP * (u[0] - v)
+                acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
+                self._pred_marker_color = YELLOW
+                self.get_logger().info("🛡️ FOLLOWING MODE IN CURVE... 🛡️", throttle_duration_sec=0.5)
+            elif abs(v) > kmh_to_m_per_sec(44.0) or \
              (abs(v) > kmh_to_m_per_sec(38.0) and abs(max_delta) > deg2rad(12.0)):
                 bug_acc_enabled = False
                 acc = self._mpc_cfg.a_min / 3.0 * 2.0
@@ -850,6 +935,9 @@ class MPCController(Node):
                 acc = 500.0
                 self._pred_marker_color = CYAN
         else:
+            if is_follow_mode:
+                u[0] = min(u[0], opponent_vel)
+                self.get_logger().info("🛡️ FOLLOWING MODE IN CURVE... 🛡️", throttle_duration_sec=0.5)
             acc =  self.KP * (u[0] - v)
             # print(f"v: {v}, u[0]: {u[0]}, acc: {acc}")
             acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
@@ -914,6 +1002,7 @@ class MPCController(Node):
 
         while rclpy.ok() and (not self._sim_logger.stop_requested()):
             self._control()
+            self._control_rate.sleep()
 
     def stop(self):
         # Wait for stopping
@@ -934,6 +1023,9 @@ class MPCController(Node):
         # show results
         self._sim_logger.show_results(self._current_laps, self._lap_times, self._car)
 
+    @classmethod
+    def in_pkg_share(cls, file_path: str) -> str:
+        return cls.PKG_PATH + file_path
     @classmethod
     def in_pkg_share(cls, file_path: str) -> str:
         return cls.PKG_PATH + file_path

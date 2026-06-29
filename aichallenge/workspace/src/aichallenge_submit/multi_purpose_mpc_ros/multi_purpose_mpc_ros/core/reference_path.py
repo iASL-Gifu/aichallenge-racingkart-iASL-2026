@@ -732,9 +732,12 @@ class ReferencePath:
 
                 # Check feasibility of the path after subtracting safety margin
                 if ub_sm < lb_sm:
-                    ub_sm = 0.0
-                    lb_sm = 0.0
+                    mid = (wp.ub + wp.lb) / 2.0
+                    half_width = 0.15
+                    ub_sm = np.clip(mid + half_width, wp.lb, wp.ub)
+                    lb_sm = np.clip(mid - half_width, wp.lb, wp.ub)
 
+ 
                 # wp.ub_sm = ub_sm
                 # wp.lb_sm = lb_sm
 
@@ -776,8 +779,10 @@ class ReferencePath:
 
             # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
-                ub_sm = 0.0
-                lb_sm = 0.0
+                mid = (wp.ub + wp.lb) / 2.0
+                half_width = 0.15
+                ub_sm = np.clip(mid + half_width, wp.lb, wp.ub)
+                lb_sm = np.clip(mid - half_width, wp.lb, wp.ub)
 
             # Compute absolute angle of bound cell
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
@@ -811,7 +816,7 @@ class ReferencePath:
         # min_width = model_width / np.sqrt(2)
         # min_width = model_width
         # min_width = 2.0 * safety_margin
-        min_width = model_width
+        min_width = model_width*0.5
         # min_segment_length = model_width / 4.0
         min_segment_length = 0.1
 
@@ -865,8 +870,10 @@ class ReferencePath:
             if ub_sm < lb_sm:
                 # 一つ前のifの判定でboundsは正常になっているはずなので、こちらの判定に入る場合は何らかの実装上の異常がある
                 print("!!!! Infeasible path detected !!!!")
-                ub_sm = 0.0
-                lb_sm = 0.0
+                mid = (ub + lb) / 2.0
+                half_width = 0.15
+                ub_sm = np.clip(mid + half_width, lb, ub)
+                lb_sm = np.clip(mid - half_width, lb, ub)
 
             # Compute absolute angle of bound cell
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
