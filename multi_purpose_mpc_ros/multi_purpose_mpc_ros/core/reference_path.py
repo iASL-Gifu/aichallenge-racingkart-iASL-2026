@@ -600,6 +600,43 @@ class ReferencePath:
             flush=True,
         )
 
+    def load_clean_boundaries(self, traj_csv_path: str, bounds_csv_path: str) -> None:
+        """
+        Load clean boundaries from waypoint_bounds.csv and traj_race_cl_mpc.csv,
+        and assign them to the nearest waypoints using cKDTree once at startup.
+        """
+        import os
+        import pandas as pd
+        from scipy.spatial import cKDTree
+
+        if not os.path.exists(traj_csv_path) or not os.path.exists(bounds_csv_path):
+            print(f"[ReferencePath] WARNING: Clean boundary files not found: {traj_csv_path} or {bounds_csv_path}. Falling back to default width computation.", flush=True)
+            return
+
+        print(f"[ReferencePath] Loading clean boundaries from: {bounds_csv_path}", flush=True)
+        ref_df = pd.read_csv(traj_csv_path)
+        bounds_df = pd.read_csv(bounds_csv_path)
+
+        # Build KDTree from the original trajectory points
+        ref_pts = ref_df[['x_m', 'y_m']].to_numpy()
+        ref_tree = cKDTree(ref_pts)
+
+        # Set ub, lb, and static_border_cells for each waypoint in ReferencePath
+        for wp in self.waypoints:
+            dist, idx = ref_tree.query([wp.x, wp.y])
+            wp.ub = float(bounds_df.loc[idx, 'ub'])
+            wp.lb = float(bounds_df.loc[idx, 'lb'])
+
+            # Compute static border cells based on the clean bounds
+            left_angle = wp.psi + math.pi / 2
+            wp.static_border_cells = (
+                (wp.x + wp.ub * math.cos(left_angle), wp.y + wp.ub * math.sin(left_angle)),
+                (wp.x + wp.lb * math.cos(left_angle), wp.y + wp.lb * math.sin(left_angle))
+            )
+
+        self.reset_dynamic_constraints()
+        print(f"[ReferencePath] Successfully mapped clean boundaries to {len(self.waypoints)} waypoints.", flush=True)
+
     def update_boundaries_from_markers(self, left_pts, right_pts):
         """
         /map/vector_map_marker から取得した左右の点群（絶対座標系）から、

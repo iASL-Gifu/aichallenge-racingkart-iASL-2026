@@ -332,7 +332,7 @@ class MPCController(Node):
             if is_ref_path_given:
                 print("Using given reference path")
                 wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
-                return ReferencePath(
+                ref_path = ReferencePath(
                     map,
                     wp_x,
                     wp_y,
@@ -340,6 +340,12 @@ class MPCController(Node):
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
                     cfg_ref_path.circular)
+
+                # Load clean boundaries from CSV
+                traj_csv = self.in_pkg_share(self._cfg.reference_path.csv_path)
+                bounds_csv = self.in_pkg_share("env/waypoint_bounds.csv")
+                ref_path.load_clean_boundaries(traj_csv, bounds_csv)
+                return ref_path
 
             else:
                 print("Using waypoints to create reference path")

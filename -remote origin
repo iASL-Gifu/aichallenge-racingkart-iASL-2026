@@ -1,0 +1,24 @@
+* [33m2e69dca[m[33m ([m[1;36mHEAD -> [m[1;32mreina-dev[m[33m)[m 0701
+* [33m5b68162[m[33m ([m[1;31morigin/reina-dev[m[33m)[m 0630
+* [33m791d3a5[m 0629-2
+* [33m57f372c[m 0629
+* [33m7e62693[m 0629update
+* [33m53a1df6[m 0628update
+* [33mf583ee5[m 0627update
+* [33mc124e85[m 0619
+*   [33md804d28[m[33m ([m[1;31morigin/main[m[33m)[m Merge branch 'AutomotiveAIChallenge:main' into main
+[32m|[m[33m\[m  
+* [33m\[m   [33mfcf24c1[m Merge branch 'AutomotiveAIChallenge:main' into main
+[34m|[m[35m\[m [33m\[m  
+* [35m|[m [33m|[m [33mf3ac063[m Update setup.bash
+* [35m|[m [33m|[m [33m76db711[m Update setup.bash
+[35m|[m [35m|[m [33m|[m * [33m189a7d5[m[33m ([m[1;31morigin/haruki-dev[m[33m)[m first commit
+[35m|[m [35m|[m [33m|[m * [33mc4c3ebd[m first
+[35m|[m [35m|[m [33m|[m[33m/[m  
+[35m|[m [35m|[m [33m|[m * [33ma69fcd3[m[33m ([m[1;31morigin/ruri-dev[m[33m)[m commit
+[35m|[m [35m|[m [33m|[m * [33m0574775[m commit1
+[35m|[m [35m|[m [33m|[m * [33m2362425[m chore: merge dev into main (#228)
+[35m|[m [35m|[m [33m|[m[33m/[m[1;33m|[m 
+[35m|[m [35m|[m [33m|[m * [33m7a996be[m feat: light / dark theme (#223)
+[35m|[m [35m|[m [33m|[m * [33m46e881e[m refactor(simulator)!: per-mode launch scripts and add safety-gate modes (#226)
+[35m|[m [35m|[m [33m|[m * [33md716c01[m feat(orchestrator): link result-summary.json into latest artifacts

@@ -355,7 +355,11 @@ w_right = np.array(w_right)
 #w_right = np.clip(w_right,0.3,5.0)
 
 
-with open("track.csv","w",newline="") as f:
+import os
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_track_path = os.path.join(_script_dir, "../env/track.csv")
+
+with open(_track_path,"w",newline="") as f:
 
     writer = csv.writer(f)
 
@@ -375,7 +379,7 @@ with open("track.csv","w",newline="") as f:
             w_left[i]
         ])
 
-track = np.loadtxt("track.csv", delimiter=",", skiprows=1)
+track = np.loadtxt(_track_path, delimiter=",", skiprows=1)
 
 x = track[:,0]
 y = track[:,1]
