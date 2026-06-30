@@ -376,13 +376,14 @@ class MPCController(Node):
                 cfg_model.width,
                 1.0 / self._cfg.mpc.control_rate) # type: ignore
 
-        def create_mpc(car: BicycleModel,N) -> Tuple[MPCConfig, MPC]:
+        def create_mpc(car: BicycleModel, N, R=None) -> Tuple[MPCConfig, MPC]:
             cfg_mpc = self._cfg.mpc # type: ignore
+            mpc_R = R if R is not None else cfg_mpc.R
 
             mpc_cfg = MPCConfig(
-                cfg_mpc.N,
+                N,
                 sparse.diags(cfg_mpc.Q),
-                sparse.diags(cfg_mpc.R),
+                sparse.diags(mpc_R),
                 sparse.diags(cfg_mpc.QN),
                 kmh_to_m_per_sec(self.BUG_VEL if self.USE_BUG_ACC else cfg_mpc.v_max),
                 cfg_mpc.a_min,
@@ -446,7 +447,7 @@ class MPCController(Node):
         self._car10 = create_car(self._reference_path10)
 
         self._mpc_cfg, self._mpcN = create_mpc(self._carN,self._cfg.mpc.N)
-        _, self._mpc10 = create_mpc(self._car10, 9)
+        _, self._mpc10 = create_mpc(self._car10, 9,self._cfg.mpc.R10)
         
         self._car = self._carN
         self._reference_path = self._reference_pathN
@@ -772,7 +773,7 @@ class MPCController(Node):
         self._mpc_pred_pub.publish(pred_marker_array)
         self._mpc_pred_pub_dummy.publish(pred_marker_array)
 
-    def _publish_lane_markers(self, ref_path: ReferencePath, n_lanes: int = 2) -> None:
+    def _publish_lane_markers(self, ref_path: ReferencePath, n_lanes: int = 3) -> None:
         """
         3車線の範囲を塗りつぶしたMarkerArray(TRIANGLE_LIST)としてRvizに描画
         追い越し許可ゾーン → L0=赤, L1=黄, L2=緑
@@ -853,16 +854,26 @@ class MPCController(Node):
                 p_next_left = Point(x=next_left_x, y=next_left_y, z=self._map_z)
                 p_next_right = Point(x=next_right_x, y=next_right_y, z=self._map_z)
 
+                '''
                 # 追い越しゾーンの場合は車線ごとの色、それ以外はグレー
                 if has_overtake and ref_path.overtake_zone[wp_id]:
-                    color_curr = lane_colors[lane_idx]
-                else:
-                    color_curr = grey
-
-                if has_overtake and ref_path.overtake_zone[next_wp_id]:
-                    color_next = lane_colors[lane_idx]
+                # 全区間追い越し許可にしているため、常に車線ごとの色にする
+                color_curr = lane_colors[lane_idx]
+                color_next = lane_colors[lane_idx]
                 else:
                     color_next = grey
+                '''
+
+                # 205 <= wp <= 245 の範囲では追い越し不可（グレー）にする
+                if 205 <= wp_id <= 245:
+                    color_curr = grey
+                else:
+                    color_curr = lane_colors[lane_idx]
+
+                if 205 <= next_wp_id <= 245:
+                    color_next = grey
+                else:
+                    color_next = lane_colors[lane_idx]
 
                 # 三角形1 (表面 - CCW)
                 m.points.append(p_curr_left)
@@ -1004,7 +1015,7 @@ class MPCController(Node):
         #MPCの切り替え処理
         self._car.get_current_waypoint()
         wp = self._car.wp_id
-        if 215 <= wp <= 245:
+        if (215 <= wp <= 245) or (280 <= wp <= 305):
             self._mpc = self._mpc10
             self._car = self._car10
             self._reference_path = self._reference_path10
@@ -1029,6 +1040,8 @@ class MPCController(Node):
         opponent_ahead = None
         opponent_offset = 0.0
         opponent_center = 0.0
+        opponent_distance = 99999.0 #前方車両との距離
+        opponent_v_lead = 0.0 #前方車両の速度
         min_wp_diff = 99999
 
         if self.USE_OBSTACLE_AVOIDANCE and hasattr(self, '_v2x_tracker'):
@@ -1050,32 +1063,42 @@ class MPCController(Node):
                             dx = opp_x - opp_wp.x
                             dy = opp_y - opp_wp.y
                             opponent_offset = dx * math.cos(angle_ub) + dy * math.sin(angle_ub)
-                            
-                            # 2車線の中心線 (境界線) を算出
                             opponent_center = (opp_wp.ub + opp_wp.lb) / 2.0
 
-        is_overtake_zone = False
-        if hasattr(self._reference_path, 'overtake_zone'):
-            is_overtake_zone = self._reference_path.overtake_zone[wp]
+                            # 車間距離（Euclidean距離）と前方車両の速度を取得
+                            opponent_distance = math.hypot(opp_x - pose.x, opp_y - pose.y)
+                            opp_vx, opp_vy = self._v2x_tracker.velocity(vid)
+                            opponent_v_lead = math.hypot(opp_vx, opp_vy)
 
-        if opponent_ahead is not None and is_overtake_zone:
-            # 偏りに応じた追い越し先車線の選択 (2車線設定)
-            if opponent_offset > opponent_center:
-                # 前方車両が左側に偏っている -> 右車線 (L0) を走行する
-                self._target_lane_idx = 0
-                side_str = "left (L1)"
-                target_str = "right (L0)"
+        # 205 <= wp <= 245 の範囲では追い越しをしないように設定
+        if 205 <= wp <= 245:
+            is_overtake_zone = False
+        else:
+            is_overtake_zone = True
+
+        if opponent_ahead is not None:
+            if is_overtake_zone:
+                # 3車線用の選択ロジック:
+                if opponent_offset > 0.0:
+                    # 前方車両が左側にいる -> 右車線 (L0) を走行して追い越し
+                    self._target_lane_idx = 0
+                    target_str = "right (L0)"
+                else:
+                    # 前方車両が右側にいる -> 左車線 (L2) を走行して追い越し
+                    self._target_lane_idx = 2
+                    target_str = "left (L2)"
+                self.get_logger().info(
+                    f"[Overtake] Opponent ahead at wp {opponent_ahead}. Offset: {opponent_offset:.2f}. "
+                    f"Overtaking via {target_str}.",
+                    throttle_duration_sec=1.0
+                )
             else:
-                # 前方車両が右側に偏っている -> 左車線 (L1) を走行する
+                # 追い越し不可エリア -> 中央車線 (L1) を走行して追従
                 self._target_lane_idx = 1
-                side_str = "right (L0)"
-                target_str = "left (L1)"
-                
-            self.get_logger().info(
-                f"[Overtake] Opponent ahead at wp {opponent_ahead}. Offset: {opponent_offset:.2f} (Center: {opponent_center:.2f}). "
-                f"Opponent is on the {side_str}. Target: {target_str}.", 
-                throttle_duration_sec=1.0
-            )
+                self.get_logger().info(
+                    f"[Follow] Opponent ahead at wp {opponent_ahead} in non-overtake zone. Following via center lane (L1).",
+                    throttle_duration_sec=1.0
+                )
         else:
             self._target_lane_idx = None
 
@@ -1087,14 +1110,35 @@ class MPCController(Node):
         # MPCの実行
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
-            #u[0] = 12.5 
-            #self.get_logger().info(f"u: {u}")
 
         if self._ref_vel_configulator is not None:
             ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
             ref_vel_kmph = min(
                 kmh_to_m_per_sec(ref_vel_mps),
                 self._mpc_cfg.v_max)
+            
+            # --- ACC spacing control (車間距離維持制御) ---
+            # 前方車両がいて、かつ自車の走行ライン上（横方向の差が 1.5m 未満）に他車が位置する場合に
+            # 追従状態とみなして車間制御（5m〜10m）を有効化する。
+            # 横方向の差が 1.5m 以上の場合は、別車線での追い越し中とみなして加速を許可する。
+            e_y = self._car.spatial_state.e_y
+            lat_dist = abs(opponent_offset - e_y)
+            if opponent_ahead is not None and lat_dist < 1.5:
+                if opponent_distance < 15.0:
+                    d_target = 7.5  # 目標車間距離 (5m 〜 10m の中央値 7.5m)
+                    K_p = 1.2       # 比例ゲイン
+                    v_ref_acc = opponent_v_lead + K_p * (opponent_distance - d_target)
+                    v_ref_acc = max(0.0, v_ref_acc)  # 後退は禁止のため下限は0
+                    
+                    ref_vel_kmph = min(ref_vel_kmph, v_ref_acc)
+                    
+                    if self._loop % int(self._mpc_cfg.control_rate) == 0:
+                        self.get_logger().info(
+                            f"[ACC] Distance to opp: {opponent_distance:.2f}m, Opp speed: {opponent_v_lead:.2f}m/s. "
+                            f"Target speed limited to {ref_vel_kmph:.2f}m/s to maintain distance.",
+                            throttle_duration_sec=1.0
+                        )
+
             self._mpc.update_v_max(ref_vel_kmph)
             v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
             self._reference_path.set_v_ref(v_ref)

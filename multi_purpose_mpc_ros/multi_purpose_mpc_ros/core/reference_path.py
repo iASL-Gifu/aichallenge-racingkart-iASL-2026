@@ -216,6 +216,8 @@ class ReferencePath:
         self.path_constraints: Optional[List[np.ndarray]] = None
         self.border_cells = BorderCells()
         self.target_lane_idx = None
+        self.n_lanes = 3
+        self.inner_lane_width = 1.0
 
         self.COUNT = 0
 
@@ -714,39 +716,61 @@ class ReferencePath:
             self.waypoints[i].ub = float(ub_arr_s[i])
             self.waypoints[i].lb = float(lb_arr_s[i])
 
-    def get_lane_bounds(self, wp_id: int, n_lanes: int = 2, max_half_width: float = 3.8, lane_width: float = 1.7) -> list:
+    def get_lane_bounds(self, wp_id: int, n_lanes: int = None, max_half_width: float = 3.8, lane_width: float = 1.7, inner_lane_width: float = None) -> list:
         """
-        Waypointの走行可能幅を n_lanes 等分し、
-        車線間に隙間（間隔）が生じないようにぴったりくっつけて返す。
-        ただし、各車線の幅が最低 lane_width を下回る場合は、実行可能性確保のために拡張する。
+        Waypointの走行可能幅を分割し、車線間に隙間（間隔）が生じないようにぴったりくっつけて返す。
+        n_lanes が 3 以上の場合、左右車線（外側）以外の車線（内側）は細く車線幅を取る。
+        ただし、各車線の幅がそれぞれの最低保証幅を下回る場合は、実行可能性確保のために拡張する。
         """
+        if n_lanes is None:
+            n_lanes = getattr(self, 'n_lanes', 2)
+        if inner_lane_width is None:
+            inner_lane_width = getattr(self, 'inner_lane_width', 1.0)
+
         wp = self.get_waypoint(wp_id)
 
         if wp.ub is None or wp.lb is None:
             return []
 
-        # アスファルト外（芝生など）への侵入を防ぐため、最大半幅でクリップ
+        # アスファルト外（芝生など）への侵入を防群するため、最大半幅でクリップ
         ub_clipped = min(wp.ub, max_half_width)
         lb_clipped = max(wp.lb, -max_half_width)
 
         total = ub_clipped - lb_clipped          # 制限後の全幅 [m]
+
+        # 3車線以上の場合、内側車線の初期幅比率（重み）を小さくする（例: 外側は1.0、内側は0.5）
+        if n_lanes >= 3:
+            inner_weight = 0.5
+            weights = [1.0] + [inner_weight] * (n_lanes - 2) + [1.0]
+        else:
+            weights = [1.0] * n_lanes
+
+        total_weight = sum(weights)
         
         lanes = []
+        accumulated_width = 0.0
         for i in range(n_lanes):
-            # 基本は均等分割
-            lb_lane = lb_clipped + i * (total / n_lanes)
-            ub_lane = lb_clipped + (i + 1) * (total / n_lanes)
+            w = weights[i]
+            # 重みに基づく比率で基本分割
+            lb_lane = lb_clipped + (accumulated_width / total_weight) * total
+            ub_lane = lb_clipped + ((accumulated_width + w) / total_weight) * total
+            accumulated_width += w
             
-            # 幅が最低保証幅 lane_width に満たない場合は、実行可能性担保のために拡張
-            if ub_lane - lb_lane < lane_width:
+            # 各車線の最小許容幅の決定（内側車線は inner_lane_width を使用）
+            current_min_width = lane_width
+            if n_lanes >= 3 and 0 < i < n_lanes - 1:
+                current_min_width = inner_lane_width
+
+            # 幅が最低保証幅に満たない場合は、実行可能性担保のために拡張
+            if ub_lane - lb_lane < current_min_width:
                 if i == 0:
-                    ub_lane = min(lb_lane + lane_width, ub_clipped)
+                    ub_lane = min(lb_lane + current_min_width, ub_clipped)
                 elif i == n_lanes - 1:
-                    lb_lane = max(ub_lane - lane_width, lb_clipped)
+                    lb_lane = max(ub_lane - current_min_width, lb_clipped)
                 else:
                     center = (ub_lane + lb_lane) / 2.0
-                    lb_lane = max(center - lane_width / 2.0, lb_clipped)
-                    ub_lane = min(center + lane_width / 2.0, ub_clipped)
+                    lb_lane = max(center - current_min_width / 2.0, lb_clipped)
+                    ub_lane = min(center + current_min_width / 2.0, ub_clipped)
             
             lanes.append((ub_lane, lb_lane))
 
@@ -1382,6 +1406,37 @@ class ReferencePath:
             waypoint_mid.dynamic_border_cells = tuple(new_border_cells_hor_sm_mid)
             waypoint_mid.ub_sm = new_bound_sm[0]
             waypoint_mid.lb_sm = new_bound_sm[1]
+
+        # 遷移時の初期状態制約違反（primal infeasibility）を防ぐためのコリドー緩和（Relaxation）
+        if pose is not None and len(pose) >= 3:
+            current_wp = self.get_waypoint((wp_id - 1) % self.n_waypoints)
+            e_y_current = np.cos(current_wp.psi) * (pose[1] - current_wp.y) - \
+                          np.sin(current_wp.psi) * (pose[0] - current_wp.x)
+            
+            M = min(10, N)  # ホライズン初期のMステップにわたって緩和
+            for n in range(M):
+                decay = 1.0 - float(n) / float(M)
+                wp = self.get_waypoint((wp_id + n) % self.n_waypoints)
+                
+                # 現在の横ズレが上限を超えている場合は、その差分を上限に徐々に減衰させながら上乗せ
+                if e_y_current > ub_hor[n]:
+                    slack = e_y_current - ub_hor[n]
+                    ub_hor[n] += slack * decay
+                    wp.ub_sm = ub_hor[n]
+                    
+                # 現在の横ズレが下限を下回っている場合は、下限を緩和
+                if e_y_current < lb_hor[n]:
+                    slack = lb_hor[n] - e_y_current
+                    lb_hor[n] -= slack * decay
+                    wp.lb_sm = lb_hor[n]
+
+                # 緩和後の範囲に対応する境界セル座標を再計算
+                angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                angle_lb = np.mod(-math.pi / 2 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                ub_ls = wp.x + ub_hor[n] * np.cos(angle_ub), wp.y + ub_hor[n] * np.sin(angle_ub)
+                lb_ls = wp.x - lb_hor[n] * np.cos(angle_lb), wp.y - lb_hor[n] * np.sin(angle_lb)
+                border_cells_hor_sm[n] = [ub_ls, lb_ls]
+                wp.dynamic_border_cells = (ub_ls, lb_ls)
 
         return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
 
