@@ -657,7 +657,10 @@ class MPCController(Node):
                 f"[MPC] Received vector map boundaries. Left pts: {len(left_pts)}, Right pts: {len(right_pts)}"
             )
             # reference_path の境界線更新メソッドを呼び出す
-            self._reference_path.update_boundaries_from_markers(
+            self._reference_pathN.update_boundaries_from_markers(
+                np.array(left_pts), np.array(right_pts)
+            )
+            self._reference_path10.update_boundaries_from_markers(
                 np.array(left_pts), np.array(right_pts)
             )
             # 1回取得できれば十分なので、このサブスクライバを破棄する

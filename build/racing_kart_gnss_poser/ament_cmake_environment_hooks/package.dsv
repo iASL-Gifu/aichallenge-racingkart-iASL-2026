@@ -1,0 +1,4 @@
+source;share/racing_kart_gnss_poser/local_setup.bash
+source;share/racing_kart_gnss_poser/local_setup.dsv
+source;share/racing_kart_gnss_poser/local_setup.sh
+source;share/racing_kart_gnss_poser/local_setup.zsh

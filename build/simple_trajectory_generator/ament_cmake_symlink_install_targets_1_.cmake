@@ -1,0 +1,1 @@
+ament_cmake_symlink_install_targets("TARGET_FILES" "/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/simple_trajectory_generator/simple_trajectory_generator_node" "TARGETS" "simple_trajectory_generator_node" "DESTINATION" "lib/simple_trajectory_generator")

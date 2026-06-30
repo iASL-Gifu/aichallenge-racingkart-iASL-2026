@@ -102,8 +102,9 @@ segments = []
 # origin_x/y を「足す」ことで OSM の local_x/local_y と同じ絶対 UTM 座標に変換する
 for ll in lanelets:
 
-    origin_x = 89608.61776988552
-    origin_y = 43116.542553572915
+    # Mathematically derived MGRS Origin coordinates to match Lanelet2 projection
+    origin_x = 89613.9506555
+    origin_y = 43040.8151415
 
     center = np.array([
         [p.x + origin_x, p.y + origin_y]
@@ -416,9 +417,9 @@ else:
     _wp_y   = _wp_data[:, 2]
     _wp_psi = _wp_data[:, 3]
 
-    # MPC coordinate offset (reference_path.py と同じ値)
-    _X_OFFSET = 5.332886
-    _Y_OFFSET = -75.727413
+    # Both track.csv and traj_race_cl_mpc.csv are now in the absolute MGRS frame, so no offset is needed.
+    _X_OFFSET = 0.0
+    _Y_OFFSET = 0.0
     _wp_x = _wp_x + _X_OFFSET
     _wp_y = _wp_y + _Y_OFFSET
 

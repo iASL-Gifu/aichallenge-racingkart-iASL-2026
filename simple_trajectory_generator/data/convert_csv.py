@@ -29,8 +29,13 @@ df = df.iloc[::-1].reset_index(drop=True)
 # ======================
 # 座標補正
 # ======================
-X_OFFSET = 5.332886
-Y_OFFSET = -75.727413
+# 1. 旧座標系（ズレたtrack.csvで最適化されたtraj_race_cl.csv）を絶対MGRS座標に補正する場合:
+X_OFFSET = 5.332885642
+Y_OFFSET = -75.727412117
+
+# 2. 新座標系（絶対MGRS座標で生成したtrack.csvで最適化したtraj_race_cl.csv）を使用する場合:
+# X_OFFSET = 0.0
+# Y_OFFSET = 0.0
 
 df["x_m"] += X_OFFSET
 df["y_m"] += Y_OFFSET

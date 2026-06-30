@@ -1,0 +1,1 @@
+/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/pilot_net_controller/pilot_net_controller/__init__.py

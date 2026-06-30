@@ -1,0 +1,1 @@
+ament_cmake_symlink_install_targets("TARGET_FILES" "/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/imu_gnss_poser/imu_gnss_poser_node" "TARGETS" "imu_gnss_poser_node" "DESTINATION" "lib/imu_gnss_poser")

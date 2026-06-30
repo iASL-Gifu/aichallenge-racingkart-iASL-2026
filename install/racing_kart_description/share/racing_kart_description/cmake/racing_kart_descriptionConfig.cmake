@@ -1,0 +1,1 @@
+/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/racing_kart_description/ament_cmake_core/racing_kart_descriptionConfig.cmake

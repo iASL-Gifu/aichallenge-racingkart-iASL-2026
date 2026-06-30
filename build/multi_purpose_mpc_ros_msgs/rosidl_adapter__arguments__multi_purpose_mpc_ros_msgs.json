@@ -1,0 +1,8 @@
+{
+  "package_name": "multi_purpose_mpc_ros_msgs",
+  "non_idl_tuples": [
+    "/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros_msgs:msg/AckermannControlBoostCommand.msg",
+    "/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros_msgs:msg/BorderCells.msg",
+    "/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros_msgs:msg/PathConstraints.msg"
+  ]
+}

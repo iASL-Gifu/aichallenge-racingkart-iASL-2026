@@ -1,0 +1,1 @@
+ament_cmake_symlink_install_targets("TARGET_FILES" "/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/path_to_trajectory/path_to_trajectory_node" "TARGETS" "path_to_trajectory_node" "DESTINATION" "lib/path_to_trajectory")

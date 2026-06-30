@@ -1,0 +1,1 @@
+/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/tiny_lidar_net_controller/tiny_lidar_net_controller/tiny_lidar_net_controller_core.py
