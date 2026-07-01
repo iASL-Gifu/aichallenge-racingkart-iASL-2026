@@ -126,7 +126,8 @@
       <!-- Customizable -->
       <node pkg="simple_trajectory_generator" exec="simple_trajectory_generator_node" name="simple_trajectory_generator" output="screen">
             <!-- Use raceline from Multi-Purpose-MPC package for MPC experiments -->
-            <param name="csv_path" value="$(find-pkg-share multi_purpose_mpc_ros)/env/final_ver3/raceline_converted_2m.csv"/>
+            <!--param name="csv_path" value="$(find-pkg-share multi_purpose_mpc_ros)/env/final_ver3/raceline_converted_2m.csv"/-->
+            <param name="csv_path" value="$(find-pkg-share multi_purpose_mpc_ros)/env/final_ver3/traj_mincurv.csv"/>
             <!-- previous: $(find-pkg-share simple_trajectory_generator)/data/raceline_awsim_30km_from_garage.csv -->
             <param name="z" value="6.5"/>
       </node>
@@ -135,7 +136,7 @@
   </group>
 
   <node pkg="editor_tool_server" exec="interactive_server" output="screen" name="editor_tool_server">
-  <param name="csv_file_path" value="$(find-pkg-share multi_purpose_mpc_ros)/env/final_ver3/raceline_converted_2m.csv"/>
+  <param name="csv_file_path" value="$(find-pkg-share multi_purpose_mpc_ros)/env/final_ver3/traj_mincurv.csv"/>
   <param name="publish_on_initialize" value="true"/>
   <param name="wait_seconds" value="5.0"/>
   <param name="grad_min_speed" value="0.0"/>
