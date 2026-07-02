@@ -220,6 +220,25 @@ class MPC:
             ur[n*self.nu:(n+1)*self.nu] = [v_ref, kappa_ref]
             uq[n * self.nx:(n+1)*self.nx] = B_lin.dot([v_ref, kappa_ref]) - f
 
+            # Set spatial reference e_y to target lane center with vehicle safety offset
+            target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
+            if target_lane is not None:
+                lanes = self.model.reference_path.get_lane_bounds(self.model.wp_id + n)
+                if lanes and target_lane < len(lanes):
+                    ub_lane, lb_lane = lanes[target_lane]
+                    half_width = self.model.width / 2.0
+                    safety_offset = half_width + 0.15  # 車幅半分 + 15cm マージン
+                    
+                    if target_lane == 0:  # 右車線 (L0)
+                        # 中央車線との境界 (lb_lane) から右側に離れ、右端 (ub_lane) を越えないようにする
+                        lane_center = min(lb_lane + safety_offset, ub_lane - (half_width + 0.05))
+                    elif target_lane == 2:  # 左車線 (L2)
+                        # 中央車線との境界 (ub_lane) から左側に離れ、左端 (lb_lane) を越えないようにする
+                        lane_center = max(ub_lane - safety_offset, lb_lane + (half_width + 0.05))
+                    else:  # 中央車線 (L1)
+                        lane_center = (ub_lane + lb_lane) / 2.0
+                    xr[n * self.nx] = lane_center
+
             # Constrain maximum speed based on curvature
             # 曲率にもとづいた最大速度の制約
             if self.use_max_kappa_pred:
@@ -240,10 +259,27 @@ class MPC:
 
             #if n == 0 and self.debug_counter % 20 == 0:
             #    print(
-            #        f"kappa_pred={self.debug_max_kappa_pred:.4f} "
-            #        f"vmax_dyn={self.debug_vmax_dyn:.2f}",
-            #        flush=True
-            #    )
+        #        f"kappa_pred={self.debug_max_kappa_pred:.4f} "
+        #        f"vmax_dyn={self.debug_vmax_dyn:.2f}",
+        #        flush=True
+        #    )
+
+        # 終端状態に対する目標
+        target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
+        if target_lane is not None:
+            lanes = self.model.reference_path.get_lane_bounds(self.model.wp_id + N)
+            if lanes and target_lane < len(lanes):
+                ub_lane, lb_lane = lanes[target_lane]
+                half_width = self.model.width / 2.0
+                safety_offset = half_width + 0.15  # 車幅半分 + 15cm マージン
+                
+                if target_lane == 0:
+                    lane_center = min(lb_lane + safety_offset, ub_lane - (half_width + 0.05))
+                elif target_lane == 2:
+                    lane_center = max(ub_lane - safety_offset, lb_lane + (half_width + 0.05))
+                else:
+                    lane_center = (ub_lane + lb_lane) / 2.0
+                xr[N * self.nx] = lane_center
 
         t_linearize = time.perf_counter()
 

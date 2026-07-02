@@ -151,6 +151,11 @@ class MPCController(Node):
         self._setup_parameters_callback()
         self._setup_pub_sub()
 
+        # Determine ego vehicle ID from ROS_DOMAIN_ID
+        domain_id = int(os.environ.get("ROS_DOMAIN_ID", "1"))
+        self._ego_vehicle_id = f"d{domain_id}"
+        self.get_logger().info(f"Initialized MPC Controller. Ego vehicle ID set to: {self._ego_vehicle_id}")
+
         if self.use_sim_time:
             self.get_logger().warn("------------------------------------")
             self.get_logger().warn("use_sim_time is enabled!")
@@ -325,13 +330,14 @@ class MPCController(Node):
         def create_map() -> Map:
             return Map(self.in_pkg_share(self._cfg.map.yaml_path)) # type: ignore
 
-        def create_ref_path(map: Map) -> ReferencePath:
+        def create_ref_path(map: Map, custom_csv_path: str = None) -> ReferencePath:
             cfg_ref_path = self._cfg.reference_path # type: ignore
+            target_csv = custom_csv_path if custom_csv_path is not None else cfg_ref_path.csv_path
 
-            is_ref_path_given = cfg_ref_path.csv_path != "" # type: ignore
+            is_ref_path_given = target_csv != "" # type: ignore
             if is_ref_path_given:
-                print("Using given reference path")
-                wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
+                print(f"Using given reference path: {target_csv}")
+                wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(target_csv)) # type: ignore
                 return ReferencePath(
                     map,
                     wp_x,
@@ -440,26 +446,56 @@ class MPCController(Node):
 
         self._map = create_map()
 
-        self._reference_pathN = create_ref_path(self._map)
-        self._reference_path10 = create_ref_path(self._map)
+        # Race セットの初期化
+        self._reference_pathN_race = create_ref_path(self._map)
+        self._reference_path10_race = create_ref_path(self._map)
+        self._carN_race = create_car(self._reference_pathN_race)
+        self._car10_race = create_car(self._reference_path10_race)
+        self._mpc_cfg_race, self._mpcN_race = create_mpc(self._carN_race, self._cfg.mpc.N)
+        _, self._mpc10_race = create_mpc(self._car10_race, 9, self._cfg.mpc.R10)
+        compute_speed_profile(self._carN_race, self._mpc_cfg_race)
+        compute_speed_profile(self._car10_race, self._mpc_cfg_race)
 
-        self._carN = create_car(self._reference_pathN)
-        self._car10 = create_car(self._reference_path10)
+        # Center セットの初期化 ("env/min_curv/traj_center_mpc.csv")
+        if self.USE_OBSTACLE_AVOIDANCE:
+            center_path = "env/min_curv/traj_center_mpc.csv"
+            self._reference_pathN_center = create_ref_path(self._map, custom_csv_path=center_path)
+            self._reference_path10_center = create_ref_path(self._map, custom_csv_path=center_path)
+            self._carN_center = create_car(self._reference_pathN_center)
+            self._car10_center = create_car(self._reference_path10_center)
+            self._mpc_cfg_center, self._mpcN_center = create_mpc(self._carN_center, self._cfg.mpc.N)
+            _, self._mpc10_center = create_mpc(self._car10_center, 9, self._cfg.mpc.R10)
+            compute_speed_profile(self._carN_center, self._mpc_cfg_center)
+            compute_speed_profile(self._car10_center, self._mpc_cfg_center)
+        else:
+            # 障害物回避が無効の場合はセンターラインのCSVを読まず、Race用の変数で代替する
+            self._reference_pathN_center = self._reference_pathN_race
+            self._reference_path10_center = self._reference_path10_race
+            self._carN_center = self._carN_race
+            self._car10_center = self._car10_race
+            self._mpc_cfg_center = self._mpc_cfg_race
+            self._mpcN_center = self._mpcN_race
+            self._mpc10_center = self._mpc10_race
 
-        self._mpc_cfg, self._mpcN = create_mpc(self._carN,self._cfg.mpc.N)
-        _, self._mpc10 = create_mpc(self._car10, 9,self._cfg.mpc.R10)
-        
+        # デフォルトは Race セット
+        self._reference_pathN = self._reference_pathN_race
+        self._reference_path10 = self._reference_path10_race
+        self._carN = self._carN_race
+        self._car10 = self._car10_race
+        self._mpc_cfg = self._mpc_cfg_race
+        self._mpcN = self._mpcN_race
+        self._mpc10 = self._mpc10_race
+
         self._car = self._carN
         self._reference_path = self._reference_pathN
         self._mpc = self._mpcN
-        
-        compute_speed_profile(self._carN, self._mpc_cfg)
-        compute_speed_profile(self._car10, self._mpc_cfg)
 
         self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = create_ref_vel_configulator()
 
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
+        self._last_lane_change_time = None
+        self._target_lane_idx = None
 
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
@@ -630,6 +666,22 @@ class MPCController(Node):
             msg.upper_bounds, msg.lower_bounds, msg.rows, msg.cols)
 
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
+        # If obstacle avoidance is disabled, clear tracker and bypass V2X processing entirely.
+        if not self.USE_OBSTACLE_AVOIDANCE:
+            if hasattr(self, '_v2x_tracker'):
+                self._v2x_tracker._active = []
+            return
+
+        # Create a new list excluding the ego vehicle
+        filtered_vehicles = []
+        for v in msg.vehicles:
+            if hasattr(self, '_ego_vehicle_id') and v.vehicle_id == self._ego_vehicle_id:
+                continue
+            filtered_vehicles.append(v)
+        
+        # Override msg.vehicles with the filtered list
+        msg.vehicles = filtered_vehicles
+
         self._v2x_tracker.update(msg)
         predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
         self._dynamic_obstacles = predictions_to_obstacles(
@@ -1004,22 +1056,89 @@ class MPCController(Node):
             elapsed_from_last_colliding = (now - self._last_colliding_time).nanoseconds / 1e9
             if elapsed_from_last_colliding < 5.0:
                 is_colliding = True
-        
+
         #オドメトリ(x,y,yaw,v)取得
         pose = odom_to_pose_2d(self._odom) # type: ignore
         v = self._odom.twist.twist.linear.x
+        
+        # --- Dynamic Trajectory Switching (Race ↔ Center) ---
+        opponent_ahead_detected = getattr(self, '_opponent_ahead_detected', False)
+        
+        # Estimate closest opponent distance in waypoint steps (signed)
+        temp_car = self._carN_race
+        temp_car.update_states(pose.x, pose.y, pose.theta)
+        temp_car.get_current_waypoint()
+        wp_temp = temp_car.wp_id
+        N_total_temp = self._reference_pathN_race.n_waypoints
+
+        closest_opp_ahead = 99999
+        closest_opp_behind = 99999
+        if self.USE_OBSTACLE_AVOIDANCE and hasattr(self, '_v2x_tracker'):
+            for vid in self._v2x_tracker.active_vehicle_ids():
+                buf = self._v2x_tracker._samples.get(vid)
+                if buf:
+                    _, opp_x, opp_y = buf[-1]
+                    opp_wp_id = temp_car.get_closest_waypoint(opp_x, opp_y)
+                    # 符号付きインデックス差（-N_total/2 〜 +N_total/2）
+                    wp_diff = (opp_wp_id - wp_temp + N_total_temp // 2) % N_total_temp - N_total_temp // 2
+                    
+                    if wp_diff >= 0:
+                        if wp_diff < closest_opp_ahead:
+                            closest_opp_ahead = wp_diff
+                    else:
+                        if abs(wp_diff) < closest_opp_behind:
+                            closest_opp_behind = abs(wp_diff)
+
+        # Apply hysteresis using both ahead and behind distances
+        if opponent_ahead_detected:
+            # 他車が前方50ステップより先、かつ後方30ステップより後ろに完全に離れるまでCenter軌道を維持
+            if closest_opp_ahead > 50 and closest_opp_behind > 30:
+                opponent_ahead_detected = False
+        else:
+            # 他車が前方35ステップ以内に接近したらCenter軌道に切り替え
+            if closest_opp_ahead < 35:
+                opponent_ahead_detected = True
+
+        # Enforce racing-line-only behavior when obstacle avoidance is disabled
+        if not self.USE_OBSTACLE_AVOIDANCE:
+            opponent_ahead_detected = False
+
+        self._opponent_ahead_detected = opponent_ahead_detected
+
+        if opponent_ahead_detected:
+            self._reference_pathN = self._reference_pathN_center
+            self._reference_path10 = self._reference_path10_center
+            self._carN = self._carN_center
+            self._car10 = self._car10_center
+            self._mpc_cfg = self._mpc_cfg_center
+            self._mpcN = self._mpcN_center
+            self._mpc10 = self._mpc10_center
+        else:
+            self._reference_pathN = self._reference_pathN_race
+            self._reference_path10 = self._reference_path10_race
+            self._carN = self._carN_race
+            self._car10 = self._car10_race
+            self._mpc_cfg = self._mpc_cfg_race
+            self._mpcN = self._mpcN_race
+            self._mpc10 = self._mpc10_race
+
 
         #車両モデル更新
         self._car.update_states(pose.x, pose.y, pose.theta)
 
         #MPCの切り替え処理
-        self._car.get_current_waypoint()
-        wp = self._car.wp_id
-        if (215 <= wp <= 245) or (280 <= wp <= 305):
-            self._mpc = self._mpc10
-            self._car = self._car10
-            self._reference_path = self._reference_path10
-            #print("using mpc10")
+        if not opponent_ahead_detected:
+            self._car.get_current_waypoint()
+            wp = self._car.wp_id
+            if (215 <= wp <= 245) or (280 <= wp <= 305):
+                self._mpc = self._mpc10
+                self._car = self._car10
+                self._reference_path = self._reference_path10
+                #print("using mpc10")
+            else:
+                self._mpc = self._mpcN
+                self._car = self._carN
+                self._reference_path = self._reference_pathN
         else:
             self._mpc = self._mpcN
             self._car = self._carN
@@ -1052,7 +1171,7 @@ class MPCController(Node):
                     opp_wp_id = self._car.get_closest_waypoint(opp_x, opp_y)
                     
                     wp_diff = (opp_wp_id - wp) % N_total
-                    if 0 < wp_diff < 35:  # within ~21 meters
+                    if 0 < wp_diff < 25:  # within ~21 meters
                         if wp_diff < min_wp_diff:
                             min_wp_diff = wp_diff
                             opponent_ahead = opp_wp_id
@@ -1070,37 +1189,61 @@ class MPCController(Node):
                             opp_vx, opp_vy = self._v2x_tracker.velocity(vid)
                             opponent_v_lead = math.hypot(opp_vx, opp_vy)
 
-        # 205 <= wp <= 245 の範囲では追い越しをしないように設定
-        if 205 <= wp <= 245:
-            is_overtake_zone = False
-        else:
-            is_overtake_zone = True
+        # 常に追い越しを許可する
+        is_overtake_zone = True
+
+        # Calculate candidate target lane based on opponent position
+        new_target_lane_idx = self._target_lane_idx  # Keep current active lane by default
 
         if opponent_ahead is not None:
             if is_overtake_zone:
                 # 3車線用の選択ロジック:
                 if opponent_offset > 0.0:
                     # 前方車両が左側にいる -> 右車線 (L0) を走行して追い越し
-                    self._target_lane_idx = 0
-                    target_str = "right (L0)"
+                    new_target_lane_idx = 0
                 else:
                     # 前方車両が右側にいる -> 左車線 (L2) を走行して追い越し
-                    self._target_lane_idx = 2
-                    target_str = "left (L2)"
-                self.get_logger().info(
-                    f"[Overtake] Opponent ahead at wp {opponent_ahead}. Offset: {opponent_offset:.2f}. "
-                    f"Overtaking via {target_str}.",
-                    throttle_duration_sec=1.0
-                )
+                    new_target_lane_idx = 2
             else:
                 # 追い越し不可エリア -> 中央車線 (L1) を走行して追従
-                self._target_lane_idx = 1
-                self.get_logger().info(
-                    f"[Follow] Opponent ahead at wp {opponent_ahead} in non-overtake zone. Following via center lane (L1).",
-                    throttle_duration_sec=1.0
-                )
+                new_target_lane_idx = 1
+        elif not opponent_ahead_detected:
+            # 追い越しモード自体が終了した場合はターゲット車線をクリア
+            new_target_lane_idx = None
+
+        # Apply lane lock timer (2.0 seconds) to avoid chattering
+        current_time_sec = float(now.nanoseconds) / 1e9
+        prev_lane_idx = self._target_lane_idx
+
+        if new_target_lane_idx != prev_lane_idx:
+            can_change_lane = True
+            
+            # Check elapsed time since last lane change
+            if self._last_lane_change_time is not None:
+                elapsed = current_time_sec - self._last_lane_change_time
+                if elapsed < 2.5:
+                    can_change_lane = False  # Lock lane change
+
+            if can_change_lane:
+                self._target_lane_idx = new_target_lane_idx
+                self._last_lane_change_time = current_time_sec
+                if new_target_lane_idx is not None:
+                    target_str = "right (L0)" if new_target_lane_idx == 0 else "left (L2)" if new_target_lane_idx == 2 else "center (L1)"
+                    self.get_logger().info(
+                        f"[LaneChange] Switching to lane {target_str} (lock for 5s)",
+                        throttle_duration_sec=1.0
+                    )
+                else:
+                    self.get_logger().info(
+                        "[LaneChange] Switching back to free driving (lock for 5s)",
+                        throttle_duration_sec=1.0
+                    )
+            else:
+                # Keep the previous lane index to avoid chattering
+                pass
         else:
-            self._target_lane_idx = None
+            # No lane change request, keep active candidate
+            self._target_lane_idx = new_target_lane_idx
 
         # Apply target lane
         self._reference_path.target_lane_idx = self._target_lane_idx
@@ -1123,9 +1266,11 @@ class MPCController(Node):
             # 横方向の差が 1.5m 以上の場合は、別車線での追い越し中とみなして加速を許可する。
             e_y = self._car.spatial_state.e_y
             lat_dist = abs(opponent_offset - e_y)
+            
+            # --- Standard Follow (Same Lane) ---
             if opponent_ahead is not None and lat_dist < 1.5:
-                if opponent_distance < 15.0:
-                    d_target = 7.5  # 目標車間距離 (5m 〜 10m の中央値 7.5m)
+                if opponent_distance < 10.0:
+                    d_target = 8.0 # 目標車間距離 (5m 〜 10m の中央値 7.5m)
                     K_p = 1.2       # 比例ゲイン
                     v_ref_acc = opponent_v_lead + K_p * (opponent_distance - d_target)
                     v_ref_acc = max(0.0, v_ref_acc)  # 後退は禁止のため下限は0
@@ -1138,6 +1283,23 @@ class MPCController(Node):
                             f"Target speed limited to {ref_vel_kmph:.2f}m/s to maintain distance.",
                             throttle_duration_sec=1.0
                         )
+
+            # --- Emergency Spacing Control (Ultra-Close proximity, regardless of lane offset) ---
+            # 追い越し中であっても、縦の車間距離が5.0m未満になったら安全のため減速して車間を開ける
+            if opponent_ahead is not None and opponent_distance < 5.0:
+                d_target_emg = 6.5  # 緊急目標車間距離
+                K_p_emg = 1.5       # 強めの減速比例ゲイン
+                v_ref_emg = opponent_v_lead + K_p_emg * (opponent_distance - d_target_emg)
+                v_ref_emg = max(1.0, v_ref_emg)  # 最低走行速度1.0m/sを確保しスタックを防ぐ
+                
+                ref_vel_kmph = min(ref_vel_kmph, v_ref_emg)
+                
+                if self._loop % int(self._mpc_cfg.control_rate) == 0:
+                    self.get_logger().warn(
+                        f"[EmergencyACC] Too close to opponent! Dist: {opponent_distance:.2f}m. "
+                        f"Overriding target speed to {ref_vel_kmph:.2f}m/s to create safety gap.",
+                        throttle_duration_sec=1.0
+                    )
 
             self._mpc.update_v_max(ref_vel_kmph)
             v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)

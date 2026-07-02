@@ -125,13 +125,13 @@
 
       <!-- Customizable -->
       <node pkg="simple_trajectory_generator" exec="simple_trajectory_generator_node" name="simple_trajectory_generator" output="screen">
-            <param name="csv_path" value="$(find-pkg-share simple_trajectory_generator)/data/raceline_awsim_15km.csv"/>
+            <param name="csv_path" value="$(find-pkg-share aichallenge_submit_launch)/data/traj_race_cl_editor.csv"/>
             <param name="z" value="6.5"/>
       </node>
       
     </group>
   </group>
-
+  <!--
   <node pkg="editor_tool_server" exec="interactive_server" output="screen" name="editor_tool_server">
     <param name="csv_file_path" value="/aichallenge/aichallenge-trajectory-editor/csv/raceline_awsim_15km_pp.csv"/>
     <param name="publish_on_initialize" value="true"/>
@@ -140,6 +140,8 @@
     <param name="grad_mid_speed" value="15.0"/>
     <param name="grad_max_speed" value="40.0"/>
   </node>
+  -->
+
 
   <!-- Control -->
   <group if="$(eval &quot;'$(var control_method)' == 'pure_pursuit'&quot;)">

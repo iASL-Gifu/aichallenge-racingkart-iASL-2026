@@ -217,7 +217,7 @@ class ReferencePath:
         self.border_cells = BorderCells()
         self.target_lane_idx = None
         self.n_lanes = 3
-        self.inner_lane_width = 1.0
+        self.inner_lane_width = 0.5
 
         self.COUNT = 0
 
@@ -399,6 +399,38 @@ class ReferencePath:
             # Set border cells of waypoint
             wp.static_border_cells = (width_info[1], width_info[3])   # (left_border_cell(x,y), right_border_cell(x,y))
         
+        # Try to load waypoint_bounds.csv to overwrite with clean, smooth offline-generated boundaries
+        import os
+        import pandas as pd
+        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        bounds_path = os.path.join(pkg_dir, "env/waypoint_bounds.csv")
+        
+        if os.path.exists(bounds_path):
+            try:
+                df_bounds = pd.read_csv(bounds_path)
+                ub_vals = df_bounds['ub'].to_numpy()
+                lb_vals = df_bounds['lb'].to_numpy()
+                
+                # Verify length matches waypoints
+                if len(ub_vals) == len(self.waypoints):
+                    for idx, wp in enumerate(self.waypoints):
+                        wp.ub = float(ub_vals[idx])
+                        wp.lb = float(lb_vals[idx])
+                    print(f"[ReferencePath] Successfully loaded offline waypoint_bounds.csv for {len(self.waypoints)} waypoints.")
+                else:
+                    # If mismatch, interpolate to fit the waypoints length
+                    from scipy.interpolate import interp1d
+                    s_orig = np.linspace(0, 1, len(ub_vals))
+                    s_new = np.linspace(0, 1, len(self.waypoints))
+                    ub_interp = interp1d(s_orig, ub_vals, kind='linear')(s_new)
+                    lb_interp = interp1d(s_orig, lb_vals, kind='linear')(s_new)
+                    for idx, wp in enumerate(self.waypoints):
+                        wp.ub = float(ub_interp[idx])
+                        wp.lb = float(lb_interp[idx])
+                    print(f"[ReferencePath] Interpolated offline waypoint_bounds.csv from {len(ub_vals)} to {len(self.waypoints)} waypoints.")
+            except Exception as e:
+                print(f"[ReferencePath] Error loading offline waypoint_bounds.csv: {e}")
+
         self.reset_dynamic_constraints()
 
     def _get_min_width(self, wp_x_w, wp_y_w, wp_x, wp_y, t_x, t_y, max_width):
@@ -725,7 +757,7 @@ class ReferencePath:
         if n_lanes is None:
             n_lanes = getattr(self, 'n_lanes', 2)
         if inner_lane_width is None:
-            inner_lane_width = getattr(self, 'inner_lane_width', 1.0)
+            inner_lane_width = getattr(self, 'inner_lane_width', 0.5)
 
         wp = self.get_waypoint(wp_id)
 
@@ -909,20 +941,34 @@ class ReferencePath:
         target_lane = getattr(self, 'target_lane_idx', None)
 
         if target_lane is not None and wp_idx is not None:
-            # 特定の車線境界を使用する
+            # 追い越し中（target_lane が設定されているとき）
             lanes = self.get_lane_bounds(wp_idx)
             if lanes and target_lane < len(lanes):
                 ub_lane, lb_lane = lanes[target_lane]
                 angle_ub = np.mod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
-                ub_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
-                lb_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
-                ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
-                lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
+                
+                if target_lane == 0:  # 右車線 (L0)
+                    # 左端 (ub_p, イエローライン側) は L0 の下限 (lb_lane) を使用
+                    ub_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
+                    ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
+                    # 右端 (lb_p, コース境界側) はマップ本来の右端 static_border_cells[1] を直接使用
+                    lb_p = self.map.w2m(wp.static_border_cells[1][0], wp.static_border_cells[1][1])
+                elif target_lane == 2:  # 左車線 (L2)
+                    # 左端 (ub_p, コース境界側) はマップ本来の左端 static_border_cells[0] を直接使用
+                    ub_p = self.map.w2m(wp.static_border_cells[0][0], wp.static_border_cells[0][1])
+                    # 右端 (lb_p, イエローライン側) は L2 の上限 (ub_lane) を使用
+                    lb_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
+                    lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
+                else:  # 中央車線 (L1) またはその他
+                    ub_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
+                    lb_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
+                    ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
+                    lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
             else:
                 ub_p = self.map.w2m(wp.static_border_cells[0][0], wp.static_border_cells[0][1])
                 lb_p = self.map.w2m(wp.static_border_cells[1][0], wp.static_border_cells[1][1])
         else:
-            # Get waypoint's border cells in map coordinates
+            # 通常走行（Raceモード時など）はコース全体をスキャン範囲とする
             ub_p = self.map.w2m(wp.static_border_cells[0][0],
                                 wp.static_border_cells[0][1])
             lb_p = self.map.w2m(wp.static_border_cells[1][0],
@@ -1117,7 +1163,17 @@ class ReferencePath:
             lb = compute_bound(wp, lb_ls)
 
             segment_length = ub - lb
-            segment_length_sm = segment_length - 2.0 * safety_margin
+            
+            # 追い越し中（target_lane が設定されているとき）は、安全マージンが車線幅に対して大きすぎる場合に
+            # コリドーが潰れてしまわないよう、safety_margin を車線幅の 40% 以下に自動制限する
+            active_safety_margin = safety_margin
+            target_lane = getattr(self, 'target_lane_idx', None)
+            if target_lane is not None:
+                max_margin = segment_length * 0.4
+                if active_safety_margin > max_margin:
+                    active_safety_margin = max(max_margin, 0.05)
+
+            segment_length_sm = segment_length - 2.0 * active_safety_margin
 
             # Check feasibility of the path
             # segment_lengthから両側のsafety_marginを引いた値がmin_segment_lengthより小さい場合は、
@@ -1128,11 +1184,12 @@ class ReferencePath:
                 # print(f"Waypoint: {wp_id}, n: {n}, Upper bound: {ub}")
                 # print(f"min_width: {min_width}, safety_margin: {safety_margin}, segment_length: {segment_length}, segment_length_sm: {segment_length_sm}")
                 (ub, lb) = (wp.ub, wp.lb)
+                active_safety_margin = safety_margin
                 # print(f"Updated Upper bound: {wp.ub}, Updated Lower bound: {wp.lb}")
 
             # Subtract safety margin
-            ub_sm = ub - safety_margin
-            lb_sm = lb + safety_margin
+            ub_sm = ub - active_safety_margin
+            lb_sm = lb + active_safety_margin
 
             if wp.ub_sm < ub_sm:
               ub_sm = wp.ub_sm

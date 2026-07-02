@@ -46,14 +46,14 @@ mpc:
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
   R: [100000.0, 500.0]
-  R10: [100000.0, 0.0]
+  R10: [100000.0,100.0]
   a_min: 0.0 # m/s^2
   a_max: 10.0 # m/s^2
   delta_max_deg: 52.0 # degrees
   steer_rate_max: 2.50 # rad/s max_steering_rate
-  control_rate: 70.0 # Hz Ts=1/control_rate
-  steering_tire_angle_gain_var: 1.639
-  # steering_tire_angle_gain_var: 1.0
+  control_rate: 60.0 # Hz Ts=1/control_rate
+  #steering_tire_angle_gain_var: 1.639
+  steering_tire_angle_gain_var: 1.50
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 0.2
@@ -67,6 +67,7 @@ mpc:
   ## Lap1: 53s, Lap2: 47s
 
   v_max: 40.0   # km/h
+  #大きいほうが速い
   ay_max: 100.0  # m/s^2, maximum lateral acceleration in curves
   Q: [3000000.0, 60000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
