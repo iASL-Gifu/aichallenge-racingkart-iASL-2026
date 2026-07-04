@@ -2,6 +2,7 @@
 
 import yaml
 import math
+import time
 from typing import List, Tuple, Optional, NamedTuple
 import dataclasses
 from scipy import sparse
@@ -22,7 +23,7 @@ from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoS
 
 from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Quaternion, Pose2D, Point, Vector3
+from geometry_msgs.msg import Quaternion, Pose2D, Point, Vector3, PoseWithCovarianceStamped
 from std_msgs.msg import ColorRGBA
 
 from rcl_interfaces.msg import SetParametersResult
@@ -145,7 +146,9 @@ class MPCController(Node):
         self._config_path = config_path
         self._ref_vel_config_path: Optional[str] = ref_vel_config_path
         self._cfg = self._load_config()
+        self._default_wp_id_offset = self._cfg.mpc.wp_id_offset
         self._odom: Optional[Odometry] = None
+        self._gnss_pose: Optional[PoseWithCovarianceStamped] = None
         self._enable_control = True
         self._initialize()
         self._setup_parameters_callback()
@@ -315,6 +318,7 @@ class MPCController(Node):
 
                 elif param.name == "wp_id_offset" and param.type_ == Parameter.Type.INTEGER:
                     mpc_cfg.wp_id_offset = param.value
+                    self._default_wp_id_offset = param.value
                     self._mpc.update_wp_id_offset(param.value)
                     self.get_logger().warn(f"wp_id_offset was updated to '{param.value}'")
 
@@ -581,6 +585,8 @@ class MPCController(Node):
         # Subscribers
         self._odom_sub = self.create_subscription(
             Odometry, "/localization/kinematic_state", self._odom_callback, 1)
+        self._gnss_sub = self.create_subscription(
+            PoseWithCovarianceStamped, "/sensing/gnss/pose_with_covariance", self._gnss_callback, 1)
         self._control_mode_request_sub = self.create_subscription(
             Bool, "control/control_mode_request_topic", self._control_mode_request_callback, 1)
         # simple_trajectory_generator publishes with BEST_EFFORT/KEEP_LAST(1) — match it
@@ -656,6 +662,9 @@ class MPCController(Node):
     def _odom_callback(self, msg: Odometry) -> None:
         self._odom = msg
 
+    def _gnss_callback(self, msg: PoseWithCovarianceStamped) -> None:
+        self._gnss_pose = msg
+
     def _control_mode_request_callback(self, msg):
         if msg.data and not self._enable_control:
             self.get_logger().info("Control mode request received")
@@ -712,7 +721,7 @@ class MPCController(Node):
             self._reference_path.update_boundaries_from_markers(
                 np.array(left_pts), np.array(right_pts)
             )
-            # 1回取得できれば十分なので、このサブスクライバを破棄する
+
             self.destroy_subscription(self._map_marker_sub)
             self._map_marker_sub = None
 
@@ -797,6 +806,16 @@ class MPCController(Node):
 
     def _wait_until_odom_received(self, timeout: float = 30.) -> None:
         self._wait_until_message_received(lambda: self._odom, 'odometry', timeout)
+
+    def _wait_until_gnss_received(self, timeout: float = 30.) -> None:
+        self._wait_until_message_received(lambda: self._gnss_pose, 'gnss_pose', timeout)
+
+    def get_ego_pose(self) -> Pose2D:
+        pose = odom_to_pose_2d(self._odom)
+        if self._gnss_pose is not None:
+            pose.x = self._gnss_pose.pose.pose.position.x
+            pose.y = self._gnss_pose.pose.pose.position.y
+        return pose
 
     def _wait_until_trajectory_received(self, timeout: float = 30.) -> None:
         if self._cfg.reference_path.update_by_topic:
@@ -906,23 +925,13 @@ class MPCController(Node):
                 p_next_left = Point(x=next_left_x, y=next_left_y, z=self._map_z)
                 p_next_right = Point(x=next_right_x, y=next_right_y, z=self._map_z)
 
-                '''
-                # 追い越しゾーンの場合は車線ごとの色、それ以外はグレー
-                if has_overtake and ref_path.overtake_zone[wp_id]:
-                # 全区間追い越し許可にしているため、常に車線ごとの色にする
-                color_curr = lane_colors[lane_idx]
-                color_next = lane_colors[lane_idx]
-                else:
-                    color_next = grey
-                '''
-
-                # 205 <= wp <= 245 の範囲では追い越し不可（グレー）にする
-                if 205 <= wp_id <= 245:
+                # 追い越し許可されている部分（overtake_zoneがTrue）は車線ごとの色、それ以外はグレー
+                if has_overtake and not ref_path.overtake_zone[wp_id]:
                     color_curr = grey
                 else:
                     color_curr = lane_colors[lane_idx]
 
-                if 205 <= next_wp_id <= 245:
+                if has_overtake and not ref_path.overtake_zone[next_wp_id]:
                     color_next = grey
                 else:
                     color_next = lane_colors[lane_idx]
@@ -1010,6 +1019,31 @@ class MPCController(Node):
         self._ref_path_pub.publish(ref_path_marker_array)
         self._ref_path_pub_dummy.publish(ref_path_marker_array)
 
+    def _switch_mpc(self, new_mpc, new_car, new_ref_path):
+        if self._mpc != new_mpc:
+            old_control = self._mpc.current_control
+            new_N = new_mpc.N
+            old_N = self._mpc.N
+            nu = 2
+            
+            new_control = np.zeros(nu * new_N)
+            if old_control is not None and len(old_control) > 0:
+                steps_to_copy = min(new_N, old_N)
+                new_control[:steps_to_copy * nu] = old_control[:steps_to_copy * nu]
+                if new_N > old_N:
+                    last_v = old_control[-2]
+                    last_delta = old_control[-1]
+                    for i in range(old_N, new_N):
+                        new_control[i*nu : (i+1)*nu] = [last_v, last_delta]
+            
+            new_mpc.current_control = new_control
+            new_mpc.previous_steering = self._mpc.previous_steering
+            new_mpc.infeasibility_counter = self._mpc.infeasibility_counter
+            
+            self._mpc = new_mpc
+            self._car = new_car
+            self._reference_path = new_ref_path
+
     def _control(self):
         now = self.get_clock().now()
         t = (now - self._t_start).nanoseconds / 1e9
@@ -1058,7 +1092,7 @@ class MPCController(Node):
                 is_colliding = True
 
         #オドメトリ(x,y,yaw,v)取得
-        pose = odom_to_pose_2d(self._odom) # type: ignore
+        pose = self.get_ego_pose()
         v = self._odom.twist.twist.linear.x
         
         # --- Dynamic Trajectory Switching (Race ↔ Center) ---
@@ -1091,8 +1125,8 @@ class MPCController(Node):
 
         # Apply hysteresis using both ahead and behind distances
         if opponent_ahead_detected:
-            # 他車が前方50ステップより先、かつ後方30ステップより後ろに完全に離れるまでCenter軌道を維持
-            if closest_opp_ahead > 50 and closest_opp_behind > 30:
+            # 他車が前方35ステップより先、かつ後方20ステップより後ろに完全に離れるまでCenter軌道を維持
+            if closest_opp_ahead > 35 and closest_opp_behind > 20:
                 opponent_ahead_detected = False
         else:
             # 他車が前方35ステップ以内に接近したらCenter軌道に切り替え
@@ -1126,28 +1160,25 @@ class MPCController(Node):
         #車両モデル更新
         self._car.update_states(pose.x, pose.y, pose.theta)
 
-        #MPCの切り替え処理
+        #MPCの切り替え処理(Nよりもwp_id_offset変更したら安定したけど一応残しておく)
+        '''
         if not opponent_ahead_detected:
             self._car.get_current_waypoint()
             wp = self._car.wp_id
-            if (215 <= wp <= 245) or (280 <= wp <= 305):
-                self._mpc = self._mpc10
-                self._car = self._car10
-                self._reference_path = self._reference_path10
+            if (210 <= wp <= 243) :#or (261 <= wp <= 286):
+                self._switch_mpc(self._mpc10, self._car10, self._reference_path10)
                 #print("using mpc10")
             else:
-                self._mpc = self._mpcN
-                self._car = self._carN
-                self._reference_path = self._reference_pathN
+                self._switch_mpc(self._mpcN, self._carN, self._reference_pathN)
         else:
-            self._mpc = self._mpcN
-            self._car = self._carN
-            self._reference_path = self._reference_pathN
-
-        pose = odom_to_pose_2d(self._odom)
+            self._switch_mpc(self._mpcN, self._carN, self._reference_pathN)
+        
+        pose = self.get_ego_pose()
         self._mpc.previous_steering = self._last_u[1]
-
+        '''
+        
         self._car.update_states(pose.x, pose.y, pose.theta)
+        
         self._car.get_current_waypoint()
         wp = self._car.wp_id
 
@@ -1250,6 +1281,16 @@ class MPCController(Node):
         self._reference_pathN.target_lane_idx = self._target_lane_idx
         self._reference_path10.target_lane_idx = self._target_lane_idx
         
+        is_overtaking = (self._target_lane_idx is not None)
+        self._reference_path.is_overtaking = is_overtaking
+        self._reference_pathN.is_overtaking = is_overtaking
+        self._reference_path10.is_overtaking = is_overtaking
+        
+        # 追従・追い越し、または対象のWaypoint区間（カーブなど慎重さが求められる箇所）はwp_id_offsetを1にする
+        is_in_cautious_zone = (210 <= wp <= 243) or (261 <= wp <= 286)
+        active_offset = 1 if (is_overtaking or is_in_cautious_zone) else self._default_wp_id_offset
+        self._mpc.update_wp_id_offset(active_offset)
+        
         # MPCの実行
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
@@ -1261,14 +1302,14 @@ class MPCController(Node):
                 self._mpc_cfg.v_max)
             
             # --- ACC spacing control (車間距離維持制御) ---
-            # 前方車両がいて、かつ自車の走行ライン上（横方向の差が 1.5m 未満）に他車が位置する場合に
+            # 前方車両がいて、かつ自車の走行ライン上（横方向の差が 1.2m 未満）に他車が位置する場合に
             # 追従状態とみなして車間制御（5m〜10m）を有効化する。
-            # 横方向の差が 1.5m 以上の場合は、別車線での追い越し中とみなして加速を許可する。
+            # 横方向の差が 1.2m 以上の場合は、別車線での追い越し中とみなして加速を許可する。
             e_y = self._car.spatial_state.e_y
             lat_dist = abs(opponent_offset - e_y)
             
             # --- Standard Follow (Same Lane) ---
-            if opponent_ahead is not None and lat_dist < 1.5:
+            if opponent_ahead is not None and lat_dist < 1.2:
                 if opponent_distance < 10.0:
                     d_target = 8.0 # 目標車間距離 (5m 〜 10m の中央値 7.5m)
                     K_p = 1.2       # 比例ゲイン
@@ -1287,7 +1328,7 @@ class MPCController(Node):
             # --- Emergency Spacing Control (Ultra-Close proximity, regardless of lane offset) ---
             # 追い越し中であっても、縦の車間距離が5.0m未満になったら安全のため減速して車間を開ける
             if opponent_ahead is not None and opponent_distance < 5.0:
-                d_target_emg = 6.5  # 緊急目標車間距離
+                d_target_emg = 5.5  # 緊急目標車間距離
                 K_p_emg = 1.5       # 強めの減速比例ゲイン
                 v_ref_emg = opponent_v_lead + K_p_emg * (opponent_distance - d_target_emg)
                 v_ref_emg = max(1.0, v_ref_emg)  # 最低走行速度1.0m/sを確保しスタックを防ぐ
@@ -1313,8 +1354,7 @@ class MPCController(Node):
             else:
                 decel_v = last_v_cmd + self._mpc_cfg.a_min * dt
                 u[0] = np.clip(decel_v, 0.0, self._mpc_cfg.v_max)
-
-        #u[0] = 12.5         
+       
         if len(u) == 0:
             self.get_logger().error("No control signal", throttle_duration_sec=1)
             u = [0.0, 0.0]
@@ -1375,11 +1415,12 @@ class MPCController(Node):
     def run(self) -> None:
         self._wait_until_clock_received()
         self._wait_until_odom_received()
+        self._wait_until_gnss_received()
         self._wait_until_trajectory_received()
         self._wait_until_path_constraints_received()
 
         # initialize car states
-        pose = odom_to_pose_2d(self._odom) # type: ignore
+        pose = self.get_ego_pose()
         self._car.update_states(pose.x, pose.y, pose.theta)
         self._car.update_reference_path(self._car.reference_path)
 

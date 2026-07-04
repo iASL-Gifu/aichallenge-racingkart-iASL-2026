@@ -497,12 +497,13 @@ class MPC:
 
         except (TypeError, ValueError):
             id = nu * (self.infeasibility_counter + 1)
-            if id + 2 < len(self.current_control):
+            if id + 2 < len(self.current_control) and not np.all(self.current_control[id:id+2] == 0.0):
                 u = np.array(self.current_control[id:id+2])
                 max_delta = np.abs(u[1])
             else:
-                u = np.array([0.0, 0.0])
-                max_delta = 0.0
+                # Keep last steering angle and use safe minimum speed (1.0 m/s)
+                u = np.array([1.0, self.previous_steering])
+                max_delta = np.abs(self.previous_steering)
 
             self.infeasibility_counter += 1
 

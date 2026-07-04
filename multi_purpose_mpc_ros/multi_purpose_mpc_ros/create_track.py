@@ -260,7 +260,7 @@ s = s / s[-1]
 cs_x = CubicSpline(s, points[:,0], bc_type="periodic")
 cs_y = CubicSpline(s, points[:,1], bc_type="periodic")
 
-s_new = np.linspace(0, 1, 2000)
+s_new = np.linspace(0, 1, 4000)
 x_new = cs_x(s_new)
 y_new = cs_y(s_new)
 
@@ -279,8 +279,8 @@ cs_y = CubicSpline(s, y, bc_type='periodic')
 '''
 #dx0 = np.gradient(x_new)
 #dy0 = np.gradient(y_new)
-dx0 = gaussian_filter1d(x_new, sigma=2, order=1, mode='wrap')
-dy0 = gaussian_filter1d(y_new, sigma=2, order=1, mode='wrap')
+dx0 = gaussian_filter1d(x_new, sigma=4, order=1, mode='wrap')
+dy0 = gaussian_filter1d(y_new, sigma=4, order=1, mode='wrap')
 
 norm0 = np.sqrt(dx0**2+dy0**2)+ 1e-8
 
@@ -354,7 +354,11 @@ w_right = np.array(w_right)
 #w_right = np.clip(w_right,0.3,5.0)
 
 
-with open("track.csv","w",newline="") as f:
+import os
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_out_track_path = os.path.join(_script_dir, "../env/track.csv")
+
+with open(_out_track_path,"w",newline="") as f:
 
     writer = csv.writer(f)
 
@@ -370,11 +374,11 @@ with open("track.csv","w",newline="") as f:
         writer.writerow([
             points[i,0],
             points[i,1],
-            w_right[i],
-            w_left[i]
+            abs(w_right[i]),
+            abs(w_left[i])
         ])
 
-track = np.loadtxt("track.csv", delimiter=",", skiprows=1)
+track = np.loadtxt(_out_track_path, delimiter=",", skiprows=1)
 
 x = track[:,0]
 y = track[:,1]
@@ -414,7 +418,7 @@ else:
     # 列: s_m, x_m, y_m, psi_rad, kappa_radpm, vx_mps, ax_mps3
     _wp_x   = _wp_data[:, 1]
     _wp_y   = _wp_data[:, 2]
-    _wp_psi = _wp_data[:, 3]
+    _wp_psi = _wp_data[:, 8]
 
     # MPC coordinate offset (reference_path.py と同じ値)
     _X_OFFSET = 5.332886

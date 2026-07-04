@@ -1,54 +1,76 @@
-import yaml
-import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from PIL import Image
 
-with open("final_ver4/occupancy_grid_map.yaml") as f:
-    info = yaml.safe_load(f)
+# CSV読み込み
+df = pd.read_csv("boundary.csv")
 
-origin_x = info["origin"][0]
-origin_y = info["origin"][1]
-res = info["resolution"]
+# 描画
+plt.figure(figsize=(10, 10))
 
-img = np.array(Image.open("final_ver3/occupancy_grid_map.pgm"))
-
-traj = np.loadtxt(
-    "env/min_curv/traj_race_cl_mpc.csv",
-    delimiter=",",
-    skiprows=1
+# 左境界
+plt.plot(
+    df["left_x"],
+    df["left_y"],
+    label="Left Boundary",
+    linewidth=2
 )
 
-x = traj[:, 1]
-y = traj[:, 2]
+# 右境界
+plt.plot(
+    df["right_x"],
+    df["right_y"],
+    label="Right Boundary",
+    linewidth=2
+)
 
-# map座標 → 画像座標
-px = (x - origin_x) / res
-py = img.shape[0] - (y - origin_y) / res
+# センターライン
+plt.plot(
+    df["center_x"],
+    df["center_y"],
+    'k--',
+    label="Centerline",
+    linewidth=1.5
+)
 
-# waypoint index
-idx = np.arange(len(traj))
+# 開始点
+plt.scatter(
+    df["left_x"].iloc[0],
+    df["left_y"].iloc[0],
+    marker="o",
+    s=80,
+    label="Left Start"
+)
 
-# 大きな画像
-plt.figure(figsize=(16, 16))
+plt.scatter(
+    df["right_x"].iloc[0],
+    df["right_y"].iloc[0],
+    marker="o",
+    s=80,
+    label="Right Start"
+)
 
-plt.imshow(img, cmap="gray", origin="upper")
-plt.plot(px, py, "r-", linewidth=2)
+# 終了点
+plt.scatter(
+    df["left_x"].iloc[-1],
+    df["left_y"].iloc[-1],
+    marker="x",
+    s=100,
+    label="Left End"
+)
 
-# 5 waypointごとに番号表示
-for i in range(0, len(idx), 5):
-    plt.text(
-        px[i],
-        py[i],
-        str(idx[i]),
-        fontsize=8,
-        color="blue"
-    )
+plt.scatter(
+    df["right_x"].iloc[-1],
+    df["right_y"].iloc[-1],
+    marker="x",
+    s=100,
+    label="Right End"
+)
 
-# 開始点と終了点
-plt.scatter(px[0], py[0], s=80, marker="o")
-plt.scatter(px[-1], py[-1], s=80, marker="x")
+plt.xlabel("X [m]")
+plt.ylabel("Y [m]")
+plt.title("Track Boundaries")
+plt.axis("equal")      # 縦横比を実際の距離に合わせる
+plt.grid(True)
+plt.legend()
 
-plt.title("traj_mincurv waypoint index")
-plt.axis("equal")
-plt.tight_layout()
 plt.show()
