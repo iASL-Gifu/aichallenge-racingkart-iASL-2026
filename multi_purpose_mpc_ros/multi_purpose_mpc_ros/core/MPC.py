@@ -155,6 +155,19 @@ class MPC:
     def update_QN(self, QN: np.ndarray):
         self.QN = QN
 
+    def _compute_lane_center(self, wp_id: int, target_lane: int) -> float:
+        lanes = self.model.reference_path.get_lane_bounds(wp_id)
+        if not lanes or target_lane >= len(lanes):
+            return 0.0
+        ub_lane, lb_lane = lanes[target_lane]
+        lane_center = (ub_lane + lb_lane) / 2.0
+        margin_from_edge = (self.model.width / 2.0) + 0.80
+        min_center = lb_lane + margin_from_edge
+        max_center = ub_lane - margin_from_edge
+        if min_center > max_center:
+            return lane_center
+        return float(np.clip(lane_center, min_center, max_center))
+
     def _init_problem(self, N, safety_margin):
         """
         Initialize optimization problem for current time step with steering rate constraints.
@@ -223,21 +236,7 @@ class MPC:
             # Set spatial reference e_y to target lane center with vehicle safety offset
             target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
             if target_lane is not None:
-                lanes = self.model.reference_path.get_lane_bounds(self.model.wp_id + n)
-                if lanes and target_lane < len(lanes):
-                    ub_lane, lb_lane = lanes[target_lane]
-                    half_width = self.model.width / 2.0
-                    safety_offset = half_width + 0.15  # 車幅半分 + 15cm マージン
-                    
-                    if target_lane == 0:  # 右車線 (L0)
-                        # 中央車線との境界 (lb_lane) から右側に離れ、右端 (ub_lane) を越えないようにする
-                        lane_center = min(lb_lane + safety_offset, ub_lane - (half_width + 0.05))
-                    elif target_lane == 2:  # 左車線 (L2)
-                        # 中央車線との境界 (ub_lane) から左側に離れ、左端 (lb_lane) を越えないようにする
-                        lane_center = max(ub_lane - safety_offset, lb_lane + (half_width + 0.05))
-                    else:  # 中央車線 (L1)
-                        lane_center = (ub_lane + lb_lane) / 2.0
-                    xr[n * self.nx] = lane_center
+                xr[n * self.nx] = self._compute_lane_center(self.model.wp_id + n, target_lane)
 
             # Constrain maximum speed based on curvature
             # 曲率にもとづいた最大速度の制約
@@ -267,19 +266,7 @@ class MPC:
         # 終端状態に対する目標
         target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
         if target_lane is not None:
-            lanes = self.model.reference_path.get_lane_bounds(self.model.wp_id + N)
-            if lanes and target_lane < len(lanes):
-                ub_lane, lb_lane = lanes[target_lane]
-                half_width = self.model.width / 2.0
-                safety_offset = half_width + 0.15  # 車幅半分 + 15cm マージン
-                
-                if target_lane == 0:
-                    lane_center = min(lb_lane + safety_offset, ub_lane - (half_width + 0.05))
-                elif target_lane == 2:
-                    lane_center = max(ub_lane - safety_offset, lb_lane + (half_width + 0.05))
-                else:
-                    lane_center = (ub_lane + lb_lane) / 2.0
-                xr[N * self.nx] = lane_center
+            xr[N * self.nx] = self._compute_lane_center(self.model.wp_id + N, target_lane)
 
         t_linearize = time.perf_counter()
 
@@ -314,6 +301,14 @@ class MPC:
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
         xr[self.nx::self.nx] = (lb + ub) / 2
+
+        # If a target lane is active, preserve lane-center targets for the e_y references.
+        target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
+        if target_lane is not None:
+            lane_centers = []
+            for n in range(N):
+                lane_centers.append(self._compute_lane_center(self.model.wp_id + n, target_lane))
+            xr[0:N*self.nx:self.nx] = lane_centers
 
         t_constraints = time.perf_counter()
 
@@ -442,6 +437,9 @@ class MPC:
         t1 = time.perf_counter()
         t2 = t1
 
+        # Preserve last prediction as fallback when the solver temporarily fails
+        prediction_backup = self.current_prediction
+
         try:
 
             dec = self.optimizer.solve()
@@ -504,6 +502,10 @@ class MPC:
                 # Keep last steering angle and use safe minimum speed (1.0 m/s)
                 u = np.array([1.0, self.previous_steering])
                 max_delta = np.abs(self.previous_steering)
+
+            # Keep the last valid prediction when solver fails
+            if prediction_backup is not None:
+                self.current_prediction = prediction_backup
 
             self.infeasibility_counter += 1
 

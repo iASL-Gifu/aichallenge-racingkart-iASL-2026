@@ -21,9 +21,9 @@ import math
 from scipy.spatial import cKDTree
 
 _dir = os.path.dirname(os.path.abspath(__file__))
-TRACK_CSV = os.path.join(_dir, "../env/boundary.csv")
-WP_CSV    = os.path.join(_dir, "../env/min_curv/center_mpc.csv")
-OUT_CSV   = os.path.join(_dir, "../env/waypoint_bounds_center.csv")
+TRACK_CSV = os.path.join(_dir, "boundary_true.csv")
+WP_CSV    = os.path.join(_dir, "../env/centerline/traj_center313.csv")
+OUT_CSV   = os.path.join(_dir, "../env/centerline/waypoint_bounds_center.csv")
 
 count = 0
 
@@ -70,15 +70,72 @@ print(f"  Left wall y  : [{left_wall[:,1].min():.1f}, {left_wall[:,1].max():.1f}
 # MPC waypoints のロード
 # =====================================================================
 print(f"\nLoading waypoints: {WP_CSV}")
+
 wp_data = np.loadtxt(WP_CSV, delimiter=",", skiprows=1)
 print("wp_data.shape =", wp_data.shape)
 
 print(open(WP_CSV).read().splitlines()[-3:])
 # 列: s_m, x_m, y_m, psi_rad, kappa_radpm, vx_mps, ax_mps3
 # waypoints の raw 座標をそのまま使用（オフセットなし）
-wp_x   = wp_data[:, 0]
-wp_y   = wp_data[:, 1]
-wp_psi = wp_data[:, 8]
+wp_x   = wp_data[:, 1]#+X_OFFSET
+wp_y   = wp_data[:, 2]#+Y_OFFSET
+wp_psi = wp_data[:,3]
+
+import matplotlib.pyplot as plt
+
+'''
+# =====================================================
+# センターラインからpsiを再計算
+# =====================================================
+
+dx = np.roll(wp_x, -1) - np.roll(wp_x, 1)
+dy = np.roll(wp_y, -1) - np.roll(wp_y, 1)
+
+length = np.hypot(dx, dy)
+length[length < 1e-8] = 1e-8
+
+tx = dx / length
+ty = dy / length
+
+# 接線方向→psi
+#nx = ty
+#ny = -tx
+
+wp_psi = np.arctan2(-tx, ty)
+
+# CSVデータも更新
+wp_data[:,3] = wp_psi
+
+NEW_WP_CSV = os.path.join(
+    _dir,
+    "../env/centerline/traj_center313_fixed.csv"
+)
+
+header = "s_m,x_m,y_m,psi_rad,kappa_radpm,vx_mps,ax_mps3"
+
+np.savetxt(
+    NEW_WP_CSV,
+    wp_data,
+    delimiter=",",
+    fmt=[
+        "%.0f",     # s_m
+        "%.10f",    # x
+        "%.10f",    # y
+        "%.10f",    # psi
+        "%.10f",    # kappa
+        "%.10f",    # vx
+        "%.10f"     # ax
+    ],
+    header=header,
+    comments=""
+)
+
+print(f"Saved fixed waypoint csv : {NEW_WP_CSV}")
+
+print("psi recalculated from centerline.")
+'''
+
+
 N = len(wp_x)
 print(f"  Waypoints    : {N}")
 print(f"  WP x range   : [{wp_x.min():.1f}, {wp_x.max():.1f}]")
@@ -152,19 +209,14 @@ def intersect_normal_with_polyline(P, n, polyline):
 
     return best_point, best_dist, best_idx
 
+
+
 for i in range(N):
     P = np.array([wp_x[i], wp_y[i]])
 
-    psi = wp_psi[i]
-    '''
     n = np.array([
-        -math.cos(psi),
-        -math.sin(psi)
-    ])
-    '''
-    n = np.array([
-        math.cos(psi),
-        -math.sin(psi)
+        -math.sin(wp_psi[i]),
+        math.cos(wp_psi[i])
     ])
 
     hit_l, d_l, idx_l = intersect_normal_with_polyline(
@@ -188,7 +240,7 @@ for i in range(N):
     left_hit_list.append(hit_l)
     right_hit_list.append(hit_r)
 
-    '''
+
     if idx_r == -1:
       import matplotlib.pyplot as plt
 
@@ -205,7 +257,7 @@ for i in range(N):
 
       plt.axis('equal')
       plt.show()
-      '''
+  
 
 
     if d_l is None:
@@ -269,3 +321,69 @@ with open(OUT_CSV, "w", newline="") as f:
 
 print(f"\nSaved: {OUT_CSV}  ({N} rows)")
 
+
+# =====================================================================
+# 可視化
+# =====================================================================
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(10, 10))
+
+# 元の左右境界
+plt.plot(left_wall[:,0], left_wall[:,1],
+         'k-', linewidth=2, label='True Left Boundary')
+
+plt.plot(right_wall[:,0], right_wall[:,1],
+         'k-', linewidth=2, label='True Right Boundary')
+
+# waypoint
+plt.plot(wp_x, wp_y,
+         'b-', linewidth=1.5, label='Center Line')
+
+# 計算した交点
+left_hit = np.array(left_hit_list)
+right_hit = np.array(right_hit_list)
+
+valid_left = ~np.isnan(left_hit[:,0])
+valid_right = ~np.isnan(right_hit[:,0])
+
+plt.scatter(left_hit[valid_left,0],
+            left_hit[valid_left,1],
+            s=10,
+            c='red',
+            label='Calculated Left')
+
+plt.scatter(right_hit[valid_right,0],
+            right_hit[valid_right,1],
+            s=10,
+            c='lime',
+            label='Calculated Right')
+
+# waypoint→交点
+step = 20       # 全部描くと見づらいので20点おき
+
+for i in range(0, N, step):
+
+    if valid_left[i]:
+        plt.plot(
+            [wp_x[i], left_hit[i,0]],
+            [wp_y[i], left_hit[i,1]],
+            'r-',
+            linewidth=0.7
+        )
+
+    if valid_right[i]:
+        plt.plot(
+            [wp_x[i], right_hit[i,0]],
+            [wp_y[i], right_hit[i,1]],
+            'g-',
+            linewidth=0.7
+        )
+
+plt.axis("equal")
+plt.grid(True)
+plt.legend()
+plt.title("Waypoint -> Boundary Intersection")
+OUT_PLOT = os.path.join(_dir, "../env/plot_generate_bounds.png")
+plt.savefig(OUT_PLOT, dpi=300)
+print(f"Saved visualization plot to: {OUT_PLOT}")

@@ -356,7 +356,7 @@ w_right = np.array(w_right)
 
 import os
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_out_track_path = os.path.join(_script_dir, "../env/track.csv")
+_out_track_path = os.path.join(_script_dir, "../env/track_center.csv")
 
 with open(_out_track_path,"w",newline="") as f:
 
@@ -385,7 +385,7 @@ y = track[:,1]
 wr = track[:,2]
 wl = track[:,3]
 
-print("track.csv saved")
+print("track_center.csv saved")
 
 ##################################
 # waypoint_bounds.csv 生成
@@ -402,7 +402,7 @@ import os
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _wp_candidates = [
     os.path.join(_script_dir, "../env/min_curv/traj_race_cl_mpc.csv"),
-    os.path.join(_script_dir, "../../global_racetrajectory_optimization/outputs/traj_race_cl_mpc.csv"),
+    #os.path.join(_script_dir, "../../global_racetrajectory_optimization/outputs/traj_race_cl_mpc.csv"),
 ]
 _wp_path = None
 for _c in _wp_candidates:
@@ -418,7 +418,7 @@ else:
     # 列: s_m, x_m, y_m, psi_rad, kappa_radpm, vx_mps, ax_mps3
     _wp_x   = _wp_data[:, 1]
     _wp_y   = _wp_data[:, 2]
-    _wp_psi = _wp_data[:, 8]
+    _wp_psi = _wp_data[:, 3]
 
     # MPC coordinate offset (reference_path.py と同じ値)
     _X_OFFSET = 5.332886
@@ -433,7 +433,7 @@ else:
         _P   = np.array([_wp_x[_i], _wp_y[_i]])
         _psi = _wp_psi[_i]
         # waypoint の左法線 (psi + pi/2 方向)
-        _n = np.array([-np.sin(_psi), np.cos(_psi)])
+        _n = np.array([-np.sin(_psi), -np.cos(_psi)])
 
         # 左壁 (left_all) への法線交点 → ub
         _hit_l, _d_l = intersect_normal_with_polyline(_P,  _n, left_all)

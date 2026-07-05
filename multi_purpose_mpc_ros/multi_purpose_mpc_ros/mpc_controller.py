@@ -452,43 +452,44 @@ class MPCController(Node):
 
         # Race セットの初期化
         self._reference_pathN_race = create_ref_path(self._map)
-        self._reference_path10_race = create_ref_path(self._map)
+        #self._reference_path10_race = create_ref_path(self._map)
         self._carN_race = create_car(self._reference_pathN_race)
-        self._car10_race = create_car(self._reference_path10_race)
+        #self._car10_race = create_car(self._reference_path10_race)
         self._mpc_cfg_race, self._mpcN_race = create_mpc(self._carN_race, self._cfg.mpc.N)
-        _, self._mpc10_race = create_mpc(self._car10_race, 9, self._cfg.mpc.R10)
+        #_, self._mpc10_race = create_mpc(self._car10_race, 9, self._cfg.mpc.R10)
         compute_speed_profile(self._carN_race, self._mpc_cfg_race)
-        compute_speed_profile(self._car10_race, self._mpc_cfg_race)
+        #compute_speed_profile(self._car10_race, self._mpc_cfg_race)
 
         # Center セットの初期化 ("env/min_curv/traj_center_mpc.csv")
         if self.USE_OBSTACLE_AVOIDANCE:
             center_path = "env/min_curv/traj_center_mpc.csv"
+            print("load center path!!!")
             self._reference_pathN_center = create_ref_path(self._map, custom_csv_path=center_path)
-            self._reference_path10_center = create_ref_path(self._map, custom_csv_path=center_path)
+            #self._reference_path10_center = create_ref_path(self._map, custom_csv_path=center_path)
             self._carN_center = create_car(self._reference_pathN_center)
-            self._car10_center = create_car(self._reference_path10_center)
+            #self._car10_center = create_car(self._reference_path10_center)
             self._mpc_cfg_center, self._mpcN_center = create_mpc(self._carN_center, self._cfg.mpc.N)
-            _, self._mpc10_center = create_mpc(self._car10_center, 9, self._cfg.mpc.R10)
+            #_, self._mpc10_center = create_mpc(self._car10_center, 9, self._cfg.mpc.R10)
             compute_speed_profile(self._carN_center, self._mpc_cfg_center)
-            compute_speed_profile(self._car10_center, self._mpc_cfg_center)
+            #compute_speed_profile(self._car10_center, self._mpc_cfg_center)
         else:
             # 障害物回避が無効の場合はセンターラインのCSVを読まず、Race用の変数で代替する
             self._reference_pathN_center = self._reference_pathN_race
-            self._reference_path10_center = self._reference_path10_race
+            #self._reference_path10_center = self._reference_path10_race
             self._carN_center = self._carN_race
-            self._car10_center = self._car10_race
+            #self._car10_center = self._car10_race
             self._mpc_cfg_center = self._mpc_cfg_race
             self._mpcN_center = self._mpcN_race
-            self._mpc10_center = self._mpc10_race
+            #self._mpc10_center = self._mpc10_race
 
         # デフォルトは Race セット
         self._reference_pathN = self._reference_pathN_race
-        self._reference_path10 = self._reference_path10_race
+        #self._reference_path10 = self._reference_path10_race
         self._carN = self._carN_race
-        self._car10 = self._car10_race
+        #self._car10 = self._car10_race
         self._mpc_cfg = self._mpc_cfg_race
         self._mpcN = self._mpcN_race
-        self._mpc10 = self._mpc10_race
+        #self._mpc10 = self._mpc10_race
 
         self._car = self._carN
         self._reference_path = self._reference_pathN
@@ -1138,29 +1139,40 @@ class MPCController(Node):
             opponent_ahead_detected = False
 
         self._opponent_ahead_detected = opponent_ahead_detected
+        self._print_obstacle_detected = opponent_ahead_detected
 
+        '''
         if opponent_ahead_detected:
             self._reference_pathN = self._reference_pathN_center
-            self._reference_path10 = self._reference_path10_center
+            #self._reference_path10 = self._reference_path10_center
             self._carN = self._carN_center
-            self._car10 = self._car10_center
+            #self._car10 = self._car10_center
             self._mpc_cfg = self._mpc_cfg_center
             self._mpcN = self._mpcN_center
-            self._mpc10 = self._mpc10_center
+            #self._mpc10 = self._mpc10_center
+
         else:
             self._reference_pathN = self._reference_pathN_race
-            self._reference_path10 = self._reference_path10_race
+            #self._reference_path10 = self._reference_path10_race
             self._carN = self._carN_race
-            self._car10 = self._car10_race
+            #self._car10 = self._car10_race
             self._mpc_cfg = self._mpc_cfg_race
             self._mpcN = self._mpcN_race
-            self._mpc10 = self._mpc10_race
+            #self._mpc10 = self._mpc10_race
+        '''
+        self._reference_pathN = self._reference_pathN_race
+        #self._reference_path10 = self._reference_path10_race
+        self._carN = self._carN_race
+        #self._car10 = self._car10_race
+        self._mpc_cfg = self._mpc_cfg_race
+        self._mpcN = self._mpcN_race
+        #self._mpc10 = self._mpc10_race
 
 
         #車両モデル更新
         self._car.update_states(pose.x, pose.y, pose.theta)
 
-        #MPCの切り替え処理(Nよりもwp_id_offset変更したら安定したけど一応残しておく)
+        #MPCの切り替え処理(wp_id_offset変更したら安定したけど一応残しておく)
         '''
         if not opponent_ahead_detected:
             self._car.get_current_waypoint()
@@ -1279,12 +1291,12 @@ class MPCController(Node):
         # Apply target lane
         self._reference_path.target_lane_idx = self._target_lane_idx
         self._reference_pathN.target_lane_idx = self._target_lane_idx
-        self._reference_path10.target_lane_idx = self._target_lane_idx
+        #self._reference_path10.target_lane_idx = self._target_lane_idx
         
         is_overtaking = (self._target_lane_idx is not None)
         self._reference_path.is_overtaking = is_overtaking
         self._reference_pathN.is_overtaking = is_overtaking
-        self._reference_path10.is_overtaking = is_overtaking
+        #self._reference_path10.is_overtaking = is_overtaking
         
         # 追従・追い越し、または対象のWaypoint区間（カーブなど慎重さが求められる箇所）はwp_id_offsetを1にする
         is_in_cautious_zone = (210 <= wp <= 243) or (261 <= wp <= 286)

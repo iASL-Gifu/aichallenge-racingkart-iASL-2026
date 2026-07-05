@@ -228,8 +228,8 @@ class ReferencePath:
 
         path = os.path.join(
             get_package_share_directory("multi_purpose_mpc_ros"),
-            "env",
-            "waypoint_bounds.csv"
+            "env/centerline",
+            "waypoint_bounds_center.csv"
         )
 
         self.bounds = np.loadtxt(
@@ -439,7 +439,7 @@ class ReferencePath:
         import os
         import pandas as pd
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        bounds_path = os.path.join(pkg_dir, "env/waypoint_bounds.csv")
+        bounds_path = os.path.join(pkg_dir, "env/centerline/waypoint_bounds_center.csv")
         
         if os.path.exists(bounds_path):
             try:
@@ -758,7 +758,9 @@ class ReferencePath:
         lb_arr = self.bounds[:,2]
 
         # 車両のマージンを考慮して幅を少し狭める
-        MARGIN = 0.2
+        # During overtaking, we keep the same constraints and rely on
+        # target_lane positioning in MPC. Do NOT narrow constraints here.
+        MARGIN = 0.3
 
         ub_arr = ub_arr - MARGIN
         lb_arr = lb_arr + MARGIN
@@ -1158,6 +1160,11 @@ class ReferencePath:
         """
 
         # min_width = model_width / np.sqrt(2)
+        # Note: During overtaking, we do NOT add extra margin here.
+        # Instead, we rely on target_lane center positioning in MPC.
+        # Adding extra margin here would compress constraints and cause
+        # vehicles to aim at inner lane edges.
+
         # min_width = model_width
         # min_width = 2.0 * safety_margin
         min_width = model_width

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 # 読み込み
 # ===========================
 data = np.loadtxt(
-    "waypoint_bounds.csv",
+    "waypoint_bounds_center.csv",
     delimiter=",",
     skiprows=1
 )
@@ -20,6 +20,8 @@ data = np.loadtxt(
 # 6 left_y
 # 7 right_x
 # 8 right_y
+# 9 center_x
+#10 center_y
 
 idx = data[:, 0]
 
@@ -29,9 +31,12 @@ left_y  = data[:, 6]
 right_x = data[:, 7]
 right_y = data[:, 8]
 
+cx = data[:, 9]
+cy = data[:, 10]
+
 # centerは別で必要（もしCSVに無いなら元trajectoryから読む）
 # 例：traj_race_cl_mpc.csv
-traj = np.loadtxt("min_curv/traj_race_cl_mpc.csv", delimiter=",", skiprows=1)
+traj = np.loadtxt("min_curv/traj_center.csv", delimiter=",", skiprows=1)
 cx = traj[:, 1]
 cy = traj[:, 2]
 
