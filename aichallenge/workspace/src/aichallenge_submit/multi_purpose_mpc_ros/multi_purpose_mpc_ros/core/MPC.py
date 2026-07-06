@@ -338,7 +338,8 @@ class MPC:
         if not self.osqp_initialized:
             #self.optimizer = osqp.OSQP()
             self.A0 = A_full.copy()
-            self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=False, verbose=False)
+            #warm_start=true 計算精度を追加(eps_abs,eps_rel)
+            self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=True, verbose=False,eps_abs=1e-4,eps_rel=1e-4)
             self.osqp_initialized = True
             #print("setup",A_full.nnz,flush=True)
             
@@ -382,27 +383,33 @@ class MPC:
         try:
 
             dec = self.optimizer.solve()
-            if self.debug_counter % 20 == 0:
-                print(dec.info.status,flush=True)
             t2 = time.perf_counter()
+            if self.debug_counter % 20 == 0:
+                print(dec.info.status, flush=True)
+
+            is_failed = dec.x is None or "solved" not in dec.info.status
             
-
-            control_signals = np.array(dec.x[-N*nu:])
-            use_control_signals = control_signals[1::2]
-
-            if not np.all(use_control_signals):
-                for i in range(1, 6):
-                    relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
+            # MPCが「通れません(Infeasible)」とSOSを出した場合
+            if is_failed:
+                # 【第1段階】バリアを半分（0.5）にして再計算してみる
+                relaxed_safety_margin = self.model.safety_margin * 0.5
+                self._init_problem(N, relaxed_safety_margin)
+                dec = self.optimizer.solve()
+                t2 = time.perf_counter()
+                
+                is_failed = dec.x is None or "solved" not in dec.info.status
+                # 【第2段階】それでもダメ(SOS)なら、バリアを完全にゼロ(0.0)にして強行突破する！
+                if is_failed:
+                    relaxed_safety_margin = 0.0  # 完全な無敵モード
                     self._init_problem(N, relaxed_safety_margin)
                     dec = self.optimizer.solve()
                     t2 = time.perf_counter()
-                    control_signals = np.array(dec.x[-N*nu:])
-                    use_control_signals = control_signals[1::2]
+                    print(f"⚠️ EMERGENCY: Margin reduced to 0.0 to prevent crash!", flush=True)
+                elif self.last_solved_wp_id != self.model.wp_id:
+                    print(f"Relaxed safety margin to {relaxed_safety_margin} to solve", flush=True)
 
-                    if self.infeasibility_counter == 0 and np.all(use_control_signals):
-                        if self.last_solved_wp_id != self.model.wp_id:
-                            print(f"Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
-                        break
+            control_signals = np.array(dec.x[-N*nu:])
+            use_control_signals = control_signals[1::2]
 
             # ステア角の計算と保存
             control_signals[1::2] = np.arctan(control_signals[1::2] * self.model.length)
