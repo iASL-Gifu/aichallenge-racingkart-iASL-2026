@@ -341,7 +341,7 @@ class MPCController(Node):
             is_ref_path_given = target_csv != "" # type: ignore
             if is_ref_path_given:
                 print(f"Using given reference path: {target_csv}")
-                wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(target_csv)) # type: ignore
+                wp_x, wp_y, wp_psi, _ = load_ref_path(self.in_pkg_share(target_csv)) # type: ignore
                 return ReferencePath(
                     map,
                     wp_x,
@@ -349,7 +349,8 @@ class MPCController(Node):
                     cfg_ref_path.resolution,
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
-                    cfg_ref_path.circular)
+                    cfg_ref_path.circular,
+                    wp_psi=wp_psi)
 
             else:
                 print("Using waypoints to create reference path")
@@ -907,18 +908,34 @@ class MPCController(Node):
                 ub_l, lb_l = lanes[lane_idx]
                 next_ub_l, next_lb_l = next_lanes[lane_idx]
 
-                # 世界座標へ変換 (ub方向 = pi/2 + psi)
-                angle_ub = math.fmod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
-                curr_left_x = wp.x + ub_l * math.cos(angle_ub)
-                curr_left_y = wp.y + ub_l * math.sin(angle_ub)
-                curr_right_x = wp.x + lb_l * math.cos(angle_ub)
-                curr_right_y = wp.y + lb_l * math.sin(angle_ub)
+                # 世界座標へ変換 (normal_angle が利用可能な場合は -cos, -sin を使用し、無ければ従来の psi + pi/2 を使用)
+                if wp.normal_angle is not None:
+                    nx = -math.cos(wp.normal_angle)
+                    ny = -math.sin(wp.normal_angle)
+                    curr_left_x = wp.x + ub_l * nx
+                    curr_left_y = wp.y + ub_l * ny
+                    curr_right_x = wp.x + lb_l * nx
+                    curr_right_y = wp.y + lb_l * ny
+                else:
+                    angle_ub = math.fmod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                    curr_left_x = wp.x + ub_l * math.cos(angle_ub)
+                    curr_left_y = wp.y + ub_l * math.sin(angle_ub)
+                    curr_right_x = wp.x + lb_l * math.cos(angle_ub)
+                    curr_right_y = wp.y + lb_l * math.sin(angle_ub)
 
-                next_angle_ub = math.fmod(math.pi / 2.0 + next_wp.psi + math.pi, 2 * math.pi) - math.pi
-                next_left_x = next_wp.x + next_ub_l * math.cos(next_angle_ub)
-                next_left_y = next_wp.y + next_ub_l * math.sin(next_angle_ub)
-                next_right_x = next_wp.x + next_lb_l * math.cos(next_angle_ub)
-                next_right_y = next_wp.y + next_lb_l * math.sin(next_angle_ub)
+                if next_wp.normal_angle is not None:
+                    next_nx = -math.cos(next_wp.normal_angle)
+                    next_ny = -math.sin(next_wp.normal_angle)
+                    next_left_x = next_wp.x + next_ub_l * next_nx
+                    next_left_y = next_wp.y + next_ub_l * next_ny
+                    next_right_x = next_wp.x + next_lb_l * next_nx
+                    next_right_y = next_wp.y + next_lb_l * next_ny
+                else:
+                    next_angle_ub = math.fmod(math.pi / 2.0 + next_wp.psi + math.pi, 2 * math.pi) - math.pi
+                    next_left_x = next_wp.x + next_ub_l * math.cos(next_angle_ub)
+                    next_left_y = next_wp.y + next_ub_l * next_sin(next_angle_ub)
+                    next_right_x = next_wp.x + next_lb_l * math.cos(next_angle_ub)
+                    next_right_y = next_wp.y + next_lb_l * math.sin(next_angle_ub)
 
                 # 頂点データ
                 p_curr_left = Point(x=curr_left_x, y=curr_left_y, z=self._map_z)
@@ -1206,6 +1223,12 @@ class MPCController(Node):
         opponent_v_lead = 0.0 #前方車両の速度
         min_wp_diff = 99999
 
+        # --- Parallel Running Detection (並走検出) ---
+        parallel_lat_dist = 99999.0   # 最も近い並走車との横距離
+        parallel_lon_dist = 99999.0   # その車との縦距離 (Euclidean)
+        if not hasattr(self, '_parallel_start_time'):
+            self._parallel_start_time = None
+
         if self.USE_OBSTACLE_AVOIDANCE and hasattr(self, '_v2x_tracker'):
             for vid in self._v2x_tracker.active_vehicle_ids():
                 buf = self._v2x_tracker._samples.get(vid)
@@ -1289,15 +1312,39 @@ class MPCController(Node):
             self._target_lane_idx = new_target_lane_idx
 
         # Apply target lane
-        self._reference_path.target_lane_idx = self._target_lane_idx
-        self._reference_pathN.target_lane_idx = self._target_lane_idx
-        #self._reference_path10.target_lane_idx = self._target_lane_idx
-        
-        is_overtaking = (self._target_lane_idx is not None)
-        self._reference_path.is_overtaking = is_overtaking
-        self._reference_pathN.is_overtaking = is_overtaking
-        #self._reference_path10.is_overtaking = is_overtaking
-        
+        # --- 制約切り替え安定化ウィンドウ ---
+        # target_lane_idx が変わった瞬間に制約を即時切り替えると OSQP が infeasible になりやすい。
+        # フラグ変更後 CONSTRAINT_TRANSITION_SEC 秒間は full-width (is_overtaking=False / target=None) で走り、
+        # その後に絞り込んだ車線制約を適用する。
+        CONSTRAINT_TRANSITION_SEC = 0.6  # [s] 安定化ウィンドウ幅
+        if not hasattr(self, '_constraint_transition_until'):
+            self._constraint_transition_until = 0.0
+        if not hasattr(self, '_prev_applied_lane_idx'):
+            self._prev_applied_lane_idx = self._target_lane_idx
+
+        if self._target_lane_idx != self._prev_applied_lane_idx:
+            # 車線が変わった → 安定化ウィンドウを開始
+            self._constraint_transition_until = current_time_sec + CONSTRAINT_TRANSITION_SEC
+            self._prev_applied_lane_idx = self._target_lane_idx
+
+        in_transition = (current_time_sec < self._constraint_transition_until)
+
+        if in_transition:
+            # 安定化中: 制約はフル幅（通常走行扱い）
+            self._reference_path.target_lane_idx  = None
+            self._reference_pathN.target_lane_idx = None
+            self._reference_path.is_overtaking    = False
+            self._reference_pathN.is_overtaking   = False
+        else:
+            # 安定化終了: 本来の車線制約を適用
+            self._reference_path.target_lane_idx  = self._target_lane_idx
+            self._reference_pathN.target_lane_idx = self._target_lane_idx
+            is_overtaking = (self._target_lane_idx is not None)
+            self._reference_path.is_overtaking    = is_overtaking
+            self._reference_pathN.is_overtaking   = is_overtaking
+
+        is_overtaking = self._reference_path.is_overtaking
+
         # 追従・追い越し、または対象のWaypoint区間（カーブなど慎重さが求められる箇所）はwp_id_offsetを1にする
         is_in_cautious_zone = (210 <= wp <= 243) or (261 <= wp <= 286)
         active_offset = 1 if (is_overtaking or is_in_cautious_zone) else self._default_wp_id_offset
@@ -1353,6 +1400,78 @@ class MPCController(Node):
                         f"Overriding target speed to {ref_vel_kmph:.2f}m/s to create safety gap.",
                         throttle_duration_sec=1.0
                     )
+
+            # --- Parallel Running Safety Control (並走接近制御) ---
+            # 並走（横距離が小さく縦距離も小さい）の場合、速度を落として衝突を回避する
+            # 並走が続く場合は追い越しを中断して中央車線に戻す
+            LAT_WARN_THRESH  = 2.0   # [m] 警戒ゾーン開始 (並走接近を検出)
+            LAT_CRIT_THRESH  = 1.4   # [m] 臨界ゾーン (強制減速)
+            LON_PARALLEL_MAX = 4.5   # [m] この縦距離以内を「並走」と判定
+            PARALLEL_ABORT_SEC = 3.0 # [s] 並走がこの時間以上続いたら追い越し中断
+
+            if self.USE_OBSTACLE_AVOIDANCE and hasattr(self, '_v2x_tracker'):
+                for vid in self._v2x_tracker.active_vehicle_ids():
+                    buf = self._v2x_tracker._samples.get(vid)
+                    if buf:
+                        _, opp_x, opp_y = buf[-1]
+                        lon_d = math.hypot(opp_x - pose.x, opp_y - pose.y)
+                        # 縦方向の距離（前後問わず）が LON_PARALLEL_MAX 以内の場合だけ横距離を計算
+                        if lon_d < LON_PARALLEL_MAX:
+                            opp_wp_id = self._car.get_closest_waypoint(opp_x, opp_y)
+                            opp_wp = self._reference_path.get_waypoint(opp_wp_id)
+                            if opp_wp.normal_angle is not None:
+                                nx = -math.cos(opp_wp.normal_angle)
+                                ny = -math.sin(opp_wp.normal_angle)
+                            else:
+                                a = opp_wp.psi + math.pi / 2.0
+                                nx = math.cos(a)
+                                ny = math.sin(a)
+                            lat_d = abs((opp_x - opp_wp.x) * nx + (opp_y - opp_wp.y) * ny)
+                            if lat_d < parallel_lat_dist:
+                                parallel_lat_dist = lat_d
+                                parallel_lon_dist = lon_d
+
+            is_parallel = (parallel_lat_dist < LAT_WARN_THRESH and parallel_lon_dist < LON_PARALLEL_MAX)
+
+            if is_parallel:
+                if self._parallel_start_time is None:
+                    self._parallel_start_time = current_time_sec
+                parallel_duration = current_time_sec - self._parallel_start_time
+
+                # 臨界ゾーン: 強制減速
+                if parallel_lat_dist < LAT_CRIT_THRESH:
+                    # 横距離が近いほど強く減速（目標速度を直接スケール）
+                    ratio = max(0.0, (parallel_lat_dist - 0.5) / (LAT_CRIT_THRESH - 0.5))
+                    v_ref_parallel = ref_vel_kmph * (0.4 + 0.6 * ratio)  # 最大60%減速
+                    ref_vel_kmph = min(ref_vel_kmph, v_ref_parallel)
+                    self.get_logger().warn(
+                        f"[ParallelSafety] CRITICAL: lat={parallel_lat_dist:.2f}m, "
+                        f"speed limited to {ref_vel_kmph:.2f}m/s",
+                        throttle_duration_sec=1.0
+                    )
+                # 警戒ゾーン: 緩やかに減速
+                elif parallel_lat_dist < LAT_WARN_THRESH:
+                    ratio = (parallel_lat_dist - LAT_CRIT_THRESH) / (LAT_WARN_THRESH - LAT_CRIT_THRESH)
+                    v_ref_parallel = ref_vel_kmph * (0.7 + 0.3 * ratio)  # 最大30%減速
+                    ref_vel_kmph = min(ref_vel_kmph, v_ref_parallel)
+                    self.get_logger().info(
+                        f"[ParallelSafety] WARNING: lat={parallel_lat_dist:.2f}m, "
+                        f"speed limited to {ref_vel_kmph:.2f}m/s (duration={parallel_duration:.1f}s)",
+                        throttle_duration_sec=1.0
+                    )
+
+                # 並走中断: 長時間並走が続いたら中央車線に戻して相手に先行させる
+                if parallel_duration > PARALLEL_ABORT_SEC and self._target_lane_idx is not None:
+                    self.get_logger().warn(
+                        f"[ParallelSafety] ABORT overtake after {parallel_duration:.1f}s parallel running. "
+                        f"Returning to center lane.",
+                        throttle_duration_sec=1.0
+                    )
+                    self._target_lane_idx = 1  # 中央車線へ退避
+                    self._last_lane_change_time = current_time_sec
+                    self._parallel_start_time = None
+            else:
+                self._parallel_start_time = None
 
             self._mpc.update_v_max(ref_vel_kmph)
             v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)

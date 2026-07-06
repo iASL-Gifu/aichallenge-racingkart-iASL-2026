@@ -41,7 +41,7 @@ bicycle_model:
   width: 1.6   # +safety margin
 
 mpc:
-  N: 10
+  N: 20
   # Q: [e_y(横ずれ), e_psi(ヨー角ずれ), t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]

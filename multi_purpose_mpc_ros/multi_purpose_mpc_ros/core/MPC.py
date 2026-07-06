@@ -8,6 +8,7 @@ import osqp
 from scipy import sparse
 import matplotlib.pyplot as plt
 import time
+from datetime import datetime
 
 # Colors
 PREDICTION = '#BA4A00'
@@ -510,12 +511,14 @@ class MPC:
             self.infeasibility_counter += 1
 
         if self.infeasibility_counter > (N - 1) and self.infeasibility_counter % 100 == 0:
+            now = datetime.now().strftime("%H:%M:%S.%f")
             print('No control signal computed!')
+            print(now)
 
         self.debug_counter += 1
 
         '''
-        if self.debug_counter % 20 == 0:
+        if self.debug_counter % 20 == 0:    
                     print(
                         f"status={dec.info.status} "
                         f"v={v:.3f} "
@@ -525,13 +528,16 @@ class MPC:
         '''
         
         if self.debug_counter % 80 == 0:
+            now = datetime.now().strftime("%H:%M:%S.%f")
             total_ms = (t2-t0)*1000
             print(
                 f"N={N} "
                 f"build={(t1-t0)*1000:.1f}ms "
                 f"solve={(t2-t1)*1000:.1f}ms "
                 f"total={total_ms:.1f}ms "
-                f"target={1000*self.model.Ts:.1f}ms",
+                f"target={1000*self.model.Ts:.1f}ms "
+                f"waypoint={self.model.wp_id} "
+                f"time={now}",
                 flush=True
             )
         

@@ -124,6 +124,7 @@ class Waypoint:
         self.y = y
         self.psi = psi
         self.kappa = kappa
+        self.normal_angle = None
         
         # Reference velocity at this waypoint according to speed profile
         self.v_ref = None
@@ -166,7 +167,7 @@ class BorderCells:
 
 class ReferencePath:
     def __init__(self, map, wp_x, wp_y, resolution, smoothing_distance,
-                 max_width, circular):
+                 max_width, circular, wp_psi=None):
         """
         Reference Path object. Create a reference trajectory from specified
         corner points with given resolution. Smoothing around corners can be
@@ -207,6 +208,11 @@ class ReferencePath:
 
         # List of waypoint objects
         self.waypoints = self._construct_path(wp_x, wp_y)
+
+        # Set normal angle if provided
+        if wp_psi is not None and len(wp_psi) == len(self.waypoints):
+            for i in range(len(self.waypoints)):
+                self.waypoints[i].normal_angle = wp_psi[i]
 
         # Number of waypoints
         self.n_waypoints = len(self.waypoints)
@@ -343,11 +349,16 @@ class ReferencePath:
             # Difference vector
             dif_ahead = next_wp - current_wp
 
-            # Angle ahead
-            psi = np.arctan2(dif_ahead[1], dif_ahead[0])
-
-            # Distance to next waypoint
+            # Angle ahead — guard against zero-length segment (e.g. first==last in circular)
             dist_ahead = np.linalg.norm(dif_ahead, 2)
+            if dist_ahead > self.eps:
+                psi = np.arctan2(dif_ahead[1], dif_ahead[0])
+            else:
+                # Zero-length segment: inherit psi from the previous waypoint to avoid
+                # arctan2(0,0)=0 corrupting the scan direction in _compute_width.
+                psi = waypoints[-1].psi if waypoints else 0.0
+
+            # Distance to next waypoint (already computed above)
 
             # Get x and y coordinates of current waypoint
             x, y = current_wp[0], current_wp[1]
@@ -794,7 +805,7 @@ class ReferencePath:
         """
         Waypointの走行可能幅を分割し、車線間に隙間（間隔）が生じないようにぴったりくっつけて返す。
         n_lanes が 3 以上の場合、左右車線（外側）以外の車線（内側）は細く車線幅を取る。
-        ただし、各車線の幅がそれぞれの最低保証幅を下回る場合は、実行可能性確保のために拡張する。
+        ただし、各車線の幅がそれぞれの最低保証幅を下回る場合は、実行可能性確保のために調整する。
         """
         if n_lanes is None:
             n_lanes = getattr(self, 'n_lanes', 2)
@@ -806,47 +817,47 @@ class ReferencePath:
         if wp.ub is None or wp.lb is None:
             return []
 
-        # アスファルト外（芝生など）への侵入を防群するため、最大半幅でクリップ
-        #ub_clipped = min(wp.ub, max_half_width)
-        #lb_clipped = max(wp.lb, -max_half_width)
+        total = wp.ub - wp.lb
 
-        total = wp.ub- wp.lb         # 制限後の全幅 [m]
-
-        # 3車線以上の場合、内側車線の初期幅比率（重み）を小さくする（例: 外側は1.0、内側は0.5）
+        # 重みと最小幅の決定
         if n_lanes >= 3:
             inner_weight = 0.5
             weights = [1.0] + [inner_weight] * (n_lanes - 2) + [1.0]
+            min_widths = [lane_width] + [inner_lane_width] * (n_lanes - 2) + [lane_width]
         else:
             weights = [1.0] * n_lanes
+            min_widths = [lane_width] * n_lanes
 
         total_weight = sum(weights)
-        
-        lanes = []
-        accumulated_width = 0.0
-        for i in range(n_lanes):
-            w = weights[i]
-            # 重みに基づく比率で基本分割
-            lb_lane = wp.lb + (accumulated_width / total_weight) * total
-            ub_lane = wp.lb + ((accumulated_width + w) / total_weight) * total
-            accumulated_width += w
-            
-            # 各車線の最小許容幅の決定（内側車線は inner_lane_width を使用）
-            current_min_width = lane_width
-            if n_lanes >= 3 and 0 < i < n_lanes - 1:
-                current_min_width = inner_lane_width
 
-            # 幅が最低保証幅に満たない場合は、実行可能性担保のために拡張
-            if ub_lane - lb_lane < current_min_width:
-                if i == 0:
-                    ub_lane = min(lb_lane + current_min_width, wp.ub)
-                elif i == n_lanes - 1:
-                    lb_lane = max(ub_lane - current_min_width, wp.lb)
-                else:
-                    center = (ub_lane + lb_lane) / 2.0
-                    lb_lane = max(center - current_min_width / 2.0, wp.lb)
-                    ub_lane = min(center + current_min_width / 2.0, wp.ub)
-            
-            lanes.append((ub_lane, lb_lane))
+        # 1. 初期ノード位置の計算 (比率分割)
+        nodes = [wp.lb]
+        accumulated_width = 0.0
+        for w in weights:
+            accumulated_width += w
+            nodes.append(wp.lb + (accumulated_width / total_weight) * total)
+
+        # 2. 右から左への最小幅適用 (押し上げ)
+        for i in range(n_lanes):
+            nodes[i+1] = max(nodes[i+1], nodes[i] + min_widths[i])
+
+        # 3. 左から右への最小幅適用 (押し下げ)
+        nodes[n_lanes] = min(nodes[n_lanes], wp.ub)
+        for i in range(n_lanes - 1, -1, -1):
+            nodes[i] = min(nodes[i], nodes[i+1] - min_widths[i])
+
+        # 4. 全体幅が狭すぎて制約が破綻した場合のセーフティガード
+        nodes[0] = max(nodes[0], wp.lb)
+        for i in range(n_lanes):
+            nodes[i+1] = max(nodes[i+1], nodes[i])
+            nodes[i+1] = min(nodes[i+1], wp.ub)
+
+        # 5. 車線リストの構築
+        lanes = []
+        for i in range(n_lanes):
+            lanes.append((nodes[i+1], nodes[i]))
+
+        return lanes
 
         return lanes
 
@@ -1386,17 +1397,24 @@ class ReferencePath:
                 if not self.is_overtaking:
                     print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}. Forcing minimum width.", flush=True)
 
-                left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
-                                  2 * math.pi) - math.pi
-                right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
-                                    2 * math.pi) - math.pi
-
-                # 左右に 0.8m ずつ強制拡張した境界を定義する（計 1.6m）
-                FORCE_HALF_WIDTH = 0.8
-                ub_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(left_angle),
-                         wp.y + FORCE_HALF_WIDTH * np.sin(left_angle))
-                lb_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(right_angle),
-                         wp.y + FORCE_HALF_WIDTH * np.sin(right_angle))
+                # 追い越し中は車線痁めによりフリーセグメントが見つからない場合がある。
+                # その場合は車線幅僕の強制適用でなく、静的ウェイポイント境界 (wp.ub/wp.lb) にフォールバックする。
+                # これにより、OSQP の infeasible を最小限に抑える。
+                if self.is_overtaking:
+                    # 追い越し中: 全幅静的境界をフォールバックとして当てる
+                    ub_ls = wp.static_border_cells[0]
+                    lb_ls = wp.static_border_cells[1]
+                else:
+                    left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
+                                      2 * math.pi) - math.pi
+                    right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
+                                        2 * math.pi) - math.pi
+                    # 通常走行中: 小幅強制幅を当てる
+                    FORCE_HALF_WIDTH = 0.8
+                    ub_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(left_angle),
+                             wp.y + FORCE_HALF_WIDTH * np.sin(left_angle))
+                    lb_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(right_angle),
+                             wp.y + FORCE_HALF_WIDTH * np.sin(right_angle))
 
                 add_constraint(wp, ub_ls, lb_ls)
 

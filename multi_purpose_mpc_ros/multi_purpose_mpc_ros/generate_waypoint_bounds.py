@@ -215,8 +215,8 @@ for i in range(N):
     P = np.array([wp_x[i], wp_y[i]])
 
     n = np.array([
-        -math.sin(wp_psi[i]),
-        math.cos(wp_psi[i])
+        -math.cos(wp_psi[i]),
+        -math.sin(wp_psi[i])
     ])
 
     hit_l, d_l, idx_l = intersect_normal_with_polyline(
@@ -384,6 +384,4 @@ plt.axis("equal")
 plt.grid(True)
 plt.legend()
 plt.title("Waypoint -> Boundary Intersection")
-OUT_PLOT = os.path.join(_dir, "../env/plot_generate_bounds.png")
-plt.savefig(OUT_PLOT, dpi=300)
-print(f"Saved visualization plot to: {OUT_PLOT}")
+plt.show()
