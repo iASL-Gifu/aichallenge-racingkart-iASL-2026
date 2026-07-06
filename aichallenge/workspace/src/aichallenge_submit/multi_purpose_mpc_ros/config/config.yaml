@@ -39,13 +39,13 @@ bicycle_model:
   width: 1.80   # +safety margin
 
 mpc:
-  N: 12
+  N: 25
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [1000.0, 1000.0]
+  R: [500.0, 500.0]
   a_min: -3.0 # m/s^2
-  a_max: 10.0 # m/s^2
+  a_max: 3.0 # m/s^2
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 2.50 # rad/s max_steering_rate
   control_rate: 70.0 # Hz Ts=1/control_rate
@@ -65,8 +65,8 @@ mpc:
 
   v_max: 35.0   # km/h
   ay_max: 12.0  # m/s^2, maximum lateral acceleration in curves
-  Q: [400000.0, 10000000.0, 2000000.0]
-  QN: [1000000.0, 1000000.0, 10000.0]
+  Q: [400000.0, 200000.0, 1000000.0]
+  QN: [1000000.0, 200000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##mak
   ## Lap1: 55s, Lap2: 49s

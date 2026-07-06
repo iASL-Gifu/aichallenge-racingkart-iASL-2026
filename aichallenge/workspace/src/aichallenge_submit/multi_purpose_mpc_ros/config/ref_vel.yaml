@@ -6,13 +6,13 @@ ref_vel_configulator:
     ref_vel: 35.0
     wp_id: 30
   s2:
-    ref_vel: 30.0
+    ref_vel: 35.0
     wp_id: 55
   s3:
     ref_vel: 35.0
     wp_id: 100
   s4:
-    ref_vel: 30.0
+    ref_vel: 35.0
     wp_id: 155
   s5:
     ref_vel: 35.0

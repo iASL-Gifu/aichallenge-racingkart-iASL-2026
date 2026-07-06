@@ -45,26 +45,7 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# create python virtual environment
-execute_process(
-  COMMAND /usr/bin/python3 -m venv ${CMAKE_INSTALL_PREFIX}/.venv
-  RESULT_VARIABLE venv_result
-)
-if(venv_result)
-    message(WARNING "Failed to create virtual environment, will fallback to system python")
-endif()
 
-# install python dependencies in virtual environment
-if(NOT venv_result)
-    execute_process(
-        COMMAND ${CMAKE_INSTALL_PREFIX}/.venv/bin/pip install -r ./resources/requirements.txt
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        RESULT_VARIABLE install_result
-    )
-    if(install_result)
-        message(WARNING "Failed to install python dependencies in virtual environment, will fallback to system python")
-    endif()
-endif()
 
 ament_auto_package(INSTALL_TO_SHARE
   config
