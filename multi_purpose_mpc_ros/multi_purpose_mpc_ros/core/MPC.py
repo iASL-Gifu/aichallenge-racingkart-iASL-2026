@@ -247,14 +247,10 @@ class MPC:
             else:
                 vmax_dyn = np.sqrt(self.ay_max / (np.abs(kappa_pred[n]) + 1e-12))
                 
-            #avmax_dyn = 11.11
             umax_dyn[self.nu*n] = min(vmax_dyn, umax_dyn[self.nu*n])
-            #vmax_dyn = 12.5
-            umax_dyn[self.nu*n] = vmax_dyn
-            
 
             if n == 0:
-                self.debug_max_kappa_pred = max_kappa_pred if self.use_max_kappa_pred else kappa_pred[n]
+                self.deibug_max_kappa_pred = max_kappa_pred if self.use_max_kappa_pred else kappa_pred[n]
                 self.debug_vmax_dyn = vmax_dyn
 
             #if n == 0 and self.debug_counter % 20 == 0:
@@ -363,11 +359,13 @@ class MPC:
 
         # オプティマイザの設定
         if not self.osqp_initialized:
-            #self.optimizer = osqp.OSQP()
+            # osqp_initialized=False でリセット後に既存インスタンスへ setup() を呼ぶと
+            # "Workspace already setup!" エラーになるため、必ず新しいインスタンスを生成する。
+            self.optimizer = osqp.OSQP()
             self.A0 = A_full.copy()
             self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=False, verbose=False)
             self.osqp_initialized = True
-            #print("setup",A_full.nnz,flush=True)
+
             
         else:
             #PはQ,R,QNが変わらないなら固定なので更新しない

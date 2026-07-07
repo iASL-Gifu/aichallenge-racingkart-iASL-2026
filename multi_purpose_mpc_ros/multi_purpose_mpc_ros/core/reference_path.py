@@ -167,7 +167,7 @@ class BorderCells:
 
 class ReferencePath:
     def __init__(self, map, wp_x, wp_y, resolution, smoothing_distance,
-                 max_width, circular, wp_psi=None):
+                 max_width, circular, wp_psi=None, bounds_csv_path: str = None):
         """
         Reference Path object. Create a reference trajectory from specified
         corner points with given resolution. Smoothing around corners can be
@@ -181,6 +181,8 @@ class ReferencePath:
         path by averaging neighborhood of waypoints
         :param max_width: maximum width of path to both sides in m
         :param circular: True if path circular
+        :param bounds_csv_path: path to waypoint_bounds CSV (pkg-share relative or absolute).
+                                If None, falls back to env/centerline/waypoint_bounds_center.csv
         """
 
         self.org_wp_x = wp_x
@@ -221,6 +223,24 @@ class ReferencePath:
         # Length of path
         self.length, self.segment_lengths = self._compute_length()
 
+        # Store bounds csv path for _compute_width and update_boundaries_from_markers
+        if bounds_csv_path is not None:
+            # absolute path が渡された場合はそのまま使用、そうでなければ pkg share から解決
+            if os.path.isabs(bounds_csv_path):
+                self._bounds_csv_path = bounds_csv_path
+            else:
+                self._bounds_csv_path = os.path.join(
+                    get_package_share_directory("multi_purpose_mpc_ros"),
+                    bounds_csv_path
+                )
+        else:
+            # デフォルト: Center軌道用の境界線CSV
+            self._bounds_csv_path = os.path.join(
+                get_package_share_directory("multi_purpose_mpc_ros"),
+                "env/centerline",
+                "waypoint_bounds_center.csv"
+            )
+
         # Compute path width (attribute of each waypoint)
         self._compute_width(max_width=max_width)
 
@@ -230,22 +250,13 @@ class ReferencePath:
         self.n_lanes = 3
         self.inner_lane_width = 0.5
 
-        
-
-        path = os.path.join(
-            get_package_share_directory("multi_purpose_mpc_ros"),
-            "env/centerline",
-            "waypoint_bounds_center.csv"
-        )
-
         self.bounds = np.loadtxt(
-            path,
+            self._bounds_csv_path,
             delimiter=",",
             skiprows=1
         )
-        print(len(self.waypoints))
-        print(len(self.bounds))
-        print(self.bounds.shape)
+        #print(f"[ReferencePath] bounds_csv: {self._bounds_csv_path}")
+        #print(f"[ReferencePath] waypoints={len(self.waypoints)}, bounds={len(self.bounds)}, shape={self.bounds.shape}")
 
         self.COUNT = 0
 
@@ -447,10 +458,8 @@ class ReferencePath:
             wp.static_border_cells = (width_info[1], width_info[3])   # (left_border_cell(x,y), right_border_cell(x,y))
         
         # Try to load waypoint_bounds.csv to overwrite with clean, smooth offline-generated boundaries
-        import os
         import pandas as pd
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        bounds_path = os.path.join(pkg_dir, "env/centerline/waypoint_bounds_center.csv")
+        bounds_path = self._bounds_csv_path
         
         if os.path.exists(bounds_path):
             try:
@@ -463,7 +472,7 @@ class ReferencePath:
                     for idx, wp in enumerate(self.waypoints):
                         wp.ub = float(ub_vals[idx])
                         wp.lb = float(lb_vals[idx])
-                    print(f"[ReferencePath] Successfully loaded offline waypoint_bounds.csv for {len(self.waypoints)} waypoints.")
+                    #print(f"[ReferencePath] Successfully loaded offline waypoint_bounds.csv for {len(self.waypoints)} waypoints.")
                 else:
                     # If mismatch, interpolate to fit the waypoints length
                     from scipy.interpolate import interp1d
@@ -474,7 +483,7 @@ class ReferencePath:
                     for idx, wp in enumerate(self.waypoints):
                         wp.ub = float(ub_interp[idx])
                         wp.lb = float(lb_interp[idx])
-                    print(f"[ReferencePath] Interpolated offline waypoint_bounds.csv from {len(ub_vals)} to {len(self.waypoints)} waypoints.")
+                    #print(f"[ReferencePath] Interpolated offline waypoint_bounds.csv from {len(ub_vals)} to {len(self.waypoints)} waypoints.")
             except Exception as e:
                 print(f"[ReferencePath] Error loading offline waypoint_bounds.csv: {e}")
 
@@ -554,7 +563,7 @@ class ReferencePath:
         # Set optimization horizon
         N = self.n_waypoints - 1
         if N < 2:
-            print("Path too short for speed profile computation!")
+            #print("Path too short for speed profile computation!")
             return False
 
         # Constraints
@@ -664,11 +673,11 @@ class ReferencePath:
         self.overtake_zone: list = [True] * N
 
         n_allow = sum(self.overtake_zone)
-        print(
-            f"[overtake_zone] kappa_thr={kappa_threshold:.3f} lookahead={lookahead}"
-            f"  allowed_wps={n_allow}/{N}",
-            flush=True,
-        )
+        #print(
+        #    f"[overtake_zone] kappa_thr={kappa_threshold:.3f} lookahead={lookahead}"
+        #    f"  allowed_wps={n_allow}/{N}",
+        #    flush=True,
+        #)
 
     def update_boundaries_from_markers(self, left_pts, right_pts):
         """
@@ -1258,7 +1267,7 @@ class ReferencePath:
             #print(f"ub_sm: {ub_sm}, lb_sm: {lb_sm}")
             if ub_sm < lb_sm:
                 # 一つ前のifの判定でboundsは正常になっているはずなので、こちらの判定に入る場合は何らかの実装上の異常がある
-                print("!!!! Infeasible path detected !!!!")
+                #print("!!!! Infeasible path detected !!!!")
                 ub_sm = 0.0
                 lb_sm = 0.0
 
@@ -1394,8 +1403,8 @@ class ReferencePath:
                 n += 1  # increment waypoint index
 
             else:
-                if not self.is_overtaking:
-                    print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}. Forcing minimum width.", flush=True)
+                #if not self.is_overtaking:
+                    #print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}. Forcing minimum width.", flush=True)
 
                 # 追い越し中は車線痁めによりフリーセグメントが見つからない場合がある。
                 # その場合は車線幅僕の強制適用でなく、静的ウェイポイント境界 (wp.ub/wp.lb) にフォールバックする。
@@ -1640,7 +1649,7 @@ if __name__ == '__main__':
 
     else:
         reference_path = None
-        print('Invalid path!')
+        #print('Invalid path!')
         exit(1)
 
     ub, lb, border_cells = \

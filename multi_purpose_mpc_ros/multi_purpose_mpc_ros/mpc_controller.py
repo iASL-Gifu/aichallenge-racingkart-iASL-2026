@@ -334,7 +334,7 @@ class MPCController(Node):
         def create_map() -> Map:
             return Map(self.in_pkg_share(self._cfg.map.yaml_path)) # type: ignore
 
-        def create_ref_path(map: Map, custom_csv_path: str = None) -> ReferencePath:
+        def create_ref_path(map: Map, custom_csv_path: str = None, bounds_csv_path: str = None) -> ReferencePath:
             cfg_ref_path = self._cfg.reference_path # type: ignore
             target_csv = custom_csv_path if custom_csv_path is not None else cfg_ref_path.csv_path
 
@@ -350,7 +350,8 @@ class MPCController(Node):
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
                     cfg_ref_path.circular,
-                    wp_psi=wp_psi)
+                    wp_psi=wp_psi,
+                    bounds_csv_path=bounds_csv_path)
 
             else:
                 print("Using waypoints to create reference path")
@@ -363,7 +364,8 @@ class MPCController(Node):
                     cfg_ref_path.resolution,
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
-                    cfg_ref_path.circular)
+                    cfg_ref_path.circular,
+                    bounds_csv_path=bounds_csv_path)
 
 
         def create_obstacles() -> List[Obstacle]:
@@ -451,8 +453,18 @@ class MPCController(Node):
 
         self._map = create_map()
 
+        cfg_ref_path = self._cfg.reference_path  # type: ignore
+
         # Race セットの初期化
-        self._reference_pathN_race = create_ref_path(self._map)
+        # race_csv_path が指定されていなければ config の csv_path (デフォルト) を使用
+        race_csv = getattr(cfg_ref_path, 'race_csv_path', None)
+        race_bounds_csv = getattr(cfg_ref_path, 'race_bounds_csv_path', 'env/waypoint_bounds.csv')
+        print(f"[init] load race path: {race_csv if race_csv else '(config csv_path)'}, bounds: {race_bounds_csv}")
+        self._reference_pathN_race = create_ref_path(
+            self._map,
+            custom_csv_path=race_csv,
+            bounds_csv_path=race_bounds_csv
+        )
         #self._reference_path10_race = create_ref_path(self._map)
         self._carN_race = create_car(self._reference_pathN_race)
         #self._car10_race = create_car(self._reference_path10_race)
@@ -461,27 +473,23 @@ class MPCController(Node):
         compute_speed_profile(self._carN_race, self._mpc_cfg_race)
         #compute_speed_profile(self._car10_race, self._mpc_cfg_race)
 
-        # Center セットの初期化 ("env/min_curv/traj_center_mpc.csv")
-        if self.USE_OBSTACLE_AVOIDANCE:
-            center_path = "env/min_curv/traj_center_mpc.csv"
-            print("load center path!!!")
-            self._reference_pathN_center = create_ref_path(self._map, custom_csv_path=center_path)
-            #self._reference_path10_center = create_ref_path(self._map, custom_csv_path=center_path)
-            self._carN_center = create_car(self._reference_pathN_center)
-            #self._car10_center = create_car(self._reference_path10_center)
-            self._mpc_cfg_center, self._mpcN_center = create_mpc(self._carN_center, self._cfg.mpc.N)
-            #_, self._mpc10_center = create_mpc(self._car10_center, 9, self._cfg.mpc.R10)
-            compute_speed_profile(self._carN_center, self._mpc_cfg_center)
-            #compute_speed_profile(self._car10_center, self._mpc_cfg_center)
-        else:
-            # 障害物回避が無効の場合はセンターラインのCSVを読まず、Race用の変数で代替する
-            self._reference_pathN_center = self._reference_pathN_race
-            #self._reference_path10_center = self._reference_path10_race
-            self._carN_center = self._carN_race
-            #self._car10_center = self._car10_race
-            self._mpc_cfg_center = self._mpc_cfg_race
-            self._mpcN_center = self._mpcN_race
-            #self._mpc10_center = self._mpc10_race
+        # Center セットの初期化 (追い越し・追従フラグ時に使用する安定化軌道)
+        # USE_OBSTACLE_AVOIDANCE の有無に関わらず常に読み込む
+        center_csv = getattr(cfg_ref_path, 'center_csv_path', 'env/centerline/traj_center313.csv')
+        center_bounds_csv = getattr(cfg_ref_path, 'center_bounds_csv_path', 'env/centerline/waypoint_bounds_center.csv')
+        print(f"[init] load center path: {center_csv}, bounds: {center_bounds_csv}")
+        self._reference_pathN_center = create_ref_path(
+            self._map,
+            custom_csv_path=center_csv,
+            bounds_csv_path=center_bounds_csv
+        )
+        #self._reference_path10_center = create_ref_path(self._map, custom_csv_path=center_csv)
+        self._carN_center = create_car(self._reference_pathN_center)
+        #self._car10_center = create_car(self._reference_path10_center)
+        self._mpc_cfg_center, self._mpcN_center = create_mpc(self._carN_center, self._cfg.mpc.N)
+        #_, self._mpc10_center = create_mpc(self._car10_center, 9, self._cfg.mpc.R10)
+        compute_speed_profile(self._carN_center, self._mpc_cfg_center)
+        #compute_speed_profile(self._car10_center, self._mpc_cfg_center)
 
         # デフォルトは Race セット
         self._reference_pathN = self._reference_pathN_race
@@ -719,12 +727,14 @@ class MPCController(Node):
             self.get_logger().info(
                 f"[MPC] Received vector map boundaries. Left pts: {len(left_pts)}, Right pts: {len(right_pts)}"
             )
-            # reference_path の境界線更新メソッドを呼び出す
-            self._reference_path.update_boundaries_from_markers(
-                np.array(left_pts), np.array(right_pts)
-            )
+            left_arr = np.array(left_pts)
+            right_arr = np.array(right_pts)
+            # Race / Center 両軌道に境界線を反映（切り替え後も正しく動作するよう両方更新）
+            self._reference_pathN_race.update_boundaries_from_markers(left_arr, right_arr)
+            self._reference_pathN_center.update_boundaries_from_markers(left_arr, right_arr)
 
             self.destroy_subscription(self._map_marker_sub)
+
             self._map_marker_sub = None
 
 
@@ -1117,10 +1127,10 @@ class MPCController(Node):
         opponent_ahead_detected = getattr(self, '_opponent_ahead_detected', False)
         
         # Estimate closest opponent distance in waypoint steps (signed)
-        temp_car = self._carN_race
-        temp_car.update_states(pose.x, pose.y, pose.theta)
-        temp_car.get_current_waypoint()
-        wp_temp = temp_car.wp_id
+        # temp_car は Race 軌道のウェイポイント参照専用。
+        # update_states の代わりに _wp_xy キャッシュを使って直接 wp_id を取得し
+        # BicycleModel の get_closest_waypoint 呼び出し（全点スキャン）を1回に抑える。
+        wp_temp = self._carN_race.get_closest_waypoint(pose.x, pose.y)
         N_total_temp = self._reference_pathN_race.n_waypoints
 
         closest_opp_ahead = 99999
@@ -1130,7 +1140,10 @@ class MPCController(Node):
                 buf = self._v2x_tracker._samples.get(vid)
                 if buf:
                     _, opp_x, opp_y = buf[-1]
-                    opp_wp_id = temp_car.get_closest_waypoint(opp_x, opp_y)
+                    # Euclidean 距離で事前フィルタ（過度に遠い車は全点スキャンをスキップ）
+                    if math.hypot(opp_x - pose.x, opp_y - pose.y) > 35.0:
+                        continue
+                    opp_wp_id = self._carN_race.get_closest_waypoint(opp_x, opp_y)
                     # 符号付きインデックス差（-N_total/2 〜 +N_total/2）
                     wp_diff = (opp_wp_id - wp_temp + N_total_temp // 2) % N_total_temp - N_total_temp // 2
                     
@@ -1144,7 +1157,7 @@ class MPCController(Node):
         # Apply hysteresis using both ahead and behind distances
         if opponent_ahead_detected:
             # 他車が前方35ステップより先、かつ後方20ステップより後ろに完全に離れるまでCenter軌道を維持
-            if closest_opp_ahead > 35 and closest_opp_behind > 20:
+            if closest_opp_ahead > 25 and closest_opp_behind > 12:
                 opponent_ahead_detected = False
         else:
             # 他車が前方35ステップ以内に接近したらCenter軌道に切り替え
@@ -1158,7 +1171,15 @@ class MPCController(Node):
         self._opponent_ahead_detected = opponent_ahead_detected
         self._print_obstacle_detected = opponent_ahead_detected
 
-        '''
+        # 追い越し・追従フラグが立っている場合: Center軌道 (traj_center313.csv)
+        # 通常走行時: Race軌道 (traj_race_cl_mpc.csv)
+        # --- 切り替え検出: 実際に軌道が変わったときだけ OSQP を再初期化 ---
+        if not hasattr(self, '_prev_opponent_ahead_detected'):
+            self._prev_opponent_ahead_detected = opponent_ahead_detected
+
+        trajectory_switched = (opponent_ahead_detected != self._prev_opponent_ahead_detected)
+        self._prev_opponent_ahead_detected = opponent_ahead_detected
+
         if opponent_ahead_detected:
             self._reference_pathN = self._reference_pathN_center
             #self._reference_path10 = self._reference_path10_center
@@ -1176,40 +1197,27 @@ class MPCController(Node):
             self._mpc_cfg = self._mpc_cfg_race
             self._mpcN = self._mpcN_race
             #self._mpc10 = self._mpc10_race
-        '''
-        self._reference_pathN = self._reference_pathN_race
-        #self._reference_path10 = self._reference_path10_race
-        self._carN = self._carN_race
-        #self._car10 = self._car10_race
-        self._mpc_cfg = self._mpc_cfg_race
-        self._mpcN = self._mpcN_race
-        #self._mpc10 = self._mpc10_race
 
+        # 軌道が切り替わった場合: OSQP ソルバーの内部状態(A行列構造)を強制リセット。
+        # これにより、旧軌道向けに warm-start された状態が新軌道の制約と食い違って
+        # infeasible になるリスクを防ぐ。
+        if trajectory_switched:
+            label = "Race→Center" if opponent_ahead_detected else "Center→Race"
+            self.get_logger().info(f"[TrajectorySwitch] {label}: resetting OSQP solver state.")
+            self._mpcN_race.osqp_initialized = False
+            self._mpcN_center.osqp_initialized = False
 
-        #車両モデル更新
+        # --- 重要: self._car / self._mpc / self._reference_path を _carN / _mpcN / _reference_pathN に同期 ---
+        # self._carN / _mpcN / _reference_pathN は切り替えブロックで更新されているが、
+        # 実際に制御計算に使われるのは self._car / _mpc / _reference_path なので必ず反映する。
+        self._car = self._carN
+        self._mpc = self._mpcN
+        self._reference_path = self._reference_pathN
+
+        # 車両モデル更新（1回だけ実行）
         self._car.update_states(pose.x, pose.y, pose.theta)
+        wp = self._car.wp_id  # update_states 内で get_closest_waypoint が実行済み
 
-        #MPCの切り替え処理(wp_id_offset変更したら安定したけど一応残しておく)
-        '''
-        if not opponent_ahead_detected:
-            self._car.get_current_waypoint()
-            wp = self._car.wp_id
-            if (210 <= wp <= 243) :#or (261 <= wp <= 286):
-                self._switch_mpc(self._mpc10, self._car10, self._reference_path10)
-                #print("using mpc10")
-            else:
-                self._switch_mpc(self._mpcN, self._carN, self._reference_pathN)
-        else:
-            self._switch_mpc(self._mpcN, self._carN, self._reference_pathN)
-        
-        pose = self.get_ego_pose()
-        self._mpc.previous_steering = self._last_u[1]
-        '''
-        
-        self._car.update_states(pose.x, pose.y, pose.theta)
-        
-        self._car.get_current_waypoint()
-        wp = self._car.wp_id
 
         # --- Overtaking Lane Selection Logic ---
         if not hasattr(self, '_target_lane_idx'):
@@ -1237,7 +1245,7 @@ class MPCController(Node):
                     opp_wp_id = self._car.get_closest_waypoint(opp_x, opp_y)
                     
                     wp_diff = (opp_wp_id - wp) % N_total
-                    if 0 < wp_diff < 25:  # within ~21 meters
+                    if 0 < wp_diff < 40:  # within ~34 meters (30km/h ≈ 8.3m/s, need ~4s reaction window)
                         if wp_diff < min_wp_diff:
                             min_wp_diff = wp_diff
                             opponent_ahead = opp_wp_id
@@ -1354,29 +1362,33 @@ class MPCController(Node):
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
 
+        # ref_vel_configuratorがある場合はその値を基準に、なければv_maxを基準にする
         if self._ref_vel_configulator is not None:
             ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
             ref_vel_kmph = min(
                 kmh_to_m_per_sec(ref_vel_mps),
                 self._mpc_cfg.v_max)
-            
+        else:
+            ref_vel_kmph = self._mpc_cfg.v_max
+
+        if self.USE_OBSTACLE_AVOIDANCE:
             # --- ACC spacing control (車間距離維持制御) ---
             # 前方車両がいて、かつ自車の走行ライン上（横方向の差が 1.2m 未満）に他車が位置する場合に
             # 追従状態とみなして車間制御（5m〜10m）を有効化する。
             # 横方向の差が 1.2m 以上の場合は、別車線での追い越し中とみなして加速を許可する。
             e_y = self._car.spatial_state.e_y
             lat_dist = abs(opponent_offset - e_y)
-            
+
             # --- Standard Follow (Same Lane) ---
             if opponent_ahead is not None and lat_dist < 1.2:
-                if opponent_distance < 10.0:
+                if opponent_distance < 15.0:
                     d_target = 8.0 # 目標車間距離 (5m 〜 10m の中央値 7.5m)
                     K_p = 1.2       # 比例ゲイン
                     v_ref_acc = opponent_v_lead + K_p * (opponent_distance - d_target)
                     v_ref_acc = max(0.0, v_ref_acc)  # 後退は禁止のため下限は0
-                    
+
                     ref_vel_kmph = min(ref_vel_kmph, v_ref_acc)
-                    
+
                     if self._loop % int(self._mpc_cfg.control_rate) == 0:
                         self.get_logger().info(
                             f"[ACC] Distance to opp: {opponent_distance:.2f}m, Opp speed: {opponent_v_lead:.2f}m/s. "
@@ -1384,22 +1396,78 @@ class MPCController(Node):
                             throttle_duration_sec=1.0
                         )
 
-            # --- Emergency Spacing Control (Ultra-Close proximity, regardless of lane offset) ---
-            # 追い越し中であっても、縦の車間距離が5.0m未満になったら安全のため減速して車間を開ける
-            if opponent_ahead is not None and opponent_distance < 5.0:
-                d_target_emg = 5.5  # 緊急目標車間距離
-                K_p_emg = 1.5       # 強めの減速比例ゲイン
-                v_ref_emg = opponent_v_lead + K_p_emg * (opponent_distance - d_target_emg)
-                v_ref_emg = max(1.0, v_ref_emg)  # 最低走行速度1.0m/sを確保しスタックを防ぐ
-                
-                ref_vel_kmph = min(ref_vel_kmph, v_ref_emg)
-                
-                if self._loop % int(self._mpc_cfg.control_rate) == 0:
-                    self.get_logger().warn(
-                        f"[EmergencyACC] Too close to opponent! Dist: {opponent_distance:.2f}m. "
-                        f"Overriding target speed to {ref_vel_kmph:.2f}m/s to create safety gap.",
-                        throttle_duration_sec=1.0
-                    )
+            # --- Emergency Proximity Brake (waypoint-independent) ---
+            # opponent_ahead (waypoint差ベースの検出) に依存せず、全V2X車両を直接スキャンする。
+            # wp_diff=0 の場合など waypoint 検出をすり抜けても必ずブレーキがかかる。
+            # 自車ヨー角を用いて「前方向」かどうかを判定する。
+            EMERGENCY_BRAKE_DIST  = 6.0  # [m] この距離以内で前方に車がいたら緊急ブレーキ
+            EMERGENCY_BRAKE_ANGLE = 60.0 # [deg] 前方判定の角度半幅（進行方向±この角度以内）
+            if hasattr(self, '_v2x_tracker'):
+                ego_yaw = pose.theta  # 自車ヨー角 [rad]
+                cos_thresh = math.cos(math.radians(EMERGENCY_BRAKE_ANGLE))
+                for vid in self._v2x_tracker.active_vehicle_ids():
+                    buf = self._v2x_tracker._samples.get(vid)
+                    if buf:
+                        _, opp_x, opp_y = buf[-1]
+                        dx = opp_x - pose.x
+                        dy = opp_y - pose.y
+                        dist = math.hypot(dx, dy)
+                        if dist < EMERGENCY_BRAKE_DIST and dist > 0.01:
+                            # 自車前方向ベクトルとの内積で「前方」を判定
+                            fwd_dot = (dx * math.cos(ego_yaw) + dy * math.sin(ego_yaw)) / dist
+                            if fwd_dot > cos_thresh:
+                                opp_vx, opp_vy = self._v2x_tracker.velocity(vid)
+                                opp_spd = math.hypot(opp_vx, opp_vy)
+                                d_target_emg = 5.5
+                                K_p_emg = 1.5
+                                v_ref_emg = opp_spd + K_p_emg * (dist - d_target_emg)
+                                v_ref_emg = max(0.5, v_ref_emg)
+                                ref_vel_kmph = min(ref_vel_kmph, v_ref_emg)
+                                self.get_logger().warn(
+                                    f"[EmergencyBrake] Forward obstacle at {dist:.2f}m "
+                                    f"(dot={fwd_dot:.2f}). Speed → {ref_vel_kmph:.2f}m/s",
+                                    throttle_duration_sec=0.5
+                                )
+
+            # --- Post-Overtake Cooldown: 追い越し後クールダウン中の後方車両監視 ---
+            # Center→Race に切り替わった直後は、後方の近接車との衝突リスクが高い。
+            # Race軌道がコーナーインを攻めて後方の相手と交差しないよう、
+            # クールダウン期間中は後方の近接車との距離に応じて速度を抑制する。
+            RACE_RETURN_COOLDOWN_SEC = 3.0  # [s] 追い越し完了後に速度抑制する時間
+            if not hasattr(self, '_race_return_time'):
+                self._race_return_time = None
+
+            # Center→Race 切り替えを検出してクールダウンタイマーを開始
+            if trajectory_switched and not opponent_ahead_detected:
+                self._race_return_time = current_time_sec
+                self.get_logger().info("[PostOvertake] Cooldown started after returning to Race trajectory.")
+
+            in_post_overtake_cooldown = (
+                self._race_return_time is not None and
+                current_time_sec - self._race_return_time < RACE_RETURN_COOLDOWN_SEC
+            )
+
+            if in_post_overtake_cooldown and hasattr(self, '_v2x_tracker'):
+                for vid in self._v2x_tracker.active_vehicle_ids():
+                    buf = self._v2x_tracker._samples.get(vid)
+                    if buf:
+                        _, opp_x, opp_y = buf[-1]
+                        behind_dist = math.hypot(opp_x - pose.x, opp_y - pose.y)
+                        if behind_dist < 12.0:  # 後方12m以内に相手がいる場合のみ速度制限
+                            opp_vx, opp_vy = self._v2x_tracker.velocity(vid)
+                            opp_speed = math.hypot(opp_vx, opp_vy)
+                            # 後方車両との距離が縮まらないよう、相手速度を上限とする
+                            d_behind_target = 8.0  # 目標後方間隔
+                            K_p_behind = 0.8
+                            v_ref_behind = opp_speed + K_p_behind * (behind_dist - d_behind_target)
+                            v_ref_behind = max(2.0, v_ref_behind)
+                            ref_vel_kmph = min(ref_vel_kmph, v_ref_behind)
+                            if self._loop % int(self._mpc_cfg.control_rate) == 0:
+                                self.get_logger().info(
+                                    f"[PostOvertake] Behind opp {behind_dist:.1f}m, "
+                                    f"limiting speed to {ref_vel_kmph:.2f}m/s",
+                                    throttle_duration_sec=1.0
+                                )
 
             # --- Parallel Running Safety Control (並走接近制御) ---
             # 並走（横距離が小さく縦距離も小さい）の場合、速度を落として衝突を回避する
@@ -1407,9 +1475,9 @@ class MPCController(Node):
             LAT_WARN_THRESH  = 2.0   # [m] 警戒ゾーン開始 (並走接近を検出)
             LAT_CRIT_THRESH  = 1.4   # [m] 臨界ゾーン (強制減速)
             LON_PARALLEL_MAX = 4.5   # [m] この縦距離以内を「並走」と判定
-            PARALLEL_ABORT_SEC = 3.0 # [s] 並走がこの時間以上続いたら追い越し中断
+            PARALLEL_ABORT_SEC = 4.0 # [s] 並走がこの時間以上続いたら追い越し中断
 
-            if self.USE_OBSTACLE_AVOIDANCE and hasattr(self, '_v2x_tracker'):
+            if hasattr(self, '_v2x_tracker'):
                 for vid in self._v2x_tracker.active_vehicle_ids():
                     buf = self._v2x_tracker._samples.get(vid)
                     if buf:
@@ -1473,9 +1541,9 @@ class MPCController(Node):
             else:
                 self._parallel_start_time = None
 
-            self._mpc.update_v_max(ref_vel_kmph)
-            v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
-            self._reference_path.set_v_ref(v_ref)
+        self._mpc.update_v_max(ref_vel_kmph)
+        v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
+        self._reference_path.set_v_ref(v_ref)
 
         # 停止命令がコマンドで入力させたら減速させる
         if not self._enable_control:
