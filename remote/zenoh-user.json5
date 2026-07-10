@@ -55,10 +55,17 @@
       allow: {
         publishers: [
           "/initialpose",
-          "/racing_kart/joy"
+          "/awsim/control_mode_request_topic",
+          "/control/command/actuation_cmd",
+          "/control/command/gear_cmd",
+          "/racing_kart/joy",
+          "/joy"
         ],
         subscribers: [
+          "/awsim/control_mode_request_topic",
+          "/control/command/actuation_cmd",
           "/control/command/control_cmd",
+          "/control/command/gear_cmd",
           "/localization/kinematic_state",
           "/planning/scenario_planning/trajectory",
           "/tf",
@@ -102,7 +109,11 @@
       ////                   to create a bigger batch of messages. This usually has a positive impact on latency for the topic
       ////                   but a negative impact on the general throughput, as more overhead is used for those topics.
       pub_priorities: [
+        "/awsim/control_mode_request_topic=1:express",
+        "/control/command/actuation_cmd=1:express",
+        "/control/command/gear_cmd=1:express",
         "/racing_kart/joy=1:express",
+        "/joy=1:express",
         "/initialpose=1:express",
       ],
 

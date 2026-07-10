@@ -1,0 +1,2 @@
+"    def _apply_stuck_recovery(self, now, u, actual_speed: float) -> bool:\n        if not self._stuck_recovery_enabled:\n            return False\n\n        now_sec = float(now.nanoseconds) / 1e9\n\n        if self._stuck_recovery_until is not None:\n    
+<truncated 9645 bytes>

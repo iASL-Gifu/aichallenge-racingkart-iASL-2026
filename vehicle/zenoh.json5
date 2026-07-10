@@ -54,7 +54,10 @@
       ////               or is not specified at all, it means that ALL such interface are allowed.
       allow: {
         publishers: [
+          "/awsim/control_mode_request_topic",
+          "/control/command/actuation_cmd",
           "/control/command/control_cmd",
+          "/control/command/gear_cmd",
           "/localization/kinematic_state",
           "/planning/scenario_planning/trajectory",
           "/tf",
@@ -64,7 +67,11 @@
           "/vehicle/status/velocity_status"
         ],
         subscribers: [
+          "/awsim/control_mode_request_topic",
+          "/control/command/actuation_cmd",
+          "/control/command/gear_cmd",
           "/racing_kart/joy",
+          "/joy",
           "/initialpose"
         ],
         service_servers: [],
@@ -102,7 +109,10 @@
       ////                   to create a bigger batch of messages. This usually has a positive impact on latency for the topic
       ////                   but a negative impact on the general throughput, as more overhead is used for those topics.
       pub_priorities: [
+          "/awsim/control_mode_request_topic=1:express",
+          "/control/command/actuation_cmd=1:express",
           "/control/command/control_cmd=7",
+          "/control/command/gear_cmd=1:express",
           "/localization/kinematic_state=5",
           "/planning/scenario_planning/trajectory=7",
           "/tf=7",

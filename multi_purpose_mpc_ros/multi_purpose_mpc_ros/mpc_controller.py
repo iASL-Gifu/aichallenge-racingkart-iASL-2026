@@ -21,7 +21,8 @@ from rclpy.parameter import Parameter
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy
 
-from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32
+from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32, String
+from sensor_msgs.msg import Joy
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Quaternion, Pose2D, Point, Vector3, PoseWithCovarianceStamped
 from std_msgs.msg import ColorRGBA
@@ -32,6 +33,20 @@ from rclpy.parameter import Parameter
 # autoware
 from autoware_auto_control_msgs.msg import AckermannControlCommand
 from autoware_auto_planning_msgs.msg import Trajectory
+try:
+    from autoware_auto_vehicle_msgs.msg import GearCommand, GearReport
+except ModuleNotFoundError:
+    GearCommand = None
+    GearReport = None
+try:
+    from autoware_auto_vehicle_msgs.msg import ControlModeReport, VelocityReport
+except (ModuleNotFoundError, ImportError):
+    ControlModeReport = None
+    VelocityReport = None
+try:
+    from tier4_vehicle_msgs.msg import ActuationCommandStamped
+except ModuleNotFoundError:
+    ActuationCommandStamped = None
 from v2x_msgs.msg import V2XVehiclePositionArray
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     V2XVehicleTracker,
@@ -545,10 +560,12 @@ class MPCController(Node):
         self._current_laps = 1
         self._last_lap_time = 0.0
         self._lap_times = [None] * (self.MAX_LAPS + 1) # +1 means include lap 0
+        self._awsim_command_speed = 0.0
 
         # condition
         self._last_condition = None
         self._last_colliding_time = None
+        self._configure_stuck_recovery()
 
         # stats
         self._stats = ExecutionStats(self.get_logger(), window_size=50, record_count_threshold=1000)
@@ -562,6 +579,124 @@ class MPCController(Node):
         dst_dir = self.PKG_PATH + f"log/{now}"
         os.makedirs(dst_dir, exist_ok=True)
         shutil.copy(self._config_path, os.path.join(dst_dir, "config.yaml"))
+
+    def _configure_stuck_recovery(self) -> None:
+        cfg = getattr(self._cfg, "stuck_recovery", None)
+
+        def get_cfg(name: str, default):
+            return getattr(cfg, name, default) if cfg is not None else default
+
+        self._stuck_recovery_enabled = bool(get_cfg("enabled", True))
+        self._stuck_speed_threshold = float(get_cfg("speed_threshold", 0.15))
+        self._stuck_forward_cmd_threshold = float(get_cfg("forward_cmd_threshold", 0.8))
+        self._stuck_time_threshold = float(get_cfg("stuck_time_threshold", 2.0))
+        self._stuck_reverse_duration = float(get_cfg("reverse_duration", 3.0))
+        self._stuck_cooldown = float(get_cfg("cooldown", 2.0))
+        self._stuck_forward_reverse_speed = abs(float(get_cfg("reverse_speed", 1.0)))
+        self._stuck_reverse_speed = -abs(float(get_cfg("reverse_speed", 1.0)))
+        self._stuck_reverse_acceleration = -abs(float(get_cfg("reverse_acceleration", 1.5)))
+        self._stuck_reverse_acceleration_positive = bool(
+            get_cfg("reverse_acceleration_positive", True))
+        self._stuck_reverse_steering_scale = float(get_cfg("reverse_steering_scale", 0.0))
+        self._stuck_reverse_command_mode = str(
+            get_cfg("reverse_command_mode", "awsim_reverse_button"))
+        self._stuck_request_control_mode = bool(get_cfg("request_control_mode", False))
+        self._stuck_control_mode_request_value = bool(
+            get_cfg("control_mode_request_value", True))
+        self._stuck_shift_control_mode_request_value = bool(
+            get_cfg("shift_control_mode_request_value", self._stuck_control_mode_request_value))
+        self._stuck_drive_control_mode_request_value = bool(
+            get_cfg("drive_control_mode_request_value", self._stuck_control_mode_request_value))
+        self._stuck_send_gear_command = bool(get_cfg("send_gear_command", True))
+        self._stuck_wait_for_reverse_gear = bool(get_cfg("wait_for_reverse_gear", True))
+        self._stuck_pre_reverse_duration = float(get_cfg("pre_reverse_duration", 0.0))
+        self._stuck_gear_shift_delay = float(get_cfg("gear_shift_delay", 1.0))
+        self._stuck_max_shift_wait = float(get_cfg("max_shift_wait", 5.0))
+        self._stuck_use_actuation_cmd = bool(get_cfg("use_actuation_cmd", True))
+        self._stuck_actuation_accel_cmd = abs(float(get_cfg("actuation_accel_cmd", 1.0)))
+        self._stuck_actuation_brake_cmd = abs(float(get_cfg("actuation_brake_cmd", 0.0)))
+        self._stuck_use_joy_cmd = bool(get_cfg("use_joy_cmd", True))
+        self._stuck_joy_speed_axis = int(get_cfg("joy_speed_axis", 1))
+        self._stuck_joy_steer_axis = int(get_cfg("joy_steer_axis", 3))
+        self._stuck_joy_reverse_value = float(get_cfg("joy_reverse_value", -1.0))
+        self._stuck_joy_steer_value = float(get_cfg("joy_steer_value", 0.0))
+        self._stuck_joy_axes_size = int(get_cfg("joy_axes_size", 8))
+        self._stuck_joy_buttons_size = int(get_cfg("joy_buttons_size", 13))
+        self._stuck_joy_hold_buttons = [
+            int(value)
+            for value in str(get_cfg("joy_hold_buttons", "2")).split(",")
+            if value.strip()
+        ]
+        self._gear_reverse_reports = {
+            int(value)
+            for value in str(get_cfg("reverse_gear_reports", "20")).split(",")
+            if value.strip()
+        }
+        self._stuck_reverse_gear_command_override = get_cfg("reverse_gear_command", None)
+        self._stuck_drive_gear_command_override = get_cfg("drive_gear_command", None)
+        self._stuck_pre_reverse_gear_command_override = get_cfg("pre_reverse_gear_command", None)
+        self._stuck_control_mode_requested = False
+        self._last_stuck_gear_command = None
+        self._stuck_reverse_drive_after = None
+        self._stuck_reverse_drive_active = False
+        self._stuck_recovery_started_at = None
+        self._stuck_pre_reverse_until = None
+        self._gear_report = None
+        self._control_mode_report = None
+        self._velocity_report = None
+        self._awsim_state = None
+        self._actuation_cmd_pub = None
+        self._joy_cmd_pub = None
+        self._joy_cmd_pub_plain = None
+        self._gear_drive_command = (
+            int(self._stuck_drive_gear_command_override)
+            if self._stuck_drive_gear_command_override is not None
+            else getattr(GearCommand, "DRIVE", 2) if GearCommand is not None else 2
+        )
+        self._gear_reverse_command = (
+            int(self._stuck_reverse_gear_command_override)
+            if self._stuck_reverse_gear_command_override is not None
+            else getattr(GearCommand, "REVERSE", 20) if GearCommand is not None else 20
+        )
+        self._gear_pre_reverse_command = (
+            int(self._stuck_pre_reverse_gear_command_override)
+            if self._stuck_pre_reverse_gear_command_override is not None
+            else getattr(GearCommand, "NEUTRAL", 1) if GearCommand is not None else 1
+        )
+        if GearReport is not None and hasattr(GearReport, "REVERSE"):
+            self._gear_reverse_reports.add(int(getattr(GearReport, "REVERSE")))
+
+        self._stuck_since = None
+        self._stuck_recovery_until = None
+        self._stuck_cooldown_until = None
+        self._last_control_mode = None
+        self._autonomous_entered_at = None
+        self._has_moved_once = False
+        self._stuck_pre_drive_until = None
+        self._stuck_wait_for_drive = False
+
+        if self._stuck_recovery_enabled:
+            self.get_logger().info(
+                "[StuckRecovery] enabled: "
+                f"speed<{self._stuck_speed_threshold:.2f}m/s for "
+                f"{self._stuck_time_threshold:.1f}s -> reverse "
+                f"mode={self._stuck_reverse_command_mode} "
+                f"speed={self._stuck_forward_reverse_speed:.2f} "
+                f"accel={abs(self._stuck_reverse_acceleration):.2f} "
+                f"accel_positive={self._stuck_reverse_acceleration_positive} "
+                f"use_actuation_cmd={self._stuck_use_actuation_cmd} "
+                f"control_mode_request={self._stuck_control_mode_request_value} "
+                f"shift_control_mode={self._stuck_shift_control_mode_request_value} "
+                f"drive_control_mode={self._stuck_drive_control_mode_request_value} "
+                f"send_gear={self._stuck_send_gear_command} "
+                f"wait_gear={self._stuck_wait_for_reverse_gear} "
+                f"pre_gear={self._gear_pre_reverse_command} "
+                f"pre_duration={self._stuck_pre_reverse_duration:.2f} "
+                f"gear_cmd={self._gear_reverse_command} "
+                f"reverse_reports={sorted(self._gear_reverse_reports)} "
+                f"for {self._stuck_reverse_duration:.1f}s "
+                f"source={__file__}"
+            )
 
     def _setup_pub_sub(self) -> None:
         # Publishers
@@ -614,8 +749,52 @@ class MPCController(Node):
         if self.use_sim_time:
             self._awsim_status_sub = self.create_subscription(
                 Float32MultiArray, "/awsim/status", self._awsim_status_callback, 1)
+            self._awsim_admin_status_sub = self.create_subscription(
+                Float32MultiArray, "/admin/awsim/status", self._awsim_admin_status_callback, 1)
+            self._awsim_state_sub = self.create_subscription(
+                String, "/awsim/state", self._awsim_state_callback, 1)
             self._condition_sub = self.create_subscription(
                 Int32, "/aichallenge/pitstop/condition", self._condition_callback, 1)
+
+        self._awsim_control_mode_request_pub = self.create_publisher(
+            Bool, "/awsim/control_mode_request_topic", 1)
+        self._gear_cmd_pub = None
+        if GearCommand is not None:
+            self._gear_cmd_pub = self.create_publisher(
+                GearCommand, "/control/command/gear_cmd", 10)
+            if GearReport is not None:
+                self._gear_status_sub = self.create_subscription(
+                    GearReport, "/vehicle/status/gear_status", self._gear_status_callback, 1)
+        else:
+            self.get_logger().warn(
+                "autoware_auto_vehicle_msgs/GearCommand is unavailable; "
+                "stuck recovery cannot shift AWSIM gear from ROS."
+            )
+        if ActuationCommandStamped is not None:
+            self._actuation_cmd_pub = self.create_publisher(
+                ActuationCommandStamped, "/control/command/actuation_cmd", 1)
+        else:
+            self.get_logger().warn(
+                "tier4_vehicle_msgs/ActuationCommandStamped is unavailable; "
+                "stuck recovery cannot publish AWSIM actuation_cmd."
+            )
+        self._joy_cmd_pub = self.create_publisher(Joy, "/racing_kart/joy", 1)
+        self._joy_cmd_pub_plain = self.create_publisher(Joy, "/joy", 1)
+
+        if ControlModeReport is not None:
+            self._control_mode_status_sub = self.create_subscription(
+                ControlModeReport,
+                "/vehicle/status/control_mode",
+                self._control_mode_status_callback,
+                1,
+            )
+        if VelocityReport is not None:
+            self._velocity_status_sub = self.create_subscription(
+                VelocityReport,
+                "/vehicle/status/velocity_status",
+                self._velocity_status_callback,
+                1,
+            )
 
         if self.USE_OBSTACLE_AVOIDANCE:
             if self._cfg.reference_path.use_path_constraints_topic: # type: ignore
@@ -667,6 +846,290 @@ class MPCController(Node):
         # gain を掛ける
         cmd.lateral.steering_tire_angle *= self._mpc_cfg.steering_tire_angle_gain_var
         self._command_pub.publish(cmd)
+
+    def _apply_stuck_reverse_command(self, u) -> None:
+        if self._stuck_reverse_command_mode in ("teleop", "awsim_reverse_button"):
+            # In AWSIM reverse gear, keep speed positive and let the gear decide
+            # the vehicle direction.  A zero target speed can cancel the throttle.
+            u[0] = self._stuck_forward_reverse_speed
+        elif self._stuck_reverse_command_mode == "negative_speed_positive_accel":
+            u[0] = -abs(self._stuck_reverse_speed)
+        else:
+            u[0] = -abs(self._stuck_reverse_speed)
+        u[1] *= self._stuck_reverse_steering_scale
+
+    def _publish_gear_command(self, now, command: int) -> None:
+        if not self._stuck_send_gear_command or GearCommand is None or self._gear_cmd_pub is None:
+            return
+        if self._last_stuck_gear_command == command:
+            return
+        msg = GearCommand()
+        msg.stamp = now.to_msg()
+        msg.command = command
+        self._gear_cmd_pub.publish(msg)
+        self._last_stuck_gear_command = command
+
+    def _publish_stuck_actuation_command(self, now, accel: float, brake: float, steer_cmd: float) -> None:
+        if (
+            not self._stuck_use_actuation_cmd
+            or ActuationCommandStamped is None
+            or self._actuation_cmd_pub is None
+        ):
+            return
+        msg = ActuationCommandStamped()
+        msg.header.stamp = now.to_msg()
+        msg.header.frame_id = "base_link"
+        msg.actuation.accel_cmd = accel
+        msg.actuation.brake_cmd = brake
+        msg.actuation.steer_cmd = steer_cmd
+        self._actuation_cmd_pub.publish(msg)
+
+    def _publish_stuck_joy_command(self, now, joy_value: float = None) -> None:
+        if not self._stuck_use_joy_cmd or self._joy_cmd_pub is None:
+            return
+        axes_size = max(
+            self._stuck_joy_axes_size,
+            self._stuck_joy_speed_axis + 1,
+            self._stuck_joy_steer_axis + 1,
+        )
+        msg = Joy()
+        msg.header.stamp = now.to_msg()
+        msg.axes = [0.0] * axes_size
+        msg.buttons = [0] * self._stuck_joy_buttons_size
+        val = self._stuck_joy_reverse_value if joy_value is None else joy_value
+        msg.axes[self._stuck_joy_speed_axis] = val
+        msg.axes[self._stuck_joy_steer_axis] = self._stuck_joy_steer_value
+        for button_index in self._stuck_joy_hold_buttons:
+            if 0 <= button_index < len(msg.buttons):
+                msg.buttons[button_index] = 1
+        self._joy_cmd_pub.publish(msg)
+        if self._joy_cmd_pub_plain is not None:
+            self._joy_cmd_pub_plain.publish(msg)
+
+    def _current_gear_is_reverse(self) -> bool:
+        if self._gear_report is None:
+            return False
+        return int(getattr(self._gear_report, "report", -1)) in self._gear_reverse_reports
+
+    def _gear_status_callback(self, msg) -> None:
+        self._gear_report = msg
+
+    def _control_mode_status_callback(self, msg) -> None:
+        self._control_mode_report = msg
+
+    def _velocity_status_callback(self, msg) -> None:
+        self._velocity_report = msg
+
+    def _awsim_state_callback(self, msg) -> None:
+        self._awsim_state = getattr(msg, "data", None)
+
+    def _request_awsim_control_mode_for_recovery(self) -> None:
+        if not self._stuck_request_control_mode:
+            return
+        msg = Bool()
+        msg.data = True
+        self._awsim_control_mode_request_pub.publish(msg)
+        self._stuck_control_mode_requested = True
+        self.get_logger().info(
+            "[StuckRecovery] requested AWSIM control mode (data=True).",
+            throttle_duration_sec=1.0,
+        )
+
+    def _apply_stuck_recovery(self, now, u, actual_speed: float) -> bool:
+        if not self._stuck_recovery_enabled:
+            return False
+
+        now_sec = float(now.nanoseconds) / 1e9
+
+        if self._stuck_recovery_until is not None:
+            # 1. タイムアウト判定
+            if now_sec >= self._stuck_recovery_until:
+                if self._stuck_reverse_drive_active:
+                    # 後退駆動が終わったので、前進復帰シーケンスを開始する
+                    self._stuck_reverse_drive_active = False
+                    self._stuck_pre_drive_until = now_sec + 0.0
+                    self._stuck_recovery_until = now_sec + 5.0
+                    self._stuck_wait_for_drive = False
+                    self.get_logger().info("[StuckRecovery] Reverse drive finished. Starting drive transition...")
+                else:
+                    # トルク抜きやシフト待ちでタイムアウトした場合、あるいは前進復帰中のタイムアウト
+                    self._stuck_recovery_until = None
+
+            # 2. リカバリー動作中の処理
+            if self._stuck_recovery_until is not None:
+                # 前進復帰シーケンス
+                in_drive_transition = (
+                    self._stuck_pre_drive_until is not None
+                    or self._stuck_wait_for_drive
+                )
+
+                if in_drive_transition:
+                    self._request_awsim_control_mode_for_recovery()
+                    pre_driving = (
+                        self._stuck_pre_drive_until is not None
+                        and now_sec < self._stuck_pre_drive_until
+                    )
+                    gear_status_known = self._gear_report is not None
+                    gear_is_drive = gear_status_known and getattr(self._gear_report, 'report', None) == self._gear_drive_command
+
+                    if pre_driving:
+                        self._publish_gear_command(now, self._gear_reverse_command)
+                    else:
+                        self._stuck_pre_drive_until = None
+                        self._stuck_wait_for_drive = True
+                        self._publish_gear_command(now, self._gear_drive_command)
+
+                    waiting_for_drive = (
+                        pre_driving or (self._stuck_send_gear_command and gear_status_known and not gear_is_drive)
+                    )
+
+                    if waiting_for_drive:
+                        if pre_driving:
+                            u[0] = 0.0
+                            u[1] = 0.0
+                        if gear_status_known:
+                            self.get_logger().warn(
+                                "[StuckRecovery] pre-shift before drive (stopping)..."
+                                if pre_driving
+                                else "[StuckRecovery] waiting for AWSIM gear to become DRIVE "
+                                f"(current={getattr(self._gear_report, 'report', None)}).",
+                                throttle_duration_sec=1.0,
+                            )
+                        return True
+                    else:
+                        self._stuck_recovery_until = None  # シフト完了につき正常終了へ
+
+                # 後退（REVERSE）リカバリーシーケンス
+                else:
+                    gear_status_known = self._gear_report is not None
+                    gear_is_reverse = self._current_gear_is_reverse()
+                    if (
+                        gear_is_reverse
+                        and self._stuck_recovery_started_at is None
+                    ):
+                        self._stuck_recovery_started_at = now_sec
+                        self._stuck_recovery_until = now_sec + self._stuck_reverse_duration
+                        self.get_logger().info(
+                            "[StuckRecovery] AWSIM gear is REVERSE; starting reverse drive "
+                            f"for {self._stuck_reverse_duration:.1f}s."
+                        )
+
+                    self._request_awsim_control_mode_for_recovery()
+                    pre_shifting = (
+                        self._stuck_pre_reverse_until is not None
+                        and now_sec < self._stuck_pre_reverse_until
+                    )
+                    if pre_shifting:
+                        self._publish_gear_command(now, self._gear_pre_reverse_command)
+                    else:
+                        self._stuck_pre_reverse_until = None
+                        self._publish_gear_command(now, self._gear_reverse_command)
+                    waiting_for_reverse = (
+                        (pre_shifting or self._stuck_wait_for_reverse_gear)
+                        and (
+                            pre_shifting
+                            or (gear_status_known and not gear_is_reverse)
+                            or (
+                                not gear_status_known
+                                and self._stuck_reverse_drive_after is not None
+                                and now_sec < self._stuck_reverse_drive_after
+                            )
+                        )
+                    )
+                    if waiting_for_reverse:
+                        u[0] = 0.0
+                        u[1] = 0.0
+                        self._stuck_reverse_drive_active = False
+                        if gear_status_known:
+                            self.get_logger().warn(
+                                "[StuckRecovery] pre-shift before reverse "
+                                f"(command={self._gear_pre_reverse_command}, "
+                                f"current={getattr(self._gear_report, 'report', None)})."
+                                if pre_shifting
+                                else "[StuckRecovery] waiting for AWSIM gear to become REVERSE "
+                                f"(current={getattr(self._gear_report, 'report', None)}).",
+                                throttle_duration_sec=1.0,
+                             )
+                    else:
+                        self._apply_stuck_reverse_command(u)
+                        self._publish_stuck_actuation_command(now, self._stuck_actuation_accel_cmd, 0.0, u[1])
+                        self._stuck_reverse_drive_active = True
+                    return True
+
+            # 3. 正常終了・タイムアウト終了後のリセット処理
+            self._stuck_recovery_until = None
+            self._stuck_cooldown_until = now_sec + self._stuck_cooldown
+            self._stuck_since = None
+            self._stuck_control_mode_requested = False
+            self._last_stuck_gear_command = None
+            self._stuck_reverse_drive_after = None
+            self._stuck_reverse_drive_active = False
+            self._stuck_recovery_started_at = None
+            self._stuck_pre_reverse_until = None
+            self._stuck_pre_drive_until = None
+            self._stuck_wait_for_drive = False
+            self._publish_gear_command(now, self._gear_drive_command)
+            # 自動運転モードを明示的にONにする
+            if self._stuck_request_control_mode:
+                msg = Bool()
+                msg.data = True
+                self._awsim_control_mode_request_pub.publish(msg)
+            self.get_logger().info(
+                "[StuckRecovery] reverse finished; returning to MPC control "
+                f"(gear={getattr(self._gear_report, 'report', None)})."
+            )
+            return False
+
+        # 4. 通常時の判定（誤爆防止マスク＆スタック検知）
+        in_cooldown = (
+            self._stuck_cooldown_until is not None
+            and now_sec < self._stuck_cooldown_until
+        )
+        if in_cooldown:
+            return False
+
+        # 動き出した実績の管理（シミュレータ起動・リセット時の誤爆防止）
+        if abs(actual_speed) > 1.0:
+            self._has_moved_once = True
+        elif abs(actual_speed) < 0.1 and self._car.wp_id < 10:
+            self._has_moved_once = False
+
+        if not self._has_moved_once:
+            self._stuck_since = None
+            return False
+
+        if abs(actual_speed) < self._stuck_speed_threshold and u[0] > self._stuck_forward_cmd_threshold:
+            if self._stuck_since is None:
+                self._stuck_since = now_sec
+            elif now_sec - self._stuck_since >= self._stuck_time_threshold:
+                self._stuck_recovery_until = now_sec + self._stuck_max_shift_wait
+                self._stuck_reverse_drive_after = now_sec + self._stuck_gear_shift_delay
+                self._stuck_pre_reverse_until = (
+                    now_sec + self._stuck_pre_reverse_duration
+                    if self._stuck_pre_reverse_duration > 0.0
+                    else None
+                )
+                self._stuck_recovery_started_at = None
+                self._last_stuck_gear_command = None
+                self._request_awsim_control_mode_for_recovery()
+                if self._stuck_pre_reverse_until is not None:
+                    self._publish_gear_command(now, self._gear_pre_reverse_command)
+                else:
+                    self._publish_gear_command(now, self._gear_reverse_command)
+                u[0] = 0.0
+                u[1] = 0.0
+                self._stuck_reverse_drive_active = False
+                self.get_logger().warn(
+                    f"[StuckRecovery] vehicle seems stuck; commanding reverse "
+                    f"({self._stuck_reverse_command_mode}, "
+                    f"gear={getattr(self._gear_report, 'report', None)}).",
+                    throttle_duration_sec=0.5,
+                )
+                return True
+        else:
+            self._stuck_since = None
+
+        return False
 
 
     def _odom_callback(self, msg: Odometry) -> None:
@@ -766,6 +1229,7 @@ class MPCController(Node):
     def _awsim_status_callback(self, msg):
         laps = int(msg.data[1])
         lap_time = msg.data[2]
+        self._update_awsim_command_speed(msg)
         # section = int(msg.data[3])
 
         if self._current_laps is None:
@@ -777,6 +1241,13 @@ class MPCController(Node):
             self._current_laps = laps
 
         self._last_lap_time = lap_time
+
+    def _awsim_admin_status_callback(self, msg):
+        self._update_awsim_command_speed(msg)
+
+    def _update_awsim_command_speed(self, msg):
+        if len(msg.data) >= 2:
+            self._awsim_command_speed = float(msg.data[1])
 
     def _condition_callback(self, msg: Int32):
         if self._last_condition is None:
@@ -1559,12 +2030,36 @@ class MPCController(Node):
             u = [0.0, 0.0]
             # continue
 
+        recovering_from_stuck = self._apply_stuck_recovery(now, u, v)
+
         acc = 0.
         bug_acc_enabled = False
 
 
         #boostモードがONのとき
-        if self.USE_BUG_ACC:
+        if recovering_from_stuck:
+            bug_acc_enabled = False
+            if not self._stuck_reverse_drive_active:
+                acc = 0.0
+            elif self._stuck_reverse_command_mode in ("negative_speed_positive_accel", "awsim_reverse_button"):
+                if self._stuck_reverse_acceleration_positive:
+                    acc = abs(self._stuck_reverse_acceleration)
+                else:
+                    acc = -abs(self._stuck_reverse_acceleration)
+            else:
+                acc = self._stuck_reverse_acceleration
+            self.get_logger().info(
+                f"[StuckRecovery] reverse cmd speed={u[0]:.2f} acc={acc:.2f} "
+                f"actuation=({self._stuck_actuation_accel_cmd:.2f},"
+                f"{self._stuck_actuation_brake_cmd:.2f}) "
+                f"gear={getattr(self._gear_report, 'report', None)} "
+                f"mode={getattr(self._control_mode_report, 'mode', None)} "
+                f"vel={getattr(self._velocity_report, 'longitudinal_velocity', None)} "
+                f"state={self._awsim_state}",
+                throttle_duration_sec=1.0,
+            )
+            self._pred_marker_color = YELLOW
+        elif self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
 
@@ -1586,8 +2081,9 @@ class MPCController(Node):
             acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
 
         # 加速度と操舵角の平滑化
-        acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
-        u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
+        if not recovering_from_stuck:
+            acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
+            u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
 
         self._last_acc = acc
         self._last_u[0] = u[0]
@@ -1596,7 +2092,8 @@ class MPCController(Node):
         # update car state (use v for feedback actual speed)
         self._car.drive([v, u[1]])
 
-        # Publish control command
+        # Publish control command.  Keep this active during stuck recovery because
+        # the known-working teleop path drives AWSIM through control_cmd directly.
         self._publish_control_command(now, u, acc, bug_acc_enabled)
 
         # Log states
