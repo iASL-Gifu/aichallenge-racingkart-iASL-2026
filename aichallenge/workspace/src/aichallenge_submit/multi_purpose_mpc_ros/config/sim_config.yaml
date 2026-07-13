@@ -39,7 +39,7 @@ mpc:
   # Q: [10.0, 80.0, 5.0]  # [v, delta, t]
   R: [0.0, 300.0]      # [v, delta]
   QN: [3.0, 1.5, 5.0]
-  v_max: 30.0 # km/h
+  v_max: 40.0 # km/h
   a_min: -3.2 # m/s^2
   a_max: 3.2 # m/s^2
   ay_max: 50.0 # m/s^2, maximum lateral acceleration in curves
@@ -50,5 +50,39 @@ mpc:
 
 v2x_obstacle_avoidance:
   vehicle_radius: 0.5          # [m]
-  v_max_safety: 30.0           # [m/s]
+  v_max_safety: 40.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
+
+stuck_recovery:
+  enabled: true
+  speed_threshold: 0.15
+  forward_cmd_threshold: 0.8
+  stuck_time_threshold: 2.0
+  reverse_duration: 3.0
+  cooldown: 2.0
+  reverse_speed: 1.5
+  reverse_acceleration: 2.5
+  reverse_acceleration_positive: true
+  reverse_steering_scale: 0.0
+  reverse_command_mode: awsim_reverse_button
+  control_mode_request_value: true
+  send_gear_command: true
+  wait_for_reverse_gear: true
+  pre_reverse_gear_command: 22
+  pre_reverse_duration: 1.2
+  reverse_gear_command: 20
+  drive_gear_command: 2
+  reverse_gear_reports: "20,21"
+  request_control_mode: true
+  shift_control_mode_request_value: true
+  drive_control_mode_request_value: true
+  gear_shift_delay: 1.0
+  max_shift_wait: 8.0
+  use_actuation_cmd: false
+  actuation_accel_cmd: 1.0
+  actuation_brake_cmd: 0.0
+  use_joy_cmd: false
+  joy_speed_axis: 1
+  joy_steer_axis: 3
+  joy_reverse_value: -1.0
+  joy_steer_value: 0.0

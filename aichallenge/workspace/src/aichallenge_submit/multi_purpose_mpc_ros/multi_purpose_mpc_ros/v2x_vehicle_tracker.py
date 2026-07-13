@@ -25,6 +25,7 @@ class V2XVehicleTracker:
         self._warn = warn_callback if warn_callback is not None else (lambda _msg: None)
         self._samples: Dict[str, Deque[Tuple[float, float, float]]] = {}
         self._velocities: Dict[str, Tuple[float, float]] = {}
+        self._velocity_valid: Dict[str, bool] = {}
         self._active: List[str] = []
 
     def update(self, msg) -> None:
@@ -51,6 +52,7 @@ class V2XVehicleTracker:
 
             if jumped or len(buf) < 2:
                 self._velocities[vid] = (0.0, 0.0)
+                self._velocity_valid[vid] = False
             else:
                 t0, x0, y0 = buf[0]
                 t1, x1, y1 = buf[1]
@@ -60,18 +62,24 @@ class V2XVehicleTracker:
                     vy = (y1 - y0) / dt
                     if math.hypot(vx, vy) > self._v_max_safety:
                         self._velocities[vid] = (0.0, 0.0)
+                        self._velocity_valid[vid] = False
                         self._warn(
                             f"V2X: velocity for vehicle '{vid}' exceeds "
                             f"{self._v_max_safety} m/s — clamped to zero")
                     else:
                         self._velocities[vid] = (vx, vy)
+                        self._velocity_valid[vid] = True
                 else:
                     self._velocities[vid] = (0.0, 0.0)
+                    self._velocity_valid[vid] = False
             active.append(vid)
         self._active = active
 
     def velocity(self, vehicle_id: str) -> Tuple[float, float]:
         return self._velocities.get(vehicle_id, (0.0, 0.0))
+
+    def has_velocity_estimate(self, vehicle_id: str) -> bool:
+        return self._velocity_valid.get(vehicle_id, False)
 
     def predict_positions(
         self, vehicle_id: str, t_samples
@@ -107,3 +115,35 @@ def predictions_to_obstacles(predictions, vehicle_radius: float, obstacle_cls=No
         for x, y in points:
             out.append(obstacle_cls(cx=x, cy=y, radius=vehicle_radius))
     return out
+
+
+def evaluate_stopped_lead_overtake(
+    *,
+    tracked_stopped_lead,
+    distance,
+    left_is_free,
+    right_is_free,
+    target_lane_idx,
+    infeasibility_counter,
+    reverse_distance,
+    infeasible_cycles,
+):
+    """Choose forced overtaking or a stopped-vehicle reverse request."""
+    passing_side_available = left_is_free or right_is_free
+    outer_lane_accepted = target_lane_idx in (0, 2)
+    reverse_requested = (
+        tracked_stopped_lead
+        and distance <= reverse_distance
+        and (
+            not passing_side_available
+            or not outer_lane_accepted
+            or infeasibility_counter >= infeasible_cycles
+        )
+    )
+    forced_overtake_active = (
+        tracked_stopped_lead
+        and passing_side_available
+        and outer_lane_accepted
+        and not reverse_requested
+    )
+    return forced_overtake_active, reverse_requested

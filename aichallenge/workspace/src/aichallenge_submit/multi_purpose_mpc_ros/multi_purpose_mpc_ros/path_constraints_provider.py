@@ -123,7 +123,7 @@ class PathConstraintsProvider(Node):
             is_ref_path_given = cfg_ref_path.csv_path != "" # type: ignore
             if is_ref_path_given:
                 print("Using given reference path")
-                wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
+                wp_x, wp_y, wp_psi, _ = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
                 return ReferencePath(
                     map,
                     wp_x,
@@ -131,7 +131,8 @@ class PathConstraintsProvider(Node):
                     cfg_ref_path.resolution,
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
-                    cfg_ref_path.circular)
+                    cfg_ref_path.circular,
+                    wp_psi=wp_psi)
 
             else:
                 print("Using waypoints to create reference path")

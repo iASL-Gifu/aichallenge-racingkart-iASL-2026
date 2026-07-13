@@ -6,12 +6,12 @@ sim_logger:
 
 map:
   # path from pkg share dir
-  yaml_path: "env/final_ver3/occupancy_grid_map.yaml"
+  yaml_path: "env/final_ver4/occupancy_grid_map.yaml"
 
 waypoints:
   # path from pkg share dir
   # csv_path: "maps/occupancy_grid_map_waypoints.csv"
-  csv_path: ""
+  csv_path: "env/centerline/waypoint_bounds_center.csv"
 
 obstacles:
   # path from pkg share dir
@@ -23,51 +23,83 @@ reference_path:
   update_by_topic: false # When true, 'circle' must be false
   # path from pkg share dir
   # csv_path: ""
-  csv_path: "env/final_ver3/traj_mincurv.csv"
+  # csv_path は追い越し・追従フラグ時（center セット）に使用する軌道
+  csv_path: "env/centerline/traj_center313.csv"
+
+  # --- 軌道・境界線CSVの切り替え設定 ---
+  # 通常走行時（追い越し・追従フラグなし）に使用するレースライン軌道
+  race_csv_path: "env/min_curv/traj_race_cl_mpc.csv"
+  # 通常走行時の境界線CSV（レースライン基準）
+  race_bounds_csv_path: "env/waypoint_bounds.csv"
+
+  # 追い越し・追従フラグ時に使用する安定化軌道（センターライン）
+  center_csv_path: "env/centerline/traj_center313.csv"
+  # 追い越し・追従フラグ時の境界線CSV（センターライン基準）
+  center_bounds_csv_path: "env/centerline/waypoint_bounds_center.csv"
+
   resolution: 0.6
   smoothing_distance: 2
-  max_width: 6.0
+  #(ref_max_width / 2.0 + self._v2x_vehicle_radius + 0.5) ** 2
+  #今だとthresholdが4.0だから各waypointから4.0m以内にある障害物だけをMPCに渡す
+  max_width: 6.0 
   circular: true
   use_path_constraints_topic: false
   use_border_cells_topic: false
   # use_path_constraints_topic: true
   # use_border_cells_topic: true
 
+trajectory_switch:
+  enter_center_wps: 25   # 前方車がこのWaypoint差未満ならCenterへ切り替え
+  exit_center_wps: 35    # Center中はこのWaypoint差を超えるまで維持
+  behind_release_wps: 12 # 追い越した車が後方へこの差以上離れるまで維持
+  min_hold_sec: 1.0      # 切り替え直後の再切り替え禁止時間
+  exit_confirm_sec: 0.5  # Race復帰条件の継続確認時間
+
 bicycle_model:
   length: 1.087
-  # width: 1.45   # real machine width
-  width: 2.30   # +safety margin
+  width: 1.6   # +safety margin
 
 mpc:
-  N: 20
-  # Q: [e_y, e_psi, t]
+  N: 25
+  # Q: [e_y(横ずれ), e_psi(ヨー角ずれ), t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [100000.0, 0.0]
-  a_min: -1.6 # m/s^2
-  a_max: 0.7 # m/s^2
-  delta_max_deg: 32.0 # degrees
-  steer_rate_max: 0.35 # rad/s
-  control_rate: 40.0 # Hz
-  steering_tire_angle_gain_var: 1.639
-  # steering_tire_angle_gain_var: 1.0
+  R: [100000.0, 1000.0]
+  R10: [100000.0,100.0]
+  a_min: -0.50 # m/s^2
+  a_max: 2.5 # m/s^2
+  delta_max_deg: 52.0 # degrees
+  steer_rate_max: 3.00 # rad/s max_steering_rate
+  control_rate: 60.0 # Hz Ts=1/control_rate
+  #steering_tire_angle_gain_var: 1.639
+  steering_tire_angle_gain_var: 1.68
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
-  accel_low_pass_gain: 1.0
-  steer_low_pass_gain: 1.0
-  wp_id_offset: 2
-  use_max_kappa_pred: true
+  accel_low_pass_gain: 0.2
+  steer_low_pass_gain: 0.5
+  # 遅延後の姿勢を予測するため、固定Waypoint先読みは重ねない。
+  wp_id_offset: 0
+  # 送信済み操舵指令がアクチュエータへ到達するまでの姿勢を予測する。
+  delay_prediction_enabled: true
+  steering_command_delay: 0.15 # [s]
+  delay_prediction_steer_gain: 1.0004
+  delay_prediction_steps: 9
+  use_max_kappa_pred: false
+  osqp_initialized: false #setup済みならtrueに
 
 
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  # v_max: 30.0   # km/h
-  # ay_max: 12.0  # m/s^2, maximum lateral acceleration in curves
-  # Q: [600000.0, 100000000.0, 2000000.0]
-  # QN: [1000000.0, 1000000.0, 10000.0]
+  v_max: 35.0   # km/h
+  ay_max: 15.0  # m/s^2, maximum lateral acceleration in curves
+  # kappa_actual = kappa_cmd / (1 + understeer_coeff * v^2)
+  # 0.002 gives about 16% curvature loss at 35 km/h.
+  understeer_coeff: 0.005  # [s^2/m^2]
+  Q: [3000000.0, 55000000.0, 2000000.0]
+  QN: [1000000.0, 1000000.0, 10000.0]
 
-  ## --- 高速 (gnss delay 0.3) --- ##
+  ## --- 高速 (gnss delay 0.3) --- ##mak
   ## Lap1: 55s, Lap2: 49s
 
   # v_max: 30.0
@@ -93,10 +125,10 @@ mpc:
   ## --------- 中速 -------------- ##
   ## Lap1: 67s, Lap2: 64s
 
-  v_max: 20.0
-  ay_max: 6.5
-  Q: [3000000.0, 90000000.0, 100000.0] # 低速だとインを攻めがちなので、あえて外に膨らむパラメータ
-  QN: [1000000.0, 1000.0, 10000.0]
+  #v_max: 20.0
+  #ay_max: 6.5
+  #Q: [3000000.0, 90000000.0, 100000.0] # 低速だとインを攻めがちなので、あえて外に膨らむパラメータ
+  #QN: [1000000.0, 1000.0, 10000.0]
 
   ## -------- 低速 -------------- ##
   ## Lap1: 86s
@@ -108,5 +140,45 @@ mpc:
 
 v2x_obstacle_avoidance:
   vehicle_radius: 0.5          # [m]
-  v_max_safety: 30.0           # [m/s]
+  v_max_safety: 35.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
+
+stopped_vehicle_overtake:
+  speed_threshold: 0.3     # [m/s] 前走車を停止とみなす速度
+  max_speed: 10.0          # [m/s] 強制追い越し中の上限速度
+  reverse_distance: 3.0    # [m] 安全な追い越しが解けない場合に後退を待つ車間
+  infeasible_cycles: 4     # 後退待機へ入るMPC infeasible連続回数
+
+stuck_recovery:
+  enabled: true
+  speed_threshold: 0.15
+  forward_cmd_threshold: 0.8
+  stuck_time_threshold: 2.0
+  reverse_duration: 3.0
+  cooldown: 2.0
+  reverse_speed: 1.5
+  reverse_acceleration: 2.5
+  reverse_acceleration_positive: true
+  reverse_steering_scale: 0.0
+  reverse_command_mode: awsim_reverse_button
+  control_mode_request_value: true
+  send_gear_command: true
+  wait_for_reverse_gear: true
+  pre_reverse_gear_command: 22
+  pre_reverse_duration: 1.2
+  reverse_gear_command: 20
+  drive_gear_command: 2
+  reverse_gear_reports: "20,21"
+  request_control_mode: true
+  shift_control_mode_request_value: true
+  drive_control_mode_request_value: true
+  gear_shift_delay: 1.0
+  max_shift_wait: 8.0
+  use_actuation_cmd: false
+  actuation_accel_cmd: 1.0
+  actuation_brake_cmd: 0.0
+  use_joy_cmd: false
+  joy_speed_axis: 1
+  joy_steer_axis: 3
+  joy_reverse_value: -1.0
+  joy_steer_value: 0.0

@@ -8,7 +8,9 @@ from skimage.draw import line_aa
 import matplotlib.pyplot as plt
 from scipy import sparse
 import osqp
+import os
 import itertools
+from ament_index_python.packages import get_package_share_directory
 
 # Colors
 DRIVABLE_AREA = '#BDC3C7'
@@ -92,6 +94,9 @@ def has_collision_in_line(map, p0, p1):
     p0m = map.w2m(p0[0], p0[1])
     p1m = map.w2m(p1[0], p1[1])
     x_list, y_list, _ = line_aa(p0m[0], p0m[1], p1m[0], p1m[1])
+    #print("p0m", p0m)
+    #print("p1m", p1m)
+    #print("num cells", len(x_list))
 
     occupied_indices = map.data[y_list, x_list] == 0
     if np.any(occupied_indices):
@@ -119,7 +124,8 @@ class Waypoint:
         self.y = y
         self.psi = psi
         self.kappa = kappa
-
+        self.normal_angle = None
+        
         # Reference velocity at this waypoint according to speed profile
         self.v_ref = None
 
@@ -158,9 +164,10 @@ class BorderCells:
         self.dynamic_upper_bounds = []
         self.dynamic_lower_bounds = []
 
+
 class ReferencePath:
     def __init__(self, map, wp_x, wp_y, resolution, smoothing_distance,
-                 max_width, circular):
+                 max_width, circular, wp_psi=None, bounds_csv_path: str = None):
         """
         Reference Path object. Create a reference trajectory from specified
         corner points with given resolution. Smoothing around corners can be
@@ -174,10 +181,14 @@ class ReferencePath:
         path by averaging neighborhood of waypoints
         :param max_width: maximum width of path to both sides in m
         :param circular: True if path circular
+        :param bounds_csv_path: path to waypoint_bounds CSV (pkg-share relative or absolute).
+                                If None, falls back to env/centerline/waypoint_bounds_center.csv
         """
 
         self.org_wp_x = wp_x
         self.org_wp_y = wp_y
+
+        self.debug_counter = 0
 
         # Precision
         self.eps = 1e-12
@@ -188,6 +199,9 @@ class ReferencePath:
         # Resolution of the path
         self.resolution = resolution
 
+        # Overtaking flag
+        self.is_overtaking = False
+
         # Look ahead distance for path averaging
         self.smoothing_distance = smoothing_distance
 
@@ -197,6 +211,11 @@ class ReferencePath:
         # List of waypoint objects
         self.waypoints = self._construct_path(wp_x, wp_y)
 
+        # Set normal angle if provided
+        if wp_psi is not None and len(wp_psi) == len(self.waypoints):
+            for i in range(len(self.waypoints)):
+                self.waypoints[i].normal_angle = wp_psi[i]
+
         # Number of waypoints
         self.n_waypoints = len(self.waypoints)
         # print(f"input waypoint: {len(wp_x)}, n_waypoints: {self.n_waypoints}")
@@ -204,11 +223,40 @@ class ReferencePath:
         # Length of path
         self.length, self.segment_lengths = self._compute_length()
 
+        # Store bounds csv path for _compute_width and update_boundaries_from_markers
+        if bounds_csv_path is not None:
+            # absolute path が渡された場合はそのまま使用、そうでなければ pkg share から解決
+            if os.path.isabs(bounds_csv_path):
+                self._bounds_csv_path = bounds_csv_path
+            else:
+                self._bounds_csv_path = os.path.join(
+                    get_package_share_directory("multi_purpose_mpc_ros"),
+                    bounds_csv_path
+                )
+        else:
+            # デフォルト: Center軌道用の境界線CSV
+            self._bounds_csv_path = os.path.join(
+                get_package_share_directory("multi_purpose_mpc_ros"),
+                "env/centerline",
+                "waypoint_bounds_center.csv"
+            )
+
         # Compute path width (attribute of each waypoint)
         self._compute_width(max_width=max_width)
 
         self.path_constraints: Optional[List[np.ndarray]] = None
         self.border_cells = BorderCells()
+        self.target_lane_idx = None
+        self.n_lanes = 3
+        self.inner_lane_width = 0.5
+
+        self.bounds = np.loadtxt(
+            self._bounds_csv_path,
+            delimiter=",",
+            skiprows=1
+        )
+        #print(f"[ReferencePath] bounds_csv: {self._bounds_csv_path}")
+        #print(f"[ReferencePath] waypoints={len(self.waypoints)}, bounds={len(self.bounds)}, shape={self.bounds.shape}")
 
         self.COUNT = 0
 
@@ -224,22 +272,24 @@ class ReferencePath:
 
     def reset_dynamic_constraints(self):
         for wp in self.waypoints:
-            wp.dynamic_border_cells = copy.deepcopy(wp.static_border_cells)
-            wp.ub_sm = copy.deepcopy(wp.ub)
-            wp.lb_sm = copy.deepcopy(wp.lb)
+            wp.dynamic_border_cells = wp.static_border_cells
+            wp.ub_sm = wp.ub
+            wp.lb_sm = wp.lb
 
     def set_v_ref(self, v_ref: List[float]) -> None:
         for wp, v in zip(self.waypoints, v_ref):
             wp.v_ref = v
 
     def _construct_path(self, wp_x, wp_y):
+        waypoints = list(zip(wp_x, wp_y))
+        return self._construct_waypoints(waypoints)
         """
         Construct path from given waypoints.
         :param wp_x: x coordinates of waypoints in global coordinates
         :param wp_y: y coordinates of waypoints in global coordinates
         :return: list of waypoint objects
         """
-
+        '''
         if self.circular:
             # insert the first smoothing_distance points to the end of the list
             # FIXME: コースを循環させるときに始点と終点にギャップができないように要素を追加している。しかし、 smoothing_distance に応じて追加要素数を調整する必要があり、マジックナンバーが存在している
@@ -251,8 +301,10 @@ class ReferencePath:
                             (wp_y[i + 1] - wp_y[i]) ** 2) /
                 self.resolution)) for i in range(len(wp_x) - 1)]
 
+
         # Construct waypoints with specified resolution
         gp_x, gp_y = wp_x[-1], wp_y[-1]
+
         wp_x = [np.linspace(wp_x[i], wp_x[i+1], n_wp[i], endpoint=False).
                     tolist() for i in range(len(wp_x)-1)]
         wp_x = [wp for segment in wp_x for wp in segment] + [gp_x]
@@ -261,6 +313,7 @@ class ReferencePath:
         wp_y = [wp for segment in wp_y for wp in segment] + [gp_y]
 
         # Smooth path
+        ()
         wp_xs = []
         wp_ys = []
         for wp_id in range(self.smoothing_distance, len(wp_x) -
@@ -271,11 +324,14 @@ class ReferencePath:
                                             + self.smoothing_distance + 1]))
 
         # Construct list of waypoint objects
-        waypoints = list(zip(wp_xs, wp_ys))
+
+        waypoints = list(zip(gp_x, gp_y))
         # print(f"n_wp: {n_wp}, smooth_dist: {self.smoothing_distance}, len(wp_x): {len(wp_x)}, len way: {len(waypoints)}")
         waypoints = self._construct_waypoints(waypoints)
 
         return waypoints
+        '''
+        
 
     def _construct_waypoints(self, waypoint_coordinates):
         """
@@ -290,20 +346,30 @@ class ReferencePath:
         waypoints = []
 
         # Iterate over all waypoints
-        for wp_id in range(len(waypoint_coordinates) - 1):
-
-            # Get start and goal waypoints
+        for wp_id in range(len(waypoint_coordinates)):
             current_wp = np.array(waypoint_coordinates[wp_id])
-            next_wp = np.array(waypoint_coordinates[wp_id + 1])
 
+            if self.circular:
+                next_wp = np.array(
+                    waypoint_coordinates[(wp_id + 1) % len(waypoint_coordinates)]
+                )
+            else:
+                if wp_id == len(waypoint_coordinates) - 1:
+                    break
+                next_wp = np.array(waypoint_coordinates[wp_id + 1])
             # Difference vector
             dif_ahead = next_wp - current_wp
 
-            # Angle ahead
-            psi = np.arctan2(dif_ahead[1], dif_ahead[0])
-
-            # Distance to next waypoint
+            # Angle ahead — guard against zero-length segment (e.g. first==last in circular)
             dist_ahead = np.linalg.norm(dif_ahead, 2)
+            if dist_ahead > self.eps:
+                psi = np.arctan2(dif_ahead[1], dif_ahead[0])
+            else:
+                # Zero-length segment: inherit psi from the previous waypoint to avoid
+                # arctan2(0,0)=0 corrupting the scan direction in _compute_width.
+                psi = waypoints[-1].psi if waypoints else 0.0
+
+            # Distance to next waypoint (already computed above)
 
             # Get x and y coordinates of current waypoint
             x, y = current_wp[0], current_wp[1]
@@ -321,6 +387,7 @@ class ReferencePath:
                 kappa = angle_dif / (dist_ahead + self.eps)
 
             waypoints.append(Waypoint(x, y, psi, kappa))
+            
 
         return waypoints
 
@@ -389,10 +456,41 @@ class ReferencePath:
             # represent center-line of the path
             # Set border cells of waypoint
             wp.static_border_cells = (width_info[1], width_info[3])   # (left_border_cell(x,y), right_border_cell(x,y))
+        
+        # Try to load waypoint_bounds.csv to overwrite with clean, smooth offline-generated boundaries
+        import pandas as pd
+        bounds_path = self._bounds_csv_path
+        
+        if os.path.exists(bounds_path):
+            try:
+                df_bounds = pd.read_csv(bounds_path)
+                ub_vals = df_bounds['ub'].to_numpy()
+                lb_vals = df_bounds['lb'].to_numpy()
+                
+                # Verify length matches waypoints
+                if len(ub_vals) == len(self.waypoints):
+                    for idx, wp in enumerate(self.waypoints):
+                        wp.ub = float(ub_vals[idx])
+                        wp.lb = float(lb_vals[idx])
+                    #print(f"[ReferencePath] Successfully loaded offline waypoint_bounds.csv for {len(self.waypoints)} waypoints.")
+                else:
+                    # If mismatch, interpolate to fit the waypoints length
+                    from scipy.interpolate import interp1d
+                    s_orig = np.linspace(0, 1, len(ub_vals))
+                    s_new = np.linspace(0, 1, len(self.waypoints))
+                    ub_interp = interp1d(s_orig, ub_vals, kind='linear')(s_new)
+                    lb_interp = interp1d(s_orig, lb_vals, kind='linear')(s_new)
+                    for idx, wp in enumerate(self.waypoints):
+                        wp.ub = float(ub_interp[idx])
+                        wp.lb = float(lb_interp[idx])
+                    #print(f"[ReferencePath] Interpolated offline waypoint_bounds.csv from {len(ub_vals)} to {len(self.waypoints)} waypoints.")
+            except Exception as e:
+                print(f"[ReferencePath] Error loading offline waypoint_bounds.csv: {e}")
 
         self.reset_dynamic_constraints()
 
     def _get_min_width(self, wp_x_w, wp_y_w, wp_x, wp_y, t_x, t_y, max_width):
+        
         """
         Compute the minimum distance between the current waypoint and the
         orthogonal cell on the border of the path
@@ -407,8 +505,9 @@ class ReferencePath:
         """
 
         min_width = max_width
-        path_x = np.array([])
-        path_y = np.array([])
+        min_cell = self.map.m2w(t_x, t_y)
+        
+        found_any = False
 
         # Search around the target cell for obstacles
         for i in range(-1, 2):
@@ -419,29 +518,37 @@ class ReferencePath:
 
                 # Get the line from the waypoint to the target cell
                 x_list, y_list, _ = line_aa(wp_x, wp_y, t_xi, t_yj)
-                # Check for occupied cells (obstacles)
-                occupied_indices = self.map.data[y_list, x_list] == 0
-
-                if np.any(occupied_indices):
-                    # If there are obstacles, find the nearest one
-                    obstacle_index = np.argmax(occupied_indices)
-                    obstacle_x = x_list[obstacle_index]
-                    obstacle_y = y_list[obstacle_index]
-                    min_cell = self.map.m2w(obstacle_x, obstacle_y)
-                    min_width = np.hypot(wp_x_w - min_cell[0], wp_y_w - min_cell[1])
-                    return min_width, min_cell
+                
+                if len(x_list) == 0:
+                    continue
+                    
+                values = self.map.data[y_list, x_list]
+                
+                # Find first free cell
+                free_indices = np.where(values == 1)[0]
+                if len(free_indices) == 0:
+                    # No free space along this line
+                    width = 0.0
+                    cell = self.map.m2w(wp_x, wp_y)
                 else:
-                    # If no obstacles are found, add free space coordinates
-                    x_list = ma.masked_array(x_list, mask=occupied_indices).compressed()
-                    y_list = ma.masked_array(y_list, mask=occupied_indices).compressed()
-                    path_x = np.append(path_x, x_list)
-                    path_y = np.append(path_y, y_list)
-
-        # If no obstacles are detected, calculate the distance to the farthest free cell
-        if path_x.size > 0 and path_y.size > 0:
-            min_index = np.argmin(np.hypot(path_x - t_x, path_y - t_y))
-            min_cell = self.map.m2w(path_x[min_index], path_y[min_index])
-            min_width = np.hypot(wp_x_w - min_cell[0], wp_y_w - min_cell[1])
+                    first_free_idx = free_indices[0]
+                    # Find first occupied cell after the free cell
+                    occ_indices = np.where(values[first_free_idx:] == 0)[0]
+                    if len(occ_indices) == 0:
+                        # No obstacles after entering free space, bounds are open up to max_width
+                        width = max_width
+                        cell = self.map.m2w(t_xi, t_yj)
+                    else:
+                        boundary_idx = first_free_idx + occ_indices[0]
+                        obstacle_x = x_list[boundary_idx]
+                        obstacle_y = y_list[boundary_idx]
+                        cell = self.map.m2w(obstacle_x, obstacle_y)
+                        width = np.hypot(wp_x_w - cell[0], wp_y_w - cell[1])
+                
+                if not found_any or width < min_width:
+                    min_width = width
+                    min_cell = cell
+                    found_any = True
 
         return min_width, min_cell
 
@@ -456,7 +563,7 @@ class ReferencePath:
         # Set optimization horizon
         N = self.n_waypoints - 1
         if N < 2:
-            print("Path too short for speed profile computation!")
+            #print("Path too short for speed profile computation!")
             return False
 
         # Constraints
@@ -519,6 +626,9 @@ class ReferencePath:
         else:
             self.waypoints[-1].v_ref = 0.0
 
+        # 速度プロファイル確定後に追い越しゾーンを計算
+        self.compute_overtake_zones()
+
         return True
 
     def get_waypoint(self, wp_id):
@@ -538,6 +648,227 @@ class ReferencePath:
             # exit(1)
 
         return self.waypoints[wp_id]
+
+    # -----------------------------------------------------------------------
+    # Overtake zone & lane boundary utilities
+    # -----------------------------------------------------------------------
+
+    def compute_overtake_zones(
+        self,
+        lookahead: int = 10,
+        kappa_threshold: float = 0.15,
+    ) -> None:
+        """
+        各Waypointについて「前方 lookahead 個のWaypointの中に
+        |kappa| >= kappa_threshold のものが存在しない」場合を
+        追い越し許可ゾーン (overtake_zone=True) とする。
+
+        条件B: 前方にシャープなコーナーがなければ、緩いカーブ中でも追い越し可。
+
+        結果は self.overtake_zone: List[bool] に格納される。
+        パラメータはいつでも再計算で変更可能。
+        """
+        N = self.n_waypoints
+        # 追い越し禁止エリアを排除し、すべてのWaypointで追い越しを許可する
+        self.overtake_zone: list = [True] * N
+
+        n_allow = sum(self.overtake_zone)
+        #print(
+        #    f"[overtake_zone] kappa_thr={kappa_threshold:.3f} lookahead={lookahead}"
+        #    f"  allowed_wps={n_allow}/{N}",
+        #    flush=True,
+        #)
+
+    def update_boundaries_from_markers(self, left_pts, right_pts):
+        """
+        /map/vector_map_marker から取得した左右の点群（絶対座標系）から、
+        各 waypoint に対する正確な ub / lb 距離を cKDTree を用いて計算して上書きする。
+        """
+        import math
+        #from scipy.spatial import cKDTree
+
+        ub_arr = self.bounds[:,1]
+        lb_arr = self.bounds[:,2]
+
+        #if len(left_pts) == 0 or len(right_pts) == 0:
+        #    print("[ReferencePath] Warning: update_boundaries_from_markers got empty arrays.", flush=True)
+        #    return
+        
+        # 左右それぞれ KDTree を構築
+        #left_tree = cKDTree(left_pts)
+        #right_tree = cKDTree(right_pts)
+        
+        # waypoints の位置座標と角度
+        wp_x_arr = np.array([wp.x for wp in self.waypoints])
+        wp_y_arr = np.array([wp.y for wp in self.waypoints])
+        wp_psi = np.array([wp.psi for wp in self.waypoints])
+        wp_pts = np.column_stack([wp_x_arr, wp_y_arr])
+        N = min(len(self.waypoints), len(ub_arr))
+        
+
+        # 左右それぞれ K=30 近傍点を検索して法線に射影
+        # K = 30
+        # _, left_idx = left_tree.query(wp_pts, k=min(K, len(left_pts)))
+        # _, right_idx = right_tree.query(wp_pts, k=min(K, len(right_pts)))
+
+        #ub_list = []
+        #lb_list = []
+        
+        for i in range(N):
+            P = wp_pts[i]
+            psi = wp_psi[i]
+            # 進行方向ベクトル
+            t_dir = np.array([math.cos(psi), math.sin(psi)])
+            # 左法線ベクトル (psi に対して +90°)
+            n_l = np.array([-math.sin(psi), math.cos(psi)])
+            '''
+            # --- 左側 (ub) ---
+            indices_l = left_idx[i] if isinstance(left_idx[i], (list, np.ndarray)) else [left_idx[i]]
+            candidates_l = []
+            for j in indices_l:
+                pt = left_pts[j]
+                v_lon = float(np.dot(pt - P, t_dir))
+                v_lat = float(np.dot(pt - P, n_l))
+                if v_lat > 0.0:
+                    candidates_l.append((abs(v_lon), v_lat))
+            
+            valid_candidates_l = [c for c in candidates_l if c[0] <= 3.0]
+            if not valid_candidates_l:
+                candidates_l.sort(key=lambda x: x[0])
+                valid_candidates_l = candidates_l[:5]
+            
+            if valid_candidates_l:
+                vals = [c[1] for c in valid_candidates_l]
+                weights = [1.0 / (c[0] + 0.1) for c in valid_candidates_l]
+                d_l = np.average(vals, weights=weights)
+            else:
+                d_l = 2.5
+            '''
+            '''
+            # --- 右側 (lb) ---
+            indices_r = right_idx[i] if isinstance(right_idx[i], (list, np.ndarray)) else [right_idx[i]]
+            candidates_r = []
+            for j in indices_r:
+                pt = right_pts[j]
+                v_lon = float(np.dot(pt - P, t_dir))
+                v_lat = float(np.dot(pt - P, n_l))
+                if v_lat < 0.0:
+                    candidates_r.append((abs(v_lon), v_lat))
+                    '''
+            '''
+            valid_candidates_r = [c for c in candidates_r if c[0] <= 3.0]
+            if not valid_candidates_r:
+                candidates_r.sort(key=lambda x: x[0])
+                valid_candidates_r = candidates_r[:5]
+
+            if valid_candidates_r:
+                vals = [c[1] for c in valid_candidates_r]
+                weights = [1.0 / (c[0] + 0.1) for c in valid_candidates_r]
+                d_r = np.average(vals, weights=weights)
+            else:
+                d_r = -2.5
+                '''
+
+            #ub_list.append(d_l)
+            #lb_list.append(d_r)
+
+        #ub_arr = np.array(ub_list)
+        #lb_arr = np.array(lb_list)
+        ub_arr = self.bounds[:,1]
+        lb_arr = self.bounds[:,2]
+
+        # 車両のマージンを考慮して幅を少し狭める
+        # During overtaking, we keep the same constraints and rely on
+        # target_lane positioning in MPC. Do NOT narrow constraints here.
+        MARGIN = 0.3
+
+        ub_arr = ub_arr - MARGIN
+        lb_arr = lb_arr + MARGIN
+
+        # 最低幅の保証（自車の幅 2.0m に対して、最低でも 2.2m の全幅を確保）
+        center = (ub_arr + lb_arr) / 2.0 #中心線
+        width = ub_arr - lb_arr #コース幅
+        MIN_ROAD_WIDTH = 2.2 
+        narrow_mask = width < MIN_ROAD_WIDTH
+        ub_arr[narrow_mask] = center[narrow_mask] + (MIN_ROAD_WIDTH / 2.0)
+        lb_arr[narrow_mask] = center[narrow_mask] - (MIN_ROAD_WIDTH / 2.0)
+
+        # クリッピング (現実的な幅の保証)
+        ub_arr = np.clip(ub_arr, 0.3, 8.0)
+        lb_arr = np.clip(lb_arr, -8.0, -0.3)
+
+        # 平滑化（ガタつきをさらに抑制するために移動平均をかける）
+        #_window = 10
+        #_kernel = np.ones(_window) / _window
+        #ub_arr_s = np.convolve(np.tile(ub_arr, 3), _kernel, mode='same')[N:2 * N]
+        #lb_arr_s = np.convolve(np.tile(lb_arr, 3), _kernel, mode='same')[N:2 * N]
+
+        for i in range(N):
+            self.waypoints[i].ub = ub_arr[i]
+            self.waypoints[i].lb = lb_arr[i]
+            if len(self.waypoints) == len(ub_arr) + 1:
+                self.waypoints[-1].ub = ub_arr[0]
+                self.waypoints[-1].lb = lb_arr[0]
+
+    def get_lane_bounds(self, wp_id: int, n_lanes: int = None, max_half_width: float = 3.8, lane_width: float = 1.7, inner_lane_width: float = None) -> list:
+        """
+        Waypointの走行可能幅を分割し、車線間に隙間（間隔）が生じないようにぴったりくっつけて返す。
+        n_lanes が 3 以上の場合、左右車線（外側）以外の車線（内側）は細く車線幅を取る。
+        ただし、各車線の幅がそれぞれの最低保証幅を下回る場合は、実行可能性確保のために調整する。
+        """
+        if n_lanes is None:
+            n_lanes = getattr(self, 'n_lanes', 2)
+        if inner_lane_width is None:
+            inner_lane_width = getattr(self, 'inner_lane_width', 0.5)
+
+        wp = self.get_waypoint(wp_id)
+
+        if wp.ub is None or wp.lb is None:
+            return []
+
+        total = wp.ub - wp.lb
+
+        # 重みと最小幅の決定
+        if n_lanes >= 3:
+            inner_weight = 0.5
+            weights = [1.0] + [inner_weight] * (n_lanes - 2) + [1.0]
+            min_widths = [lane_width] + [inner_lane_width] * (n_lanes - 2) + [lane_width]
+        else:
+            weights = [1.0] * n_lanes
+            min_widths = [lane_width] * n_lanes
+
+        total_weight = sum(weights)
+
+        # 1. 初期ノード位置の計算 (比率分割)
+        nodes = [wp.lb]
+        accumulated_width = 0.0
+        for w in weights:
+            accumulated_width += w
+            nodes.append(wp.lb + (accumulated_width / total_weight) * total)
+
+        # 2. 右から左への最小幅適用 (押し上げ)
+        for i in range(n_lanes):
+            nodes[i+1] = max(nodes[i+1], nodes[i] + min_widths[i])
+
+        # 3. 左から右への最小幅適用 (押し下げ)
+        nodes[n_lanes] = min(nodes[n_lanes], wp.ub)
+        for i in range(n_lanes - 1, -1, -1):
+            nodes[i] = min(nodes[i], nodes[i+1] - min_widths[i])
+
+        # 4. 全体幅が狭すぎて制約が破綻した場合のセーフティガード
+        nodes[0] = max(nodes[0], wp.lb)
+        for i in range(n_lanes):
+            nodes[i+1] = max(nodes[i+1], nodes[i])
+            nodes[i+1] = min(nodes[i+1], wp.ub)
+
+        # 5. 車線リストの構築
+        lanes = []
+        for i in range(n_lanes):
+            lanes.append((nodes[i+1], nodes[i]))
+
+        return lanes
+
+        return lanes
 
     def show(self, ax, display_drivable_area=True):
         """
@@ -657,22 +988,53 @@ class ReferencePath:
         #     obstacle.show(ax=ax)
 
 
-    def _compute_free_segments(self, wp, min_width):
+    def _compute_free_segments(self, wp, min_width, wp_idx=None):
         """
         Compute free path segments.
         :param wp: waypoint object
         :param min_width: minimum width of valid segment
+        :param wp_idx: index of current waypoint
         :return: segment candidates as list of tuples (ub_cell, lb_cell)
         """
 
         # Candidate segments
         free_segments = []
 
-        # Get waypoint's border cells in map coordinates
-        ub_p = self.map.w2m(wp.static_border_cells[0][0],
-                            wp.static_border_cells[0][1])
-        lb_p = self.map.w2m(wp.static_border_cells[1][0],
-                            wp.static_border_cells[1][1])
+        target_lane = getattr(self, 'target_lane_idx', None)
+
+        if target_lane is not None and wp_idx is not None:
+            # 追い越し中（target_lane が設定されているとき）
+            lanes = self.get_lane_bounds(wp_idx)
+            if lanes and target_lane < len(lanes):
+                ub_lane, lb_lane = lanes[target_lane]
+                angle_ub = np.mod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                
+                if target_lane == 0:  # 右車線 (L0)
+                    # 左端 (ub_p, イエローライン側) は L0 の下限 (lb_lane) を使用
+                    ub_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
+                    ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
+                    # 右端 (lb_p, コース境界側) はマップ本来の右端 static_border_cells[1] を直接使用
+                    lb_p = self.map.w2m(wp.static_border_cells[1][0], wp.static_border_cells[1][1])
+                elif target_lane == 2:  # 左車線 (L2)
+                    # 左端 (ub_p, コース境界側) はマップ本来の左端 static_border_cells[0] を直接使用
+                    ub_p = self.map.w2m(wp.static_border_cells[0][0], wp.static_border_cells[0][1])
+                    # 右端 (lb_p, イエローライン側) は L2 の上限 (ub_lane) を使用
+                    lb_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
+                    lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
+                else:  # 中央車線 (L1) またはその他
+                    ub_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
+                    lb_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
+                    ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
+                    lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
+            else:
+                ub_p = self.map.w2m(wp.static_border_cells[0][0], wp.static_border_cells[0][1])
+                lb_p = self.map.w2m(wp.static_border_cells[1][0], wp.static_border_cells[1][1])
+        else:
+            # 通常走行（Raceモード時など）はコース全体をスキャン範囲とする
+            ub_p = self.map.w2m(wp.static_border_cells[0][0],
+                                wp.static_border_cells[0][1])
+            lb_p = self.map.w2m(wp.static_border_cells[1][0],
+                                wp.static_border_cells[1][1])
 
         # Compute path from left border cell to right border cell
         x_list, y_list, _ = line_aa(ub_p[0], ub_p[1], lb_p[0], lb_p[1])
@@ -684,10 +1046,9 @@ class ReferencePath:
         # Assume occupied path
         free_cells = False
 
-        # cache to avoid multiple access to self.map.data
-        map_data = self.map.data
-
         # Iterate over path from left border to right border
+        map_data = self.map.data
+        all_segments = []
         for x, y in zip(x_list[1:], y_list[1:]):
             cell_value = map_data[y, x]
             # If cell is free, update lower bound
@@ -702,17 +1063,27 @@ class ReferencePath:
                 # Set lower bound to border cell of segment
                 lb_o = (x, y)
                 # Transform upper and lower bound cells to world coordinates
-                ub_o = self.map.m2w(ub_o[0], ub_o[1])
-                lb_o = self.map.m2w(lb_o[0], lb_o[1])
+                ub_w = self.map.m2w(ub_o[0], ub_o[1])
+                lb_w = self.map.m2w(lb_o[0], lb_o[1])
+                
+                segment_width_sq = (ub_w[0]-lb_w[0])**2 + (ub_w[1]-lb_w[1])**2
+                all_segments.append(((ub_w, lb_w), segment_width_sq))
+                
                 # If segment larger than threshold, add to candidates
-                if ((ub_o[0]-lb_o[0])**2 + (ub_o[1]-lb_o[1])**2) > min_width**2:
-                    free_segments.append((ub_o, lb_o))
+                if segment_width_sq > min_width**2:
+                    free_segments.append((ub_w, lb_w))
                 # Start new segment
                 ub_o = (x, y)
                 free_cells = False
             elif cell_value == 0 and not free_cells:
                 ub_o = (x, y)
                 lb_o = (x, y)
+
+        # もし min_width を満たすセグメントが1つも無い場合は、
+        # 見つかった全てのセグメントの中で最も幅が広いものをフォールバックとして採用する
+        if not free_segments and all_segments:
+            all_segments.sort(key=lambda s: s[1], reverse=True)
+            free_segments.append(all_segments[0][0])
 
         return free_segments
 
@@ -809,6 +1180,11 @@ class ReferencePath:
         """
 
         # min_width = model_width / np.sqrt(2)
+        # Note: During overtaking, we do NOT add extra margin here.
+        # Instead, we rely on target_lane center positioning in MPC.
+        # Adding extra margin here would compress constraints and cause
+        # vehicles to aim at inner lane edges.
+
         # min_width = model_width
         # min_width = 2.0 * safety_margin
         min_width = model_width
@@ -820,6 +1196,11 @@ class ReferencePath:
         lb_hor = []
         border_cells_hor = []
         border_cells_hor_sm = []
+
+        for n in range(N):
+            wp = self.get_waypoint(wp_id + n)
+            wp.ub_sm = wp.ub
+            wp.lb_sm = wp.lb
 
         def compute_bound(wp, ls):
             # Check sign of bound
@@ -834,12 +1215,32 @@ class ReferencePath:
             return bound
 
         def add_constraint(wp, ub_ls, lb_ls):
+            '''
+            print("----------------")
+            print(wp_id)
+            print("before")
+            print("wp.ub", wp.ub)
+            print("wp.lb", wp.lb)
+            print("wp.ub_sm", wp.ub_sm)
+            print("wp.lb_sm", wp.lb_sm)
+            '''
+
             # Compute upper and lower bound of largest drivable area
             ub = compute_bound(wp, ub_ls)
             lb = compute_bound(wp, lb_ls)
 
             segment_length = ub - lb
-            segment_length_sm = segment_length - 2.0 * safety_margin
+            
+            # 追い越し中（target_lane が設定されているとき）は、安全マージンが車線幅に対して大きすぎる場合に
+            # コリドーが潰れてしまわないよう、safety_margin を車線幅の 40% 以下に自動制限する
+            active_safety_margin = safety_margin
+            target_lane = getattr(self, 'target_lane_idx', None)
+            if target_lane is not None:
+                max_margin = segment_length * 0.4
+                if active_safety_margin > max_margin:
+                    active_safety_margin = max(max_margin, 0.05)
+
+            segment_length_sm = segment_length - 2.0 * active_safety_margin
 
             # Check feasibility of the path
             # segment_lengthから両側のsafety_marginを引いた値がmin_segment_lengthより小さい場合は、
@@ -850,30 +1251,32 @@ class ReferencePath:
                 # print(f"Waypoint: {wp_id}, n: {n}, Upper bound: {ub}")
                 # print(f"min_width: {min_width}, safety_margin: {safety_margin}, segment_length: {segment_length}, segment_length_sm: {segment_length_sm}")
                 (ub, lb) = (wp.ub, wp.lb)
+                active_safety_margin = safety_margin
                 # print(f"Updated Upper bound: {wp.ub}, Updated Lower bound: {wp.lb}")
 
             # Subtract safety margin
-            ub_sm = ub - safety_margin
-            lb_sm = lb + safety_margin
+            ub_sm = ub - active_safety_margin
+            lb_sm = lb + active_safety_margin
 
             if wp.ub_sm < ub_sm:
               ub_sm = wp.ub_sm
             if wp.lb_sm > lb_sm:
               lb_sm = wp.lb_sm
 
-            # Check feasibility of the path after subtracting safety margin
+            # 安全マージンを差し引いた後の経路の実現可能性を確認する。
+            #print(f"ub_sm: {ub_sm}, lb_sm: {lb_sm}")
             if ub_sm < lb_sm:
                 # 一つ前のifの判定でboundsは正常になっているはずなので、こちらの判定に入る場合は何らかの実装上の異常がある
-                print("!!!! Infeasible path detected !!!!")
+                #print("!!!! Infeasible path detected !!!!")
                 ub_sm = 0.0
                 lb_sm = 0.0
 
-            # Compute absolute angle of bound cell
+            # 上限（ub_sm）および下限（lb_sm）のセルから絶対角度を計算する
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
                                   2 * math.pi) - math.pi
             angle_lb = np.mod(-math.pi / 2 + wp.psi + math.pi,
                                   2 * math.pi) - math.pi
-            # Compute cell on bound for computed distance ub_sm and lb_sm
+            # 算出された距離の上限（ub_sm）および下限（lb_sm）に基づき、セルを計算する。
             ub_sm_ls = wp.x + ub_sm * np.cos(angle_ub), wp.y + ub_sm * np.sin(
                     angle_ub)
             lb_sm_ls = wp.x - lb_sm * np.cos(angle_lb), wp.y - lb_sm * np.sin(
@@ -881,20 +1284,20 @@ class ReferencePath:
             bound_cells_sm = (ub_sm_ls, lb_sm_ls)
             self.select_free_segs.append([ub_sm_ls, lb_sm_ls])
 
-            # Compute cell on bound for computed distance ub and lb
+            # 算出された距離の上限（ub）および下限（lb）に基づき、セルを計算する。
             ub_ls = wp.x + ub * np.cos(angle_ub), wp.y + ub * np.sin(
                 angle_ub)
             lb_ls = wp.x - lb * np.cos(angle_lb), wp.y - lb * np.sin(
                 angle_lb)
             bound_cells = (ub_ls, lb_ls)
 
-            # Append results
+            # 結果を格納
             ub_hor.append(ub_sm)
             lb_hor.append(lb_sm)
             border_cells_hor.append(list(bound_cells))
             border_cells_hor_sm.append(list(bound_cells_sm))
 
-            # Assign dynamic border cells to waypoints
+            # 動的境界を割り当てる
             wp.dynamic_border_cells = bound_cells_sm
             wp.ub_sm = ub_sm
             wp.lb_sm = lb_sm
@@ -911,22 +1314,22 @@ class ReferencePath:
         #     show = True
         #     self.COUNT = 0
 
-        # compute free segments for each waypoints in horizon
+        # ホライズン内の各ウェイポイントについて、フリーセグメントを算出する。
         free_segments_hor = []
         for n in range(N):
             wp = self.get_waypoint(wp_id+n)
-            free_segments = self._compute_free_segments(wp, min_width)
+            free_segments = self._compute_free_segments(wp, min_width, wp_idx=(wp_id+n))
             free_segments_hor.append(free_segments)
             self.free_segs.extend(free_segments)
 
-        # Iterate over horizon
+        # 実現可能な範囲で反復
         n = 0
         while n < N:
 
-            # get corresponding waypoint
+            # 軌跡上の対応する waypoint を取得
             wp = self.get_waypoint(wp_id+n)
 
-            # Get list of free segments
+            # free_segments のリストを取得
             free_segments = free_segments_hor[n]
 
             # Iterate over free segments for current waypoint
@@ -993,27 +1396,34 @@ class ReferencePath:
                     add_constraint(wp, ub_ls, lb_ls)
                     n += 1
 
-            # Select free segment in case of only one candidate
+            # Free_segmentが一つならそこを通る
             elif len(free_segments) == 1:
                 ub_ls, lb_ls = free_segments[0]
                 add_constraint(wp, ub_ls, lb_ls)
                 n += 1  # increment waypoint index
 
-            # Set waypoint coordinates as bound cells if no feasible
-            # segment available
             else:
-                print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}")
-                ub_ls, lb_ls = (wp.x, wp.y), (wp.x, wp.y)
+                #if not self.is_overtaking:
+                    #print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}. Forcing minimum width.", flush=True)
 
-                # left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
-                #                  2 * math.pi) - math.pi
-                # right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
-                #                    2 * math.pi) - math.pi
-
-                # ub_ls = (wp.x + min_width * np.cos(left_angle),
-                #          wp.y + min_width * np.sin(left_angle))
-                # lb_ls = (wp.x + min_width * np.cos(right_angle),
-                #          wp.y + min_width * np.sin(right_angle))
+                # 追い越し中は車線痁めによりフリーセグメントが見つからない場合がある。
+                # その場合は車線幅僕の強制適用でなく、静的ウェイポイント境界 (wp.ub/wp.lb) にフォールバックする。
+                # これにより、OSQP の infeasible を最小限に抑える。
+                if self.is_overtaking:
+                    # 追い越し中: 全幅静的境界をフォールバックとして当てる
+                    ub_ls = wp.static_border_cells[0]
+                    lb_ls = wp.static_border_cells[1]
+                else:
+                    left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
+                                      2 * math.pi) - math.pi
+                    right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
+                                        2 * math.pi) - math.pi
+                    # 通常走行中: 小幅強制幅を当てる
+                    FORCE_HALF_WIDTH = 0.8
+                    ub_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(left_angle),
+                             wp.y + FORCE_HALF_WIDTH * np.sin(left_angle))
+                    lb_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(right_angle),
+                             wp.y + FORCE_HALF_WIDTH * np.sin(right_angle))
 
                 add_constraint(wp, ub_ls, lb_ls)
 
@@ -1129,6 +1539,37 @@ class ReferencePath:
             waypoint_mid.ub_sm = new_bound_sm[0]
             waypoint_mid.lb_sm = new_bound_sm[1]
 
+        # 遷移時の初期状態制約違反（primal infeasibility）を防ぐためのコリドー緩和（Relaxation）
+        if pose is not None and len(pose) >= 3:
+            current_wp = self.get_waypoint((wp_id - 1) % self.n_waypoints)
+            e_y_current = np.cos(current_wp.psi) * (pose[1] - current_wp.y) - \
+                          np.sin(current_wp.psi) * (pose[0] - current_wp.x)
+            
+            M = min(10, N)  # ホライズン初期のMステップにわたって緩和
+            for n in range(M):
+                decay = 1.0 - float(n) / float(M)
+                wp = self.get_waypoint((wp_id + n) % self.n_waypoints)
+                
+                # 現在の横ズレが上限を超えている場合は、その差分を上限に徐々に減衰させながら上乗せ
+                if e_y_current > ub_hor[n]:
+                    slack = e_y_current - ub_hor[n]
+                    ub_hor[n] += slack * decay
+                    wp.ub_sm = ub_hor[n]
+                    
+                # 現在の横ズレが下限を下回っている場合は、下限を緩和
+                if e_y_current < lb_hor[n]:
+                    slack = lb_hor[n] - e_y_current
+                    lb_hor[n] -= slack * decay
+                    wp.lb_sm = lb_hor[n]
+
+                # 緩和後の範囲に対応する境界セル座標を再計算
+                angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                angle_lb = np.mod(-math.pi / 2 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                ub_ls = wp.x + ub_hor[n] * np.cos(angle_ub), wp.y + ub_hor[n] * np.sin(angle_ub)
+                lb_ls = wp.x - lb_hor[n] * np.cos(angle_lb), wp.y - lb_hor[n] * np.sin(angle_lb)
+                border_cells_hor_sm[n] = [ub_ls, lb_ls]
+                wp.dynamic_border_cells = (ub_ls, lb_ls)
+
         return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
 
 
@@ -1153,7 +1594,7 @@ if __name__ == '__main__':
 
         # Create reference path
         reference_path = ReferencePath(map, wp_x, wp_y, path_resolution,
-                     smoothing_distance=5, max_width=0.15,
+                     smoothing_distance=1, max_width=0.15,
                                        circular=True)
 
         # Add obstacles
@@ -1208,7 +1649,7 @@ if __name__ == '__main__':
 
     else:
         reference_path = None
-        print('Invalid path!')
+        #print('Invalid path!')
         exit(1)
 
     ub, lb, border_cells = \
