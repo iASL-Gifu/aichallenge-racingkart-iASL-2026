@@ -49,11 +49,32 @@ reference_path:
   # use_border_cells_topic: true
 
 trajectory_switch:
-  enter_center_wps: 25   # 前方車がこのWaypoint差未満ならCenterへ切り替え
-  exit_center_wps: 35    # Center中はこのWaypoint差を超えるまで維持
+  enter_center_wps: 20   # 前方車がこのWaypoint差未満ならCenterへ切り替え
+  exit_center_wps: 25    # Center中はこのWaypoint差を超えるまで維持
+  center_lane_rejoin_behind_wps: 6 # 追い越した車が後方へこの差以上 離れたらCenter軌道のL1へ戻る
   behind_release_wps: 12 # 追い越した車が後方へこの差以上離れるまで維持
   min_hold_sec: 1.0      # 切り替え直後の再切り替え禁止時間
+  lane_change_cooldown_sec: 2.0 # L0/L1/L2の目標変更後、次の車線変更を禁止する時間
   exit_confirm_sec: 0.5  # Race復帰条件の継続確認時間
+  race_rejoin_max_heading_deg: 10.0 # Race/Centerの方位差がこれ以下の地点でRaceへ復帰
+  outer_lane_release_infeasible_cycles: 5 # 追越し後、対象が後方にいる状態でこの回数連続失敗したらL0/L2固定を解除
+  outer_lane_release_behind_m: 0.5 # 追越し後、対象が進行方向への射影でこの距離以上後方なら解除を許可
+
+prepass_lane_fallback:
+  enabled: true
+  infeasible_cycles: 20 # 追越し前、固定車線がこの回数連続失敗したら代替車線を評価
+  front_distance: 8.0  # [m] 候補車線の前方確認距離
+  side_distance: 2.0   # [m] 候補車線の側方・並走確認距離
+  rear_distance: 5.0   # [m] 候補車線の後方確認距離
+  prediction_sec: 1.0  # [s] 相対速度による将来位置も確認
+
+center_lane_rejoin_stability:
+  enabled: true
+  max_heading_error_deg: 5.0 # Center軌道に対する方位誤差
+  max_lateral_speed: 0.5     # [m/s] odom横速度と方位誤差からの推定値の大きい方
+  max_yaw_rate: 0.5         # [rad/s]
+  stable_sec: 0.4            # 全条件が連続成立してからL1復帰を開始
+  release_infeasible_cycles: 5 # L1復帰中にこの回数連続失敗したらL1固定を解除
 
 bicycle_model:
   length: 1.087
@@ -70,7 +91,7 @@ mpc:
   a_max: 2.5 # m/s^2
   delta_max_deg: 52.0 # degrees
   steer_rate_max: 3.00 # rad/s max_steering_rate
-  control_rate: 60.0 # Hz Ts=1/control_rate
+  control_rate: 40.0 # Hz Ts=1/control_rate
   #steering_tire_angle_gain_var: 1.639
   steering_tire_angle_gain_var: 1.68
   # accel_low_pass_gain: 0.1
@@ -83,7 +104,7 @@ mpc:
   delay_prediction_enabled: true
   steering_command_delay: 0.15 # [s]
   delay_prediction_steer_gain: 1.0004
-  delay_prediction_steps: 9
+  delay_prediction_steps: 7
   use_max_kappa_pred: false
   osqp_initialized: false #setup済みならtrueに
 
@@ -148,6 +169,19 @@ stopped_vehicle_overtake:
   max_speed: 10.0          # [m/s] 強制追い越し中の上限速度
   reverse_distance: 3.0    # [m] 安全な追い越しが解けない場合に後退を待つ車間
   infeasible_cycles: 4     # 後退待機へ入るMPC infeasible連続回数
+
+follow_restart:
+  lead_moving_speed: 0.5   # [m/s] 停止していた前方車が動き出したと判定する速度
+  ego_stopped_speed: 0.3   # [m/s] 自車を停止中とみなす速度
+  min_gap: 6.0             # [m] 再発進ブーストを許可する最低車間
+  speed_margin: 1.5        # [m/s] 前方車速度へ加える再発進時の速度差
+  max_speed: 3.0           # [m/s] 再発進ブースト中の上限速度
+  acceleration: 2.0        # [m/s^2] 再発進時の最低加速度
+  duration: 1.0            # [s] 再発進ブースト継続時間
+
+initial_start_boost:
+  enabled: true            # 初回Start時、Grounded/Ready配置で右側の赤色車線L0が自車のみなら最大加速度で発進
+  duration: 5.0            # [s] 初回だけ適用する時間
 
 stuck_recovery:
   enabled: true

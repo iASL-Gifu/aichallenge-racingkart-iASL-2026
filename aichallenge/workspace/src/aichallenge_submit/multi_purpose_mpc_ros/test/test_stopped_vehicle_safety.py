@@ -3,7 +3,13 @@
 import unittest
 
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
+    absolute_heading_difference,
+    classify_lane_conflicts,
     evaluate_stopped_lead_overtake,
+    lane_conflicts_are_clear,
+    relative_longitudinal_distance,
+    select_latched_overtake_lane,
+    should_release_latched_overtake_lane,
 )
 
 
@@ -49,6 +55,124 @@ class StoppedVehicleSafetyTest(unittest.TestCase):
             tracked_stopped_lead=False,
             distance=2.5,
         ), (False, False))
+
+
+class OvertakeGeometryTest(unittest.TestCase):
+    def test_lane_conflicts_cover_front_side_and_rear(self):
+        conflicts = classify_lane_conflicts(
+            2,
+            [("front", 2, 6.0), ("side", 2, 1.0), ("rear", 2, -4.0),
+             ("other-lane", 0, 0.0)],
+            front_distance=8.0,
+            side_distance=2.0,
+            rear_distance=5.0,
+        )
+        self.assertEqual(conflicts, {
+            "front": ["front"], "side": ["side"], "rear": ["rear"]})
+        self.assertFalse(lane_conflicts_are_clear(conflicts))
+
+    def test_lane_is_clear_when_only_other_lanes_are_occupied(self):
+        conflicts = classify_lane_conflicts(
+            1,
+            [("left", 2, 1.0), ("right", 0, -1.0)],
+            front_distance=8.0,
+            side_distance=2.0,
+            rear_distance=5.0,
+        )
+        self.assertTrue(lane_conflicts_are_clear(conflicts))
+
+    def test_vehicle_ahead_has_positive_longitudinal_distance(self):
+        self.assertGreater(relative_longitudinal_distance(5.0, 0.0, 0.0), 0.0)
+
+    def test_vehicle_behind_has_negative_longitudinal_distance(self):
+        self.assertLess(relative_longitudinal_distance(-5.0, 0.0, 0.0), 0.0)
+
+    def test_longitudinal_projection_respects_ego_heading(self):
+        self.assertLess(
+            relative_longitudinal_distance(0.0, -5.0, 1.5707963267948966),
+            0.0,
+        )
+
+    def test_heading_difference_wraps_at_pi(self):
+        difference = absolute_heading_difference(
+            3.12413936106985,
+            -3.12413936106985,
+        )
+        self.assertAlmostEqual(difference, 0.034906585039886195)
+
+    def test_latched_passing_side_ignores_opposite_candidate(self):
+        decision = select_latched_overtake_lane(
+            True,
+            "vehicle-b",
+            0,
+            "vehicle-a",
+            2,
+        )
+        self.assertEqual(decision, (2, "vehicle-a", 2, False))
+
+    def test_new_passing_side_is_latched_with_vehicle_id(self):
+        decision = select_latched_overtake_lane(
+            True,
+            "vehicle-a",
+            0,
+            None,
+            None,
+        )
+        self.assertEqual(decision, (0, "vehicle-a", 0, True))
+
+    def test_latch_is_released_when_overtake_finishes(self):
+        decision = select_latched_overtake_lane(
+            False,
+            "vehicle-b",
+            0,
+            "vehicle-a",
+            2,
+        )
+        self.assertEqual(decision, (None, None, None, False))
+
+    def test_outer_lane_releases_after_target_is_behind_and_mpc_stalls(self):
+        self.assertTrue(should_release_latched_overtake_lane(
+            overtake_active=True,
+            latched_vehicle_id="vehicle-a",
+            latched_lane_idx=0,
+            target_longitudinal_distance=-1.5,
+            infeasibility_counter=8,
+            behind_distance=1.0,
+            infeasible_cycles=8,
+        ))
+
+    def test_outer_lane_does_not_release_while_target_is_ahead(self):
+        self.assertFalse(should_release_latched_overtake_lane(
+            overtake_active=True,
+            latched_vehicle_id="vehicle-a",
+            latched_lane_idx=2,
+            target_longitudinal_distance=0.5,
+            infeasibility_counter=20,
+            behind_distance=1.0,
+            infeasible_cycles=8,
+        ))
+
+    def test_outer_lane_does_not_release_for_transient_infeasibility(self):
+        self.assertFalse(should_release_latched_overtake_lane(
+            overtake_active=True,
+            latched_vehicle_id="vehicle-a",
+            latched_lane_idx=0,
+            target_longitudinal_distance=-2.0,
+            infeasibility_counter=7,
+            behind_distance=1.0,
+            infeasible_cycles=8,
+        ))
+
+    def test_center_lane_is_never_released_by_outer_lane_escape(self):
+        self.assertFalse(should_release_latched_overtake_lane(
+            overtake_active=True,
+            latched_vehicle_id="vehicle-a",
+            latched_lane_idx=1,
+            target_longitudinal_distance=-2.0,
+            infeasibility_counter=8,
+            behind_distance=1.0,
+            infeasible_cycles=8,
+        ))
 
 
 if __name__ == "__main__":

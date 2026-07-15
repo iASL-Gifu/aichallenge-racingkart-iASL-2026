@@ -117,6 +117,99 @@ def predictions_to_obstacles(predictions, vehicle_radius: float, obstacle_cls=No
     return out
 
 
+def relative_longitudinal_distance(dx: float, dy: float, heading: float) -> float:
+    """Project a relative position onto the ego vehicle's forward axis."""
+    return dx * math.cos(heading) + dy * math.sin(heading)
+
+
+def absolute_heading_difference(first: float, second: float) -> float:
+    """Return the wrapped absolute heading difference in radians."""
+    return abs(math.atan2(math.sin(first - second), math.cos(first - second)))
+
+
+def classify_lane_conflicts(
+    candidate_lane_idx,
+    relative_vehicles,
+    *,
+    front_distance,
+    side_distance,
+    rear_distance,
+):
+    """Classify vehicles that make a candidate lane unsafe.
+
+    ``relative_vehicles`` contains ``(vehicle_id, lane_idx, longitudinal_m)``
+    tuples in the ego frame. Repeated IDs (for predicted positions) are
+    de-duplicated in each conflict group.
+    """
+    conflicts = {"front": [], "side": [], "rear": []}
+    for vehicle_id, lane_idx, longitudinal in relative_vehicles:
+        if lane_idx != candidate_lane_idx:
+            continue
+        if abs(longitudinal) <= side_distance:
+            group = "side"
+        elif side_distance < longitudinal <= front_distance:
+            group = "front"
+        elif -rear_distance <= longitudinal < -side_distance:
+            group = "rear"
+        else:
+            continue
+        if vehicle_id not in conflicts[group]:
+            conflicts[group].append(vehicle_id)
+    return conflicts
+
+
+def lane_conflicts_are_clear(conflicts) -> bool:
+    return not any(conflicts.get(group) for group in ("front", "side", "rear"))
+
+
+def select_latched_overtake_lane(
+    overtake_active,
+    candidate_vehicle_id,
+    candidate_lane_idx,
+    latched_vehicle_id,
+    latched_lane_idx,
+):
+    """Latch one passing side until the high-level overtake mode finishes."""
+    if not overtake_active:
+        return None, None, None, False
+    if latched_lane_idx in (0, 2):
+        return (
+            latched_lane_idx,
+            latched_vehicle_id,
+            latched_lane_idx,
+            False,
+        )
+    if candidate_vehicle_id is not None and candidate_lane_idx in (0, 2):
+        return (
+            candidate_lane_idx,
+            candidate_vehicle_id,
+            candidate_lane_idx,
+            True,
+        )
+    return candidate_lane_idx, latched_vehicle_id, latched_lane_idx, False
+
+
+def should_release_latched_overtake_lane(
+    *,
+    overtake_active,
+    latched_vehicle_id,
+    latched_lane_idx,
+    target_longitudinal_distance,
+    infeasibility_counter,
+    behind_distance,
+    infeasible_cycles,
+):
+    """Release only an outer-lane constraint after a completed pass stalls MPC."""
+    return (
+        overtake_active
+        and latched_vehicle_id is not None
+        and latched_lane_idx in (0, 2)
+        and target_longitudinal_distance is not None
+        and target_longitudinal_distance <= -behind_distance
+        and infeasibility_counter >= infeasible_cycles
+    )
+
+
 def evaluate_stopped_lead_overtake(
     *,
     tracked_stopped_lead,
