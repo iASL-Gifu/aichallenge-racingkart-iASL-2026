@@ -145,6 +145,27 @@ class MPC:
     def update_QN(self, QN: np.ndarray):
         self.QN = QN
 
+    def _compute_lane_center(self, wp_id: int, target_lane: int) -> float:
+        lanes = self.model.reference_path.get_lane_bounds(wp_id)
+        if not lanes or target_lane >= len(lanes):
+            return 0.0
+        ub_lane, lb_lane = lanes[target_lane]
+        lane_center = (ub_lane + lb_lane) / 2.0
+        margin_from_edge = (self.model.width / 2.0) + 0.80
+        min_center = lb_lane + margin_from_edge
+        max_center = ub_lane - margin_from_edge
+        if min_center > max_center:
+            final_center = lane_center
+        else:
+            final_center = float(np.clip(lane_center, min_center, max_center))
+
+        # 🌟 曲率が高いセクションなどで目標オフセットを制限する追加クリップ処理
+        max_offset = getattr(self.model, 'max_avoid_offset', None)
+        if max_offset is not None:
+            final_center = float(np.clip(final_center, -max_offset, max_offset))
+
+        return final_center
+
     def _init_problem(self, N, safety_margin):
         """
         Initialize optimization problem for current time step with steering rate constraints.
@@ -233,7 +254,12 @@ class MPC:
             #        flush=True
             #    )
 
-        # Update path constraints
+        # 終端状態に対する目標
+        target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
+        if target_lane is not None:
+            xr[N * self.nx] = self._compute_lane_center(self.model.wp_id + N, target_lane)
+
+         # Update path constraints
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
                 self.model.wp_id + 1,
@@ -255,15 +281,13 @@ class MPC:
                 ub[infeasible_index] = 0.0
                 lb[infeasible_index] = 0.0
 
-        # Relax bounds for the first few steps if the initial state e_y is out of bounds
+        # Relax bounds for all steps if the initial state e_y is out of bounds to ensure feasibility
         e_y = self.model.spatial_state.e_y
         for k in range(N):
             if e_y < lb[k]:
-                alpha = float(N - k) / N
-                lb[k] = alpha * (e_y - 0.2) + (1.0 - alpha) * lb[k]
+                lb[k] = min(lb[k], e_y - 0.2)
             if e_y > ub[k]:
-                alpha = float(N - k) / N
-                ub[k] = alpha * (e_y + 0.2) + (1.0 - alpha) * ub[k]
+                ub[k] = max(ub[k], e_y + 0.2)
 
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
@@ -272,7 +296,38 @@ class MPC:
 
         self.current_ub = ub
         self.current_lb = lb
-        xr[self.nx::self.nx] = (lb + ub) / 2
+        
+        # Determine the target trajectory reference (xr) based on overtaking mode
+        target_lane = getattr(self.model.reference_path, "target_lane_idx", None)
+        
+        if target_lane is None:
+            # No opponent: follow the optimal racing line (e_y = 0)
+            # Clip the target to the original safety margin bounds to prevent it from getting too close to walls
+            # even if the solver relaxes the boundaries (safety_margin) to maintain feasibility.
+            original_margin = self.model.safety_margin
+            margin_diff = max(0.0, original_margin - safety_margin)
+            safe_lb = lb + margin_diff
+            safe_ub = ub - margin_diff
+            xr[self.nx::self.nx] = np.clip(0.0, safe_lb, safe_ub)
+        else:
+            # Opponent nearby: follow the center of the available corridor
+            midpoint = (lb + ub) / 2
+            
+            if target_lane in [0, 2]:
+                # Apply a lateral shift bias to steer wider when actively avoiding
+                for k in range(len(midpoint)):
+                    if midpoint[k] > 0.1:  # Avoiding left
+                        midpoint[k] = min(ub[k] - 0.2, midpoint[k] + 0.8)
+                    elif midpoint[k] < -0.1:  # Avoiding right
+                        midpoint[k] = max(lb[k] + 0.2, midpoint[k] - 0.8)
+            
+            xr[self.nx::self.nx] = midpoint
+
+            # If a target lane is active, preserve lane-center targets for the e_y references.
+            lane_centers = []
+            for n in range(N):
+                lane_centers.append(self._compute_lane_center(self.model.wp_id + n, target_lane))
+            xr[0:N*self.nx:self.nx] = lane_centers
 
         # Get equality matrix
         A_sparse = sparse.csc_matrix(
@@ -338,8 +393,13 @@ class MPC:
         if not self.osqp_initialized:
             #self.optimizer = osqp.OSQP()
             self.A0 = A_full.copy()
-            #warm_start=true 計算精度を追加(eps_abs,eps_rel)
-            self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=True, verbose=False,eps_abs=1e-4,eps_rel=1e-4)
+            #warm_start=true 計算精度を追加(eps_abs,eps_rel,max_iter)
+            self.optimizer.setup(
+                P=P, q=q, A=A_full, l=l, u=u, 
+                warm_start=True, verbose=False,
+                eps_abs=2e-3, eps_rel=2e-3,
+                max_iter=1500
+            )
             self.osqp_initialized = True
             #print("setup",A_full.nnz,flush=True)
             
@@ -356,7 +416,7 @@ class MPC:
           
             self.optimizer.update(q=q, l=l, u=u, Ax=A_full.data)
 
-    def get_control(self) -> Tuple[np.ndarray, float]:
+    def get_control(self, safety_margin=None) -> Tuple[np.ndarray, float]:
         """
         Get control signal given the current position of the car.
         """
@@ -375,7 +435,10 @@ class MPC:
 
         t0 = time.perf_counter()
 
-        self._init_problem(N, self.model.safety_margin)
+        if safety_margin is None:
+            safety_margin = self.model.safety_margin
+
+        self._init_problem(N, safety_margin)
 
         t1 = time.perf_counter()
         t2 = t1
@@ -392,7 +455,7 @@ class MPC:
             # MPCが「通れません(Infeasible)」とSOSを出した場合
             if is_failed:
                 # 【第1段階】バリアを半分（0.5）にして再計算してみる
-                relaxed_safety_margin = self.model.safety_margin * 0.5
+                relaxed_safety_margin = safety_margin * 0.5
                 self._init_problem(N, relaxed_safety_margin)
                 dec = self.optimizer.solve()
                 t2 = time.perf_counter()
@@ -404,9 +467,9 @@ class MPC:
                     self._init_problem(N, relaxed_safety_margin)
                     dec = self.optimizer.solve()
                     t2 = time.perf_counter()
-                    print(f"⚠️ EMERGENCY: Margin reduced to 0.0 to prevent crash!", flush=True)
+                    print(f"⚠️ EMERGENCY: Margin reduced to 0.0 to prevent crash! (wp_id={self.model.wp_id})", flush=True)
                 elif self.last_solved_wp_id != self.model.wp_id:
-                    print(f"Relaxed safety margin to {relaxed_safety_margin} to solve", flush=True)
+                    print(f"Relaxed safety margin to {relaxed_safety_margin} to solve (wp_id={self.model.wp_id})", flush=True)
 
             control_signals = np.array(dec.x[-N*nu:])
             use_control_signals = control_signals[1::2]
@@ -445,8 +508,9 @@ class MPC:
                 u = np.array(self.current_control[id:id+2])
                 max_delta = np.abs(u[1])
             else:
-                u = np.array([0.0, 0.0])
-                max_delta = 0.0
+                # 最後の手段として、ステアリングを0度にして直進するのではなく、直前の舵角を維持して旋回を続ける
+                u = np.array([5.0, self.previous_steering])
+                max_delta = np.abs(u[1])
 
             self.infeasibility_counter += 1
 

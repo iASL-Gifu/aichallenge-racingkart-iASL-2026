@@ -1,4 +1,0 @@
-source;share/pilot_net_controller/local_setup.bash
-source;share/pilot_net_controller/local_setup.dsv
-source;share/pilot_net_controller/local_setup.sh
-source;share/pilot_net_controller/local_setup.zsh

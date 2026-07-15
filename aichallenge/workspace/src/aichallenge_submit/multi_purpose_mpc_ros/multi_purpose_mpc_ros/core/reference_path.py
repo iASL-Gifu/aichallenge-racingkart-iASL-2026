@@ -217,6 +217,9 @@ class ReferencePath:
         # Circular flag
         self.circular = circular
 
+        self.n_lanes = 3
+        self.inner_lane_width = 0.5
+
         # List of waypoint objects
         self.waypoints = self._construct_path(wp_x, wp_y)
 
@@ -562,6 +565,64 @@ class ReferencePath:
 
         return self.waypoints[wp_id]
 
+    def get_lane_bounds(self, wp_id: int, n_lanes: int = None, max_half_width: float = 3.8, lane_width: float = 1.7, inner_lane_width: float = None) -> list:
+        """
+        Waypointの走行可能幅を分割し、車線間に隙間（間隔）が生じないようにぴったりくっつけて返す。
+        n_lanes が 3 以上の場合、左右車線（外側）以外の車線（内側）は細く車線幅を取る。
+        ただし、各車線の幅がそれぞれの最低保証幅を下回る場合は、実行可能性確保のために調整する。
+        """
+        if n_lanes is None:
+            n_lanes = getattr(self, 'n_lanes', 2)
+        if inner_lane_width is None:
+            inner_lane_width = getattr(self, 'inner_lane_width', 0.5)
+
+        wp = self.get_waypoint(wp_id)
+
+        if wp.ub is None or wp.lb is None:
+            return []
+
+        total = wp.ub - wp.lb
+
+        # 重みと最小幅の決定
+        if n_lanes >= 3:
+            inner_weight = 0.3
+            weights = [1.0] + [inner_weight] * (n_lanes - 2) + [1.0]
+            min_widths = [lane_width] + [inner_lane_width] * (n_lanes - 2) + [lane_width]
+        else:
+            weights = [1.0] * n_lanes
+            min_widths = [lane_width] * n_lanes
+
+        total_weight = sum(weights)
+
+        # 1. 初期ノード位置の計算 (比率分割)
+        nodes = [wp.lb]
+        accumulated_width = 0.0
+        for w in weights:
+            accumulated_width += w
+            nodes.append(wp.lb + (accumulated_width / total_weight) * total)
+
+        # 2. 右から左への最小幅適用 (押し上げ)
+        for i in range(n_lanes):
+            nodes[i+1] = max(nodes[i+1], nodes[i] + min_widths[i])
+
+        # 3. 左から右への最小幅適用 (押し下げ)
+        nodes[n_lanes] = min(nodes[n_lanes], wp.ub)
+        for i in range(n_lanes - 1, -1, -1):
+            nodes[i] = min(nodes[i], nodes[i+1] - min_widths[i])
+
+        # 4. 全体幅が狭すぎて制約が破綻した場合のセーフティガード
+        nodes[0] = max(nodes[0], wp.lb)
+        for i in range(n_lanes):
+            nodes[i+1] = max(nodes[i+1], nodes[i])
+            nodes[i+1] = min(nodes[i+1], wp.ub)
+
+        # 5. 車線リストの構築
+        lanes = []
+        for i in range(n_lanes):
+            lanes.append((nodes[i+1], nodes[i]))
+
+        return lanes
+
     def show(self, ax, display_drivable_area=True):
         """
         Display path object on provided axis.
@@ -756,7 +817,7 @@ class ReferencePath:
                 # Check feasibility of the path after subtracting safety margin
                 if ub_sm < lb_sm:
                     mid = (wp.ub + wp.lb) / 2.0
-                    half_width = 0.15
+                    half_width = 0.8
                     ub_sm = np.clip(mid + half_width, wp.lb, wp.ub)
                     lb_sm = np.clip(mid - half_width, wp.lb, wp.ub)
 
@@ -835,6 +896,51 @@ class ReferencePath:
         Compute upper and lower bounds of the drivable area orthogonal to
         the given waypoint.
         """
+        # Reset waypoints in the prediction horizon to prevent constraint latching across steps/laps
+        for n in range(N):
+            wp = self.get_waypoint(wp_id + n)
+            wp.ub_sm = wp.ub
+            wp.lb_sm = wp.lb
+
+        # 🌟 超高速バイパス：障害物が存在しない、またはホライズン範囲内（15m以内）に障害物がない場合、画像探索をスキップ
+        is_obstacle_close = False
+        if len(self.map.obstacles) > 0:
+            start_wp = self.get_waypoint(wp_id)
+            ref_x, ref_y = (pose[0], pose[1]) if pose is not None else (start_wp.x, start_wp.y)
+            for obstacle in self.map.obstacles:
+                ob_dist = math.hypot(obstacle.cx - ref_x, obstacle.cy - ref_y)
+                if ob_dist < 15.0:  # 15m以内の至近距離に障害物がある場合のみ探索を有効化
+                    is_obstacle_close = True
+                    break
+
+        if len(self.map.obstacles) == 0 or not is_obstacle_close:
+            ub_hor = []
+            lb_hor = []
+            border_cells_hor_sm = []
+            for n in range(N):
+                wp = self.get_waypoint(wp_id + n)
+                min_wall_clearance = model_width / 2.0 + 0.05
+                ub_sm = min(wp.ub - safety_margin, wp.ub - min_wall_clearance)
+                lb_sm = max(wp.lb + safety_margin, wp.lb + min_wall_clearance)
+                
+                # 安全マージンのチェック（逆転や極小幅の防止）
+                if ub_sm < lb_sm:
+                    mid = (wp.ub + wp.lb) / 2.0
+                    half_width = model_width / 2.0 + 0.05
+                    ub_sm = np.clip(mid + half_width, wp.lb, wp.ub)
+                    lb_sm = np.clip(mid - half_width, wp.lb, wp.ub)
+                
+                ub_hor.append(ub_sm)
+                lb_hor.append(lb_sm)
+                
+                # 状態変数の同期更新
+                wp.ub_sm = ub_sm
+                wp.lb_sm = lb_sm
+                wp.dynamic_border_cells = wp.static_border_cells
+                
+                border_cells_hor_sm.append(list(wp.static_border_cells))
+                
+            return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
 
         # min_width = model_width / np.sqrt(2)
         # min_width = model_width
@@ -881,8 +987,11 @@ class ReferencePath:
                 # print(f"Updated Upper bound: {wp.ub}, Updated Lower bound: {wp.lb}")
 
             # Subtract safety margin
-            ub_sm = ub - safety_margin
-            lb_sm = lb + safety_margin
+            # Wall boundaries must always preserve at least the physical vehicle half-width clearance.
+            # Obstacle boundaries can use the smaller relaxed safety margin.
+            min_wall_clearance = model_width / 2.0 + 0.05
+            ub_sm = min(ub - safety_margin, wp.ub - min_wall_clearance)
+            lb_sm = max(lb + safety_margin, wp.lb + min_wall_clearance)
 
             if wp.ub_sm < ub_sm:
               ub_sm = wp.ub_sm
@@ -891,12 +1000,23 @@ class ReferencePath:
 
             # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
-                # 一つ前のifの判定でboundsは正常になっているはずなので、こちらの判定に入る場合は何らかの実装上の異常がある
-                print("!!!! Infeasible path detected !!!!")
-                mid = (ub + lb) / 2.0
-                half_width = 0.15
-                ub_sm = np.clip(mid + half_width, lb, ub)
-                lb_sm = np.clip(mid - half_width, lb, ub)
+                # 安全マージンが厳しすぎて道が交差した場合、マージンを段階的に削る
+                # 相手に当たらない最低限の絶対防衛線（0.1m）と、自車幅（model_width）を足した
+                # 「これ以下は絶対に物理的に通れない最小幅」を計算
+                absolute_min_width = model_width + 0.1  # 相手と10cmキープ
+                
+                # 本来の障害物との隙間（ub - lb）が、車幅+10cmより広い場合はすり抜け可能
+                if (ub - lb) >= absolute_min_width:
+                    # 左右の壁（または相手の端）から均等に5cmずつ離れるようにコリドーを設定（マージンを自動縮小）
+                    ub_sm = ub - 0.05
+                    lb_sm = lb + 0.05
+                else:
+                    # 本当にギリギリで完全に詰まっている（道がない）ときだけ、
+                    # MPCソルバーを即死させないために車幅分の空間を中央に強制配置する
+                    mid = (ub + lb) / 2.0
+                    half_width = model_width / 2.0 + 0.05
+                    ub_sm = np.clip(mid + half_width, lb, ub)
+                    lb_sm = np.clip(mid - half_width, lb, ub)
 
             # Compute absolute angle of bound cell
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
@@ -945,7 +1065,20 @@ class ReferencePath:
         free_segments_hor = []
         for n in range(N):
             wp = self.get_waypoint(wp_id+n)
-            free_segments = self._compute_free_segments(wp, min_width)
+            
+            # Check if this waypoint is near any obstacle on the map
+            is_wp_near_obstacle = False
+            for obstacle in self.map.obstacles:
+                if math.hypot(obstacle.cx - wp.x, obstacle.cy - wp.y) < 4.0:
+                    is_wp_near_obstacle = True
+                    break
+            
+            if is_wp_near_obstacle:
+                free_segments = self._compute_free_segments(wp, min_width)
+            else:
+                # Use static boundaries directly to avoid expensive image query
+                free_segments = [(wp.static_border_cells[0], wp.static_border_cells[1])]
+                
             free_segments_hor.append(free_segments)
             self.free_segs.extend(free_segments)
 
@@ -1057,8 +1190,8 @@ class ReferencePath:
         # safety_marginを考慮したborder_cellsを滑らかにする
         # border_cells_smの連続する点を直線で結び、前後の直線がなす角がしきい値より大きい場合、
         # 間の点を一つ飛ばして直線を引きなおすようにborder_cells_smを更新する
-        ANGLE_TH = np.deg2rad(45.0)
-        SEARCH_HORIZON = 3 # >=1
+        ANGLE_TH = np.deg2rad(25.0)
+        SEARCH_HORIZON = 2 # >=1
 
         for n in reversed(range(SEARCH_HORIZON, N-SEARCH_HORIZON+1)):
             mid_index = n
@@ -1158,6 +1291,37 @@ class ReferencePath:
             waypoint_mid.dynamic_border_cells = tuple(new_border_cells_hor_sm_mid)
             waypoint_mid.ub_sm = new_bound_sm[0]
             waypoint_mid.lb_sm = new_bound_sm[1]
+
+        # =========================================================================
+        # 🌟【超重要】MPCソルバーを即死から守る絶対王政の安全弁
+        # =========================================================================
+        # スムージングや動的マージンの引き算の結果、ub < lb （左の壁と右の壁の逆転）が
+        # 1ミリでも発生していたら、OSQPが即死するため、強制的に車幅分の隙間を開ける
+        for mid_idx in range(N):
+            if ub_hor[mid_idx] <= lb_hor[mid_idx] + 0.1:
+                # 逆転、または隙間が10cm未満になっている難所を発見した場合
+                # ウェイポイントのセンターを中心に、最低でも車幅分（model_width）の道幅を無理やりこじ開ける
+                actual_mid = (ub_hor[mid_idx] + lb_hor[mid_idx]) / 2.0
+                half_safe_width = (model_width / 2.0) + 0.1  # 車幅の半分＋10cm
+                
+                ub_hor[mid_idx] = actual_mid + half_safe_width
+                lb_hor[mid_idx] = actual_mid - half_safe_width
+                
+                # 同時に border_cells の座標データも破綻しないように防衛
+                if mid_idx < len(border_cells_hor_sm):
+                    waypoint_current = self.get_waypoint(wp_id + mid_idx)
+                    angle_ub = np.mod(math.pi / 2 + waypoint_current.psi + math.pi, 2 * math.pi) - math.pi
+                    angle_lb = np.mod(-math.pi / 2 + waypoint_current.psi + math.pi, 2 * math.pi) - math.pi
+                    
+                    border_cells_hor_sm[mid_idx][0] = (waypoint_current.x + ub_hor[mid_idx] * np.cos(angle_ub), 
+                                                       waypoint_current.y + ub_hor[mid_idx] * np.sin(angle_ub))
+                    border_cells_hor_sm[mid_idx][1] = (waypoint_current.x - lb_hor[mid_idx] * np.cos(angle_lb), 
+                                                       waypoint_current.y - lb_hor[mid_idx] * np.sin(angle_lb))
+                    
+                    # 境界のスナップショット値も完全に同期更新
+                    waypoint_current.ub_sm = ub_hor[mid_idx]
+                    waypoint_current.lb_sm = lb_hor[mid_idx]
+                    waypoint_current.dynamic_border_cells = tuple(border_cells_hor_sm[mid_idx])
 
         return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
 

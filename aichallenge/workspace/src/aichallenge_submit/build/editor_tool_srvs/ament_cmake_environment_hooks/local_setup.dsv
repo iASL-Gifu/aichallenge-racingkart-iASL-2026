@@ -1,4 +1,0 @@
-source;share/editor_tool_srvs/environment/ament_prefix_path.sh
-source;share/editor_tool_srvs/environment/library_path.sh
-source;share/editor_tool_srvs/environment/path.sh
-source;share/editor_tool_srvs/environment/pythonpath.sh

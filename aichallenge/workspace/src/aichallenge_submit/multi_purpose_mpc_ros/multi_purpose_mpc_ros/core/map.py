@@ -197,8 +197,30 @@ class Map:
             # Add circular object to map
             y, x = np.ogrid[-radius_px: radius_px, -radius_px: radius_px]
             index = x ** 2 + y ** 2 <= radius_px ** 2
-            self.data[cy_px-radius_px:cy_px+radius_px, cx_px-radius_px:
-                                                cx_px+radius_px][index] = 0
+
+            # Compute slice bounds
+            y_start = cy_px - radius_px
+            y_end = cy_px + radius_px
+            x_start = cx_px - radius_px
+            x_end = cx_px + radius_px
+
+            # Clip slice bounds to map image size
+            y_start_clipped = max(0, min(y_start, self.height))
+            y_end_clipped = max(0, min(y_end, self.height))
+            x_start_clipped = max(0, min(x_start, self.width))
+            x_end_clipped = max(0, min(x_end, self.width))
+
+            # Crop the circle's mask index accordingly
+            y_offset_start = y_start_clipped - y_start
+            y_offset_end = y_end_clipped - y_start
+            x_offset_start = x_start_clipped - x_start
+            x_offset_end = x_end_clipped - x_start
+
+            index_clipped = index[y_offset_start:y_offset_end, x_offset_start:x_offset_end]
+
+            # Fill obstacle cells only if clipping results in a valid subregion
+            if (y_end_clipped > y_start_clipped) and (x_end_clipped > x_start_clipped):
+                self.data[y_start_clipped:y_end_clipped, x_start_clipped:x_end_clipped][index_clipped] = 0
 
     def add_boundary(self, boundaries):
         """
