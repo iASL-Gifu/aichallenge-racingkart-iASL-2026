@@ -7,6 +7,8 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     classify_lane_conflicts,
     evaluate_stopped_lead_overtake,
     lane_conflicts_are_clear,
+    is_parallel_vehicle,
+    prediction_clears_moving_vehicle,
     relative_longitudinal_distance,
     select_latched_overtake_lane,
     should_release_latched_overtake_lane,
@@ -58,6 +60,66 @@ class StoppedVehicleSafetyTest(unittest.TestCase):
 
 
 class OvertakeGeometryTest(unittest.TestCase):
+    def parallel(self, **overrides):
+        values = {
+            "ego_lane_idx": 0,
+            "other_lane_idx": 1,
+            "lateral_distance": 2.2,
+            "longitudinal_distance": 1.0,
+            "minimum_lateral_distance": 2.0,
+            "maximum_lateral_distance": 3.5,
+            "maximum_longitudinal_distance": 4.5,
+        }
+        values.update(overrides)
+        return is_parallel_vehicle(**values)
+
+    def test_parallel_requires_different_lanes(self):
+        self.assertFalse(self.parallel(other_lane_idx=0))
+
+    def test_parallel_requires_at_least_two_metres_lateral_gap(self):
+        self.assertFalse(self.parallel(lateral_distance=1.99))
+        self.assertTrue(self.parallel(lateral_distance=2.0))
+
+    def test_parallel_requires_small_longitudinal_gap(self):
+        self.assertFalse(self.parallel(longitudinal_distance=4.51))
+
+    def test_parallel_rejects_unknown_lane(self):
+        self.assertFalse(self.parallel(ego_lane_idx=None))
+
+    def test_prediction_must_clear_moving_target_at_every_step(self):
+        self.assertFalse(prediction_clears_moving_vehicle(
+            [0.0, 2.0, 4.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 2.0],
+            vehicle_x=2.0,
+            vehicle_y=0.5,
+            vehicle_vx=0.0,
+            vehicle_vy=0.0,
+            minimum_clearance=1.3,
+        ))
+
+    def test_prediction_can_bypass_brake_when_all_steps_are_clear(self):
+        self.assertTrue(prediction_clears_moving_vehicle(
+            [0.0, 2.0, 4.0],
+            [2.0, 2.0, 2.0],
+            [0.0, 1.0, 2.0],
+            vehicle_x=2.0,
+            vehicle_y=0.0,
+            vehicle_vx=0.0,
+            vehicle_vy=0.0,
+            minimum_clearance=1.3,
+        ))
+
+    def test_empty_prediction_never_bypasses_brake(self):
+        self.assertFalse(prediction_clears_moving_vehicle(
+            [], [], [],
+            vehicle_x=0.0,
+            vehicle_y=0.0,
+            vehicle_vx=0.0,
+            vehicle_vy=0.0,
+            minimum_clearance=1.3,
+        ))
+
     def test_lane_conflicts_cover_front_side_and_rear(self):
         conflicts = classify_lane_conflicts(
             2,

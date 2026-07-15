@@ -63,10 +63,14 @@ trajectory_switch:
 prepass_lane_fallback:
   enabled: true
   infeasible_cycles: 20 # 追越し前、固定車線がこの回数連続失敗したら代替車線を評価
+  recovery_stable_sec: 0.5 # 全幅解除後、MPC正常かつL1復帰と同じ車両安定条件がこの時間続いてから代替車線を選択
+  recovery_timeout_sec: 5.0 # 全幅回復がこの時間成立しなければラッチ対象を再評価。通過不可/後方危険なら追従、近すぎて通過可能なら後退後に再評価
   front_distance: 8.0  # [m] 候補車線の前方確認距離
   side_distance: 2.0   # [m] 候補車線の側方・並走確認距離
   rear_distance: 5.0   # [m] 候補車線の後方確認距離
   prediction_sec: 1.0  # [s] 相対速度による将来位置も確認
+  follow_target_lost_hold_sec: 1.0 # [s] 追従中にラッチ対象が消えても最終位置を使って安全側に保持する時間
+  follow_target_lost_max_speed: 1.0 # [m/s] 消失保持中の速度上限（保持期限後は一度停止して全車両再評価）
 
 center_lane_rejoin_stability:
   enabled: true
@@ -74,6 +78,7 @@ center_lane_rejoin_stability:
   max_lateral_speed: 0.5     # [m/s] odom横速度と方位誤差からの推定値の大きい方
   max_yaw_rate: 0.5         # [rad/s]
   stable_sec: 0.4            # 全条件が連続成立してからL1復帰を開始
+  probe_success_cycles: 3    # L1制約でこの回数連続して正常に解けた場合だけL1固定を確定
   release_infeasible_cycles: 5 # L1復帰中にこの回数連続失敗したらL1固定を解除
 
 bicycle_model:
@@ -180,8 +185,15 @@ follow_restart:
   duration: 1.0            # [s] 再発進ブースト継続時間
 
 initial_start_boost:
-  enabled: true            # 初回Start時、Grounded/Ready配置で右側の赤色車線L0が自車のみなら最大加速度で発進
-  duration: 5.0            # [s] 初回だけ適用する時間
+  enabled: true            # Grounded/Ready配置で右側の赤色車線L0が自車のみなら、走り始めに最大加速度を適用
+  duration: 5.0            # [s] 車両の動き始めを検出してから初回だけ適用する時間
+  turbo_enabled: true      # 動き始めにAWSIMターボを /awsim/cmd の [1.0]→[0.0] で初回だけONにする
+  motion_speed_threshold: 0.1 # [m/s] 実速度がこの値に達した周期でターボと最大加速を開始
+  hold_l0_during_boost: true # 最大加速中は追越検出を残したまま赤色車線L0を直進し、L1/L2への寄せを延期
+  post_boost_hold_min_sec: 1.5 # [s] ブースト終了後も最低この時間はL0を維持
+  post_boost_stable_sec: 0.4 # [s] 予測曲率だけが継続して条件を満たしてから通常のL1復帰判定へ進む
+  post_boost_max_kappa: 0.12 # [1/m] 全幅走行後、予測区間内の最大絶対曲率がこれ以下ならL1復帰を許可
+  post_boost_lookahead_wps: 12 # L1復帰前に曲率確認を行うCenter軌道の前方Waypoint数
 
 stuck_recovery:
   enabled: true

@@ -162,6 +162,55 @@ def lane_conflicts_are_clear(conflicts) -> bool:
     return not any(conflicts.get(group) for group in ("front", "side", "rear"))
 
 
+def prediction_clears_moving_vehicle(
+    prediction_x,
+    prediction_y,
+    prediction_times,
+    *,
+    vehicle_x,
+    vehicle_y,
+    vehicle_vx,
+    vehicle_vy,
+    minimum_clearance,
+):
+    """Return true only when every prediction point clears a moving vehicle."""
+    if (
+        not prediction_x
+        or len(prediction_x) != len(prediction_y)
+        or len(prediction_x) != len(prediction_times)
+    ):
+        return False
+    return all(
+        math.hypot(
+            ego_x - (vehicle_x + vehicle_vx * prediction_time),
+            ego_y - (vehicle_y + vehicle_vy * prediction_time),
+        ) >= minimum_clearance
+        for ego_x, ego_y, prediction_time in zip(
+            prediction_x, prediction_y, prediction_times)
+    )
+
+
+def is_parallel_vehicle(
+    *,
+    ego_lane_idx,
+    other_lane_idx,
+    lateral_distance,
+    longitudinal_distance,
+    minimum_lateral_distance,
+    maximum_lateral_distance,
+    maximum_longitudinal_distance,
+):
+    """Classify true side-by-side traffic, excluding same-lane following."""
+    return (
+        ego_lane_idx is not None
+        and other_lane_idx is not None
+        and ego_lane_idx != other_lane_idx
+        and minimum_lateral_distance <= lateral_distance
+            <= maximum_lateral_distance
+        and abs(longitudinal_distance) <= maximum_longitudinal_distance
+    )
+
+
 def select_latched_overtake_lane(
     overtake_active,
     candidate_vehicle_id,
