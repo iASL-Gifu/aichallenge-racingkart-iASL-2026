@@ -8,10 +8,12 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     evaluate_stopped_lead_overtake,
     lane_conflicts_are_clear,
     is_parallel_vehicle,
+    ordered_outer_lane_candidates,
     prediction_clears_moving_vehicle,
     relative_longitudinal_distance,
     select_latched_overtake_lane,
     should_release_latched_overtake_lane,
+    should_start_prepass_recovery_from_safety,
 )
 
 
@@ -57,6 +59,45 @@ class StoppedVehicleSafetyTest(unittest.TestCase):
             tracked_stopped_lead=False,
             distance=2.5,
         ), (False, False))
+
+
+class PrepassSafetyRecoveryTest(unittest.TestCase):
+    def should_start(self, **overrides):
+        values = {
+            "recovery_requested": True,
+            "fallback_enabled": True,
+            "applied_lane_idx": 0,
+            "latched_vehicle_id": "vehicle-a",
+            "opponent_ahead": True,
+            "fallback_recovery_active": False,
+            "fallback_follow_active": False,
+        }
+        values.update(overrides)
+        return should_start_prepass_recovery_from_safety(**values)
+
+    def test_outer_lane_failure_starts_prepass_recovery(self):
+        self.assertTrue(self.should_start())
+        self.assertTrue(self.should_start(applied_lane_idx=2))
+
+    def test_full_width_or_l1_failure_is_not_attributed_to_outer_lane(self):
+        self.assertFalse(self.should_start(applied_lane_idx=None))
+        self.assertFalse(self.should_start(applied_lane_idx=1))
+
+    def test_missing_or_cleared_target_does_not_start_prepass_recovery(self):
+        self.assertFalse(self.should_start(latched_vehicle_id=None))
+        self.assertFalse(self.should_start(opponent_ahead=False))
+
+    def test_existing_fallback_state_is_not_restarted(self):
+        self.assertFalse(self.should_start(fallback_recovery_active=True))
+        self.assertFalse(self.should_start(fallback_follow_active=True))
+
+    def test_failed_lane_is_excluded_from_retry_candidates(self):
+        self.assertEqual(ordered_outer_lane_candidates(0, 0), (2,))
+        self.assertEqual(ordered_outer_lane_candidates(2, 2), (0,))
+
+    def test_normal_retry_still_checks_opposite_lane_first(self):
+        self.assertEqual(ordered_outer_lane_candidates(0), (2, 0))
+        self.assertEqual(ordered_outer_lane_candidates(2), (0, 2))
 
 
 class OvertakeGeometryTest(unittest.TestCase):

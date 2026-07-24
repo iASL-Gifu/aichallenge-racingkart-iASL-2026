@@ -72,6 +72,13 @@ prepass_lane_fallback:
   follow_target_lost_hold_sec: 1.0 # [s] 追従中にラッチ対象が消えても最終位置を使って安全側に保持する時間
   follow_target_lost_max_speed: 1.0 # [m/s] 消失保持中の速度上限（保持期限後は一度停止して全車両再評価）
 
+follow_control:
+  follow_only: false       # true: L0/L2へ追い越さず、Center軌道のL1で追従する
+  engage_distance: 15.0  # [m] この距離未満で車間制御を有効化
+  desired_distance: 8.0  # [m] 目標車間距離
+  lateral_distance: 1.2  # [m] 同一車線とみなす横方向距離
+  spacing_kp: 1.2        # [1/s] target=front_speed+Kp*(distance-desired_distance)
+
 center_lane_rejoin_stability:
   enabled: true
   max_heading_error_deg: 5.0 # Center軌道に対する方位誤差
@@ -92,11 +99,15 @@ mpc:
   # QN: [e_y, e_psi, t]
   R: [100000.0, 1000.0]
   R10: [100000.0,100.0]
-  a_min: -0.50 # m/s^2
+  a_min: -1.0 # m/s^2
   a_max: 2.5 # m/s^2
   delta_max_deg: 52.0 # degrees
   steer_rate_max: 3.00 # rad/s max_steering_rate
   control_rate: 40.0 # Hz Ts=1/control_rate
+  solve_time_budget_ms: 20.0 # 初回失敗後、安全マージンを緩和する追加再試行だけの時間上限
+  max_prediction_fallback_cycles: 3 # 古い予測・制御列を再利用できる最大連続失敗周期
+  safety_recovery_speed: 1.0 # [m/s] 古い予測破棄後の全幅MPC回復中の上限速度
+  safety_recovery_success_sec: 0.5 # [s] 全幅MPCが連続成功してから通常車線選択へ戻す時間
   #steering_tire_angle_gain_var: 1.639
   steering_tire_angle_gain_var: 1.68
   # accel_low_pass_gain: 0.1
@@ -198,8 +209,12 @@ initial_start_boost:
 stuck_recovery:
   enabled: true
   speed_threshold: 0.15
+  mpc_stall_speed_threshold: 0.4 # [m/s] MPC安全回復中、この速度以下かつGNSS不動なら後退
   forward_cmd_threshold: 0.8
   stuck_time_threshold: 2.0
+  forward_resume_gap: 4.0 # [m] 後退中、ラッチ前方車がこの距離以上前進し、かつ動いていればDRIVEへ戻す
+  forward_resume_lead_speed: 0.5 # [m/s] 前方車が動いたとみなす速度
+  forward_resume_min_command: 0.3 # [m/s] 後退中断に必要な新鮮な前進MPC速度指令
   reverse_duration: 3.0
   cooldown: 2.0
   reverse_speed: 1.5
@@ -220,6 +235,8 @@ stuck_recovery:
   drive_control_mode_request_value: true
   gear_shift_delay: 1.0
   max_shift_wait: 8.0
+  drive_request_resend_sec: 0.5 # [s] DRIVE未確認時のギア要求再送周期。確認まで速度ゼロを維持
+  reverse_request_resend_sec: 0.5 # [s] REVERSE未確認時のギア要求再送周期。確認まで速度ゼロを維持
   use_actuation_cmd: false
   actuation_accel_cmd: 1.0
   actuation_brake_cmd: 0.0

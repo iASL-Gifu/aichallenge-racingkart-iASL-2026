@@ -5,6 +5,7 @@ import numpy as np
 import osqp
 
 from multi_purpose_mpc_ros.core.MPC import (
+    can_reuse_prediction_fallback,
     is_plausible_mpc_prediction,
     is_plausible_world_prediction,
     is_primal_infeasible,
@@ -94,6 +95,33 @@ class TestPredictionPlausibility(unittest.TestCase):
         self.assertFalse(is_plausible_world_prediction(
             self.prediction,
             current_position=(20.0, 0.0),
+        ))
+
+
+class TestPredictionFallbackLimit(unittest.TestCase):
+    def test_first_three_failures_may_reuse_valid_prediction(self):
+        for failure_cycle in (1, 2, 3):
+            self.assertTrue(can_reuse_prediction_fallback(
+                failure_cycle,
+                max_fallback_cycles=3,
+                prediction_valid=True,
+                control_valid=True,
+            ))
+
+    def test_fourth_failure_must_stop_reusing_prediction(self):
+        self.assertFalse(can_reuse_prediction_fallback(
+            failure_cycle=4,
+            max_fallback_cycles=3,
+            prediction_valid=True,
+            control_valid=True,
+        ))
+
+    def test_invalid_prediction_is_never_reused(self):
+        self.assertFalse(can_reuse_prediction_fallback(
+            failure_cycle=1,
+            max_fallback_cycles=3,
+            prediction_valid=False,
+            control_valid=True,
         ))
 
 

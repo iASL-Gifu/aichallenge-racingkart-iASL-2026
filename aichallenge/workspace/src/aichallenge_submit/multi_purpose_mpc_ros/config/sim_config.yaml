@@ -34,6 +34,9 @@ bicycle_model:
 
 mpc:
   N: 20
+  max_prediction_fallback_cycles: 3
+  safety_recovery_speed: 1.0
+  safety_recovery_success_sec: 0.5
   Q: [3.0, 100.0, 5.0]  # [v, delta, t]
   # Q: [5.0, 90.0, 5.0]  # [v, delta, t]
   # Q: [10.0, 80.0, 5.0]  # [v, delta, t]
@@ -45,6 +48,7 @@ mpc:
   ay_max: 50.0 # m/s^2, maximum lateral acceleration in curves
   delta_max_deg: 80.0 # degrees
   control_rate: 50.0 # Hz
+  solve_time_budget_ms: 20.0 # 初回失敗後、安全マージンを緩和する追加再試行だけの時間上限
   steering_tire_angle_gain_var: 1.0
   wp_id_offset: 0
 
@@ -56,8 +60,12 @@ v2x_obstacle_avoidance:
 stuck_recovery:
   enabled: true
   speed_threshold: 0.15
+  mpc_stall_speed_threshold: 0.4
   forward_cmd_threshold: 0.8
   stuck_time_threshold: 2.0
+  forward_resume_gap: 4.0
+  forward_resume_lead_speed: 0.5
+  forward_resume_min_command: 0.3
   reverse_duration: 3.0
   cooldown: 2.0
   reverse_speed: 1.5
@@ -78,6 +86,8 @@ stuck_recovery:
   drive_control_mode_request_value: true
   gear_shift_delay: 1.0
   max_shift_wait: 8.0
+  drive_request_resend_sec: 0.5 # [s] DRIVE未確認時のギア要求再送周期。確認まで速度ゼロを維持
+  reverse_request_resend_sec: 0.5 # [s] REVERSE未確認時のギア要求再送周期。確認まで速度ゼロを維持
   use_actuation_cmd: false
   actuation_accel_cmd: 1.0
   actuation_brake_cmd: 0.0

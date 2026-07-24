@@ -122,6 +122,39 @@ def relative_longitudinal_distance(dx: float, dy: float, heading: float) -> floa
     return dx * math.cos(heading) + dy * math.sin(heading)
 
 
+def should_start_prepass_recovery_from_safety(
+    *,
+    recovery_requested: bool,
+    fallback_enabled: bool,
+    applied_lane_idx,
+    latched_vehicle_id,
+    opponent_ahead: bool,
+    fallback_recovery_active: bool,
+    fallback_follow_active: bool,
+) -> bool:
+    """Return whether an outer-lane MPC failure should enter Prepass recovery.
+
+    The applied lane is used instead of the requested lane so a failure during
+    the full-width transition window is not incorrectly attributed to L0/L2.
+    """
+    return bool(
+        recovery_requested
+        and fallback_enabled
+        and applied_lane_idx in (0, 2)
+        and latched_vehicle_id is not None
+        and opponent_ahead
+        and not fallback_recovery_active
+        and not fallback_follow_active
+    )
+
+
+def ordered_outer_lane_candidates(preferred_lane_idx, excluded_lane_idx=None):
+    """Return opposite-first outer lanes, optionally excluding a failed lane."""
+    preferred = preferred_lane_idx if preferred_lane_idx in (0, 2) else 0
+    ordered = (2 if preferred == 0 else 0, preferred)
+    return tuple(lane for lane in ordered if lane != excluded_lane_idx)
+
+
 def absolute_heading_difference(first: float, second: float) -> float:
     """Return the wrapped absolute heading difference in radians."""
     return abs(math.atan2(math.sin(first - second), math.cos(first - second)))

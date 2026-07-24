@@ -105,6 +105,20 @@ def is_plausible_world_prediction(
         return False
     return True
 
+
+def can_reuse_prediction_fallback(
+    failure_cycle,
+    max_fallback_cycles,
+    prediction_valid,
+    control_valid,
+) -> bool:
+    """Allow a stored prediction/control pair for only a bounded time."""
+    return (
+        1 <= int(failure_cycle) <= max(int(max_fallback_cycles), 0)
+        and bool(prediction_valid)
+        and bool(control_valid)
+    )
+
 ##################
 # MPC Controller #
 ##################
@@ -215,6 +229,12 @@ class MPC:
         # 既存の初期化
         self.current_prediction = None
         self.infeasibility_counter = 0
+        self.solve_time_budget_ms = 20.0
+        self.max_prediction_fallback_cycles = 3
+        self.used_prediction_fallback = False
+        self.time_budget_exceeded = False
+        self.recovery_requested = False
+        self.failure_reason = None
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
         self.optimizer = osqp.OSQP()
@@ -527,6 +547,10 @@ class MPC:
         """
         nx = self.nx
         nu = self.nu
+        self.used_prediction_fallback = False
+        self.time_budget_exceeded = False
+        self.recovery_requested = False
+        self.failure_reason = None
 
         #最近傍Waypointを取得
         self.model.get_current_waypoint()
@@ -557,7 +581,16 @@ class MPC:
             t2 = time.perf_counter()
 
             if is_primal_infeasible(dec):
+                # Limit only the additional relaxed retries. The initial
+                # problem build and solve are normal MPC work and are not
+                # included in this deadline.
+                retry_started_at = time.perf_counter()
                 for i in range(1, 6):
+                    elapsed_ms = (
+                        time.perf_counter() - retry_started_at) * 1000.0
+                    if elapsed_ms >= self.solve_time_budget_ms:
+                        self.time_budget_exceeded = True
+                        break
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     # _init_problem applies wp_id_offset, so restore the
                     # unshifted waypoint before every retry.
@@ -574,6 +607,10 @@ class MPC:
                         break
 
             if not is_valid_osqp_solution(dec):
+                if self.time_budget_exceeded:
+                    raise ValueError(
+                        "MPC retry time budget exceeded "
+                        f"({self.solve_time_budget_ms:.1f}ms)")
                 raise ValueError(
                     f"OSQP failed with status '{dec.info.status}'")
 
@@ -618,28 +655,45 @@ class MPC:
             self.last_solved_wp_id = self.model.wp_id
 
         except (TypeError, ValueError) as error:
+            self.failure_reason = str(error)
             if self.debug_counter % 20 == 0:
                 print(f"[MPCFallback] {error}", flush=True)
-            id = nu * (self.infeasibility_counter + 1)
-            if id + 2 < len(self.current_control) and not np.all(self.current_control[id:id+2] == 0.0):
-                u = np.array(self.current_control[id:id+2])
-                max_delta = np.abs(u[1])
-            else:
-                # Keep last steering angle and use safe minimum speed (1.0 m/s)
-                u = np.array([1.0, self.previous_steering])
-                max_delta = np.abs(self.previous_steering)
-
-            # Keep the last valid prediction when solver fails
-            if (
+            failure_cycle = self.infeasibility_counter + 1
+            fallback_id = nu * failure_cycle
+            fallback_prediction_valid = (
                 prediction_backup is not None
                 and is_plausible_world_prediction(
                     prediction_backup,
                     (self.model.temporal_state.x, self.model.temporal_state.y),
                 )
-            ):
+            )
+            fallback_control_valid = (
+                fallback_id + 2 <= len(self.current_control)
+                and not np.all(
+                    self.current_control[
+                        fallback_id:fallback_id + 2] == 0.0)
+            )
+            fallback_allowed = can_reuse_prediction_fallback(
+                failure_cycle,
+                self.max_prediction_fallback_cycles,
+                fallback_prediction_valid,
+                fallback_control_valid,
+            )
+
+            if fallback_allowed:
+                u = np.array(
+                    self.current_control[fallback_id:fallback_id + 2])
+                max_delta = np.abs(u[1])
                 self.current_prediction = prediction_backup
+                self.used_prediction_fallback = True
             else:
+                # Do not drive indefinitely on an old prediction. Preserve
+                # steering continuity while commanding a full stop.
+                u = np.array([0.0, self.previous_steering])
+                max_delta = np.abs(self.previous_steering)
                 self.current_prediction = None
+                self.current_control = np.zeros_like(self.current_control)
+                self.recovery_requested = True
 
             self.infeasibility_counter += 1
 

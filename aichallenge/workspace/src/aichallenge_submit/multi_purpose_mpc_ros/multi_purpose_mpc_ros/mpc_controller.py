@@ -53,11 +53,13 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     evaluate_stopped_lead_overtake,
     lane_conflicts_are_clear,
     is_parallel_vehicle,
+    ordered_outer_lane_candidates,
     prediction_clears_moving_vehicle,
     predictions_to_obstacles,
     relative_longitudinal_distance,
     select_latched_overtake_lane,
     should_release_latched_overtake_lane,
+    should_start_prepass_recovery_from_safety,
 )
 
 # Multi_Purpose_MPC
@@ -467,6 +469,11 @@ class MPCController(Node):
                 mpc_cfg.use_max_kappa_pred,
                 mpc_cfg.understeer_coeff)
 
+            mpc.solve_time_budget_ms = max(float(getattr(
+                cfg_mpc, "solve_time_budget_ms", 20.0)), 0.0)
+            mpc.max_prediction_fallback_cycles = max(int(getattr(
+                cfg_mpc, "max_prediction_fallback_cycles", 3)), 0)
+
 
             return mpc_cfg, mpc
 
@@ -559,6 +566,18 @@ class MPCController(Node):
         self._trajectory: Optional[Trajectory] = None
         self._last_lane_change_time = None
         self._target_lane_idx = None
+        self._mpc_safety_recovery_active = False
+        self._mpc_safety_recovery_success_cycles = 0
+        self._mpc_safety_recovery_success_sec = max(float(getattr(
+            cfg_mpc, "safety_recovery_success_sec", 0.5)), 0.0)
+        self._mpc_safety_recovery_success_required_cycles = max(
+            1,
+            int(math.ceil(
+                self._mpc_safety_recovery_success_sec
+                * float(cfg_mpc.control_rate)
+            )),
+        )
+        self._mpc_prediction_fallback_cycles = 0
 
         switch_cfg = getattr(self._cfg, "trajectory_switch", None)
         self._trajectory_enter_center_wps = int(
@@ -637,6 +656,16 @@ class MPCController(Node):
             prepass_fallback_cfg, "follow_target_lost_hold_sec", 1.0)), 0.0)
         self._follow_target_lost_max_speed = max(float(getattr(
             prepass_fallback_cfg, "follow_target_lost_max_speed", 1.0)), 0.0)
+        follow_cfg = getattr(self._cfg, "follow_control", None)
+        self._follow_only = bool(getattr(follow_cfg, "follow_only", False))
+        self._follow_engage_distance = max(float(getattr(
+            follow_cfg, "engage_distance", 15.0)), 0.0)
+        self._follow_desired_distance = max(float(getattr(
+            follow_cfg, "desired_distance", 8.0)), 0.0)
+        self._follow_lateral_distance = max(float(getattr(
+            follow_cfg, "lateral_distance", 1.2)), 0.0)
+        self._follow_spacing_kp = max(float(getattr(
+            follow_cfg, "spacing_kp", 1.2)), 0.0)
         self._prepass_fallback_lane_idx = None
         self._prepass_fallback_blocked = False
         self._prepass_fallback_follow_active = False
@@ -648,6 +677,7 @@ class MPCController(Node):
         self._prepass_fallback_recovery_active = False
         self._prepass_fallback_recovery_stable_since = None
         self._prepass_fallback_recovery_started_at = None
+        self._prepass_failed_lane_idx = None
         self._follow_latched_cache = None
         overtake_cfg = getattr(self._cfg, "stopped_vehicle_overtake", None)
         self._stopped_lead_speed_threshold = float(
@@ -680,6 +710,7 @@ class MPCController(Node):
             restart_cfg, "duration", 1.0))
         self._follow_stopped_vehicle_id = None
         self._follow_restart_until = 0.0
+        self._intentional_follow_stop_active = False
 
         start_boost_cfg = getattr(self._cfg, "initial_start_boost", None)
         self._initial_start_boost_enabled = bool(getattr(
@@ -778,9 +809,17 @@ class MPCController(Node):
 
         self._stuck_recovery_enabled = bool(get_cfg("enabled", True))
         self._stuck_speed_threshold = float(get_cfg("speed_threshold", 0.15))
+        self._mpc_stall_speed_threshold = max(float(get_cfg(
+            "mpc_stall_speed_threshold", 0.4)), 0.0)
         self._stuck_forward_cmd_threshold = float(get_cfg("forward_cmd_threshold", 0.8))
         self._stuck_time_threshold = float(get_cfg("stuck_time_threshold", 2.0))
         self._stuck_gnss_distance_threshold = float(get_cfg("gnss_distance_threshold", 0.3))
+        self._stuck_forward_resume_gap = max(float(get_cfg(
+            "forward_resume_gap", 4.0)), 0.0)
+        self._stuck_forward_resume_lead_speed = max(float(get_cfg(
+            "forward_resume_lead_speed", 0.5)), 0.0)
+        self._stuck_forward_resume_min_command = max(float(get_cfg(
+            "forward_resume_min_command", 0.3)), 0.0)
         self._stuck_reverse_duration = float(get_cfg("reverse_duration", 3.0))
         self._stuck_cooldown = float(get_cfg("cooldown", 2.0))
         self._stuck_forward_reverse_speed = abs(float(get_cfg("reverse_speed", 1.0)))
@@ -803,6 +842,10 @@ class MPCController(Node):
         self._stuck_pre_reverse_duration = float(get_cfg("pre_reverse_duration", 0.0))
         self._stuck_gear_shift_delay = float(get_cfg("gear_shift_delay", 1.0))
         self._stuck_max_shift_wait = float(get_cfg("max_shift_wait", 5.0))
+        self._stuck_drive_request_resend_sec = max(float(get_cfg(
+            "drive_request_resend_sec", 0.5)), 0.0)
+        self._stuck_reverse_request_resend_sec = max(float(get_cfg(
+            "reverse_request_resend_sec", 0.5)), 0.0)
         self._stuck_collision_window = float(get_cfg("collision_window", 20.0))
         self._stuck_collision_count_threshold = int(get_cfg("collision_count_threshold", 3))
         self._stuck_use_actuation_cmd = bool(get_cfg("use_actuation_cmd", True))
@@ -817,9 +860,12 @@ class MPCController(Node):
         self._stuck_drive_gear_command_override = get_cfg("drive_gear_command", None)
         self._stuck_pre_reverse_gear_command_override = get_cfg("pre_reverse_gear_command", None)
         self._last_stuck_gear_command = None
+        self._stuck_last_drive_request_at = None
+        self._stuck_last_reverse_request_at = None
         self._stuck_reverse_drive_after = None
         self._stuck_reverse_drive_active = False
         self._stuck_recovery_started_at = None
+        self._stuck_reverse_start_target_longitudinal = None
         self._stuck_pre_reverse_until = None
         self._gear_report = None
         self._control_mode_report = None
@@ -858,6 +904,8 @@ class MPCController(Node):
                 "[StuckRecovery] enabled: "
                 f"speed<{self._stuck_speed_threshold:.2f}m/s for "
                 f"{self._stuck_time_threshold:.1f}s -> reverse "
+                f"(MPC recovery: speed<={self._mpc_stall_speed_threshold:.2f}m/s "
+                "with GNSS stationary) "
                 f"mode={self._stuck_reverse_command_mode} "
                 f"speed={self._stuck_forward_reverse_speed:.2f} "
                 f"accel={abs(self._stuck_reverse_acceleration):.2f} "
@@ -1080,10 +1128,12 @@ class MPCController(Node):
             u[0] = -abs(self._stuck_reverse_speed)
         u[1] *= self._stuck_reverse_steering_scale
 
-    def _publish_gear_command(self, now, command: int) -> None:
+    def _publish_gear_command(
+        self, now, command: int, *, force: bool = False
+    ) -> None:
         if not self._stuck_send_gear_command or GearCommand is None or self._gear_cmd_pub is None:
             return
-        if self._last_stuck_gear_command == command:
+        if not force and self._last_stuck_gear_command == command:
             return
         msg = GearCommand()
         msg.stamp = now.to_msg()
@@ -1300,7 +1350,9 @@ class MPCController(Node):
                 f"passage={passage}, conflicts={conflicts}"
             )
 
-    def _select_prepass_retry_lane(self, pose, ego_speed: float, preferred=None):
+    def _select_prepass_retry_lane(
+        self, pose, ego_speed: float, preferred=None, exclude_lane_idx=None
+    ):
         """Re-evaluate a retry lane from the latest samples and latched target."""
         passage, target_distance = self._latched_target_passage(pose)
         samples = self._relative_lane_vehicle_samples(pose, ego_speed)
@@ -1315,7 +1367,7 @@ class MPCController(Node):
             for lane_idx in (0, 2)
         }
         preferred = preferred if preferred in (0, 2) else self._overtake_lane_idx
-        order = (2 if preferred == 0 else 0, preferred)
+        order = ordered_outer_lane_candidates(preferred, exclude_lane_idx)
         lane_idx = next((
             candidate for candidate in order
             if candidate in (0, 2)
@@ -1330,6 +1382,7 @@ class MPCController(Node):
         self._prepass_fallback_recovery_active = False
         self._prepass_fallback_recovery_stable_since = None
         self._prepass_fallback_recovery_started_at = None
+        self._prepass_failed_lane_idx = None
         self._prepass_retry_after_reverse = False
         self._prepass_retry_lane_idx = None
         self._forced_overtake_vehicle_id = None
@@ -1385,13 +1438,60 @@ class MPCController(Node):
         )
         return {
             "vehicle_id": target_id,
+            "x": target_x,
+            "y": target_y,
             "distance": math.hypot(target_x - pose.x, target_y - pose.y),
+            "longitudinal": relative_longitudinal_distance(
+                target_x - pose.x, target_y - pose.y, pose.theta),
             "speed": math.hypot(velocity_x, velocity_y),
             "offset": target_offset,
             "velocity_valid": velocity_valid,
             "stale": stale,
             "expired": False,
         }
+
+    def _reverse_forward_resume_ready(
+        self, pose, now_sec: float, u, ego_speed: float
+    ):
+        """Return whether an active reverse can safely hand back to DRIVE."""
+        target = self._latched_follow_target_state(pose, now_sec)
+        if target is None or target.get("expired", False):
+            return False, ""
+
+        longitudinal = float(target["longitudinal"])
+        lead_speed = float(target["speed"])
+        start_longitudinal = self._stuck_reverse_start_target_longitudinal
+        lead_advance = (
+            longitudinal - start_longitudinal
+            if start_longitudinal is not None else None
+        )
+        front_has_advanced = (
+            lead_advance is not None
+            and lead_advance >= self._stuck_forward_resume_gap
+            and target.get("velocity_valid", False)
+            and lead_speed >= self._stuck_forward_resume_lead_speed
+        )
+        valid_forward_mpc = (
+            longitudinal > 0.0
+            and self._mpc.infeasibility_counter == 0
+            and self._mpc.current_prediction is not None
+            and not getattr(self._mpc, "used_prediction_fallback", False)
+            and not self._mpc_safety_recovery_active
+            and float(u[0]) >= self._stuck_forward_resume_min_command
+        )
+        retry_lane_idx, _, _ = self._select_prepass_retry_lane(
+            pose, ego_speed, self._overtake_lane_idx)
+        current_pose_has_passage = retry_lane_idx is not None
+
+        if front_has_advanced and valid_forward_mpc and current_pose_has_passage:
+            return True, (
+                "latched lead advanced with a valid forward path: "
+                f"advance={lead_advance:.2f}m, "
+                f"longitudinal={longitudinal:.2f}m, "
+                f"speed={lead_speed:.2f}m/s, lane=L{retry_lane_idx}, "
+                f"u0={float(u[0]):.2f}m/s"
+            )
+        return False, ""
 
     def _release_lost_follow_target(self) -> None:
         lost_id = self._overtake_target_vehicle_id
@@ -1517,6 +1617,18 @@ class MPCController(Node):
             throttle_duration_sec=1.0,
         )
 
+    def _begin_stuck_drive_transition(self, now_sec: float, reason: str) -> None:
+        """Stop and request DRIVE until AWSIM reports that the shift completed."""
+        self._stuck_reverse_drive_active = False
+        self._stuck_pre_reverse_until = None
+        self._stuck_pre_drive_until = None
+        self._stuck_wait_for_drive = True
+        self._stuck_recovery_until = now_sec + self._stuck_max_shift_wait
+        self._stuck_last_drive_request_at = None
+        self.get_logger().info(
+            f"[StuckRecovery] {reason}; starting DRIVE confirmation."
+        )
+
     def _apply_stuck_recovery(self, now, u, actual_speed: float, pose) -> bool:
         if not self._stuck_recovery_enabled:
             return False
@@ -1541,6 +1653,24 @@ class MPCController(Node):
                 self._stuck_pre_drive_until is not None
                 or self._stuck_wait_for_drive
             )
+            if not in_drive_transition:
+                forward_resume_ready, forward_resume_reason = (
+                    self._reverse_forward_resume_ready(
+                        pose, now_sec, u, actual_speed)
+                )
+                if forward_resume_ready:
+                    u[0] = 0.0
+                    u[1] = 0.0
+                    self._switch_prepass_to_follow(
+                        "front path became available during reverse; "
+                        "cancelling reverse and following the latched target"
+                    )
+                    self._begin_stuck_drive_transition(
+                        now_sec,
+                        "cancelling REVERSE for forward recovery: "
+                        f"{forward_resume_reason}",
+                    )
+                    in_drive_transition = True
             if (
                 self._prepass_retry_after_reverse
                 and not in_drive_transition
@@ -1552,24 +1682,35 @@ class MPCController(Node):
                     "rear corridor became occupied before/during reverse; "
                     "aborting reverse and following the latched target"
                 )
-                self._stuck_reverse_drive_active = False
-                self._stuck_pre_reverse_until = None
-                self._stuck_pre_drive_until = now_sec
-                self._stuck_wait_for_drive = True
-                self._stuck_recovery_until = now_sec + self._stuck_max_shift_wait
+                self._begin_stuck_drive_transition(
+                    now_sec,
+                    "rear corridor became occupied before/during reverse",
+                )
 
             # 1. タイムアウト判定
             if now_sec >= self._stuck_recovery_until:
                 if self._stuck_reverse_drive_active:
                     # 後退駆動が終わったので、前進復帰シーケンスを開始する
-                    self._stuck_reverse_drive_active = False
-                    self._stuck_pre_drive_until = now_sec + 0.0
-                    self._stuck_recovery_until = now_sec + 5.0
-                    self._stuck_wait_for_drive = False
-                    self.get_logger().info("[StuckRecovery] Reverse drive finished. Starting drive transition...")
+                    self._begin_stuck_drive_transition(
+                        now_sec, "REVERSE drive finished"
+                    )
+                elif in_drive_transition:
+                    # Never resume normal control only because the nominal
+                    # shift wait expired. AWSIM may still be in REVERSE.
+                    self._stuck_recovery_until = (
+                        now_sec + self._stuck_max_shift_wait)
+                    self.get_logger().warn(
+                        "[StuckRecovery] DRIVE confirmation timed out; "
+                        "holding zero speed and retrying DRIVE request.",
+                        throttle_duration_sec=1.0,
+                    )
                 else:
-                    # トルク抜きやシフト待ちでタイムアウトした場合、あるいは前進復帰中のタイムアウト
-                    self._stuck_recovery_until = None
+                    # A REVERSE request may have been accepted even if its
+                    # report was delayed. Always leave through DRIVE confirm.
+                    self._begin_stuck_drive_transition(
+                        now_sec,
+                        "REVERSE confirmation timed out before drive began",
+                    )
 
             # 2. リカバリー動作中の処理
             if self._stuck_recovery_until is not None:
@@ -1593,10 +1734,18 @@ class MPCController(Node):
                     else:
                         self._stuck_pre_drive_until = None
                         self._stuck_wait_for_drive = True
-                        self._publish_gear_command(now, self._gear_drive_command)
+                        drive_request_due = (
+                            self._stuck_last_drive_request_at is None
+                            or now_sec - self._stuck_last_drive_request_at
+                                >= self._stuck_drive_request_resend_sec
+                        )
+                        if drive_request_due:
+                            self._publish_gear_command(
+                                now, self._gear_drive_command, force=True)
+                            self._stuck_last_drive_request_at = now_sec
 
                     waiting_for_drive = (
-                        pre_driving or (self._stuck_send_gear_command and gear_status_known and not gear_is_drive)
+                        pre_driving or not gear_is_drive
                     )
 
                     if waiting_for_drive:
@@ -1612,13 +1761,18 @@ class MPCController(Node):
                                 f"(current={getattr(self._gear_report, 'report', None)}).",
                                 throttle_duration_sec=1.0,
                             )
+                        else:
+                            self.get_logger().warn(
+                                "[StuckRecovery] waiting for AWSIM GearReport "
+                                "to confirm DRIVE; holding zero speed.",
+                                throttle_duration_sec=1.0,
+                            )
                         return True
                     else:
                         self._stuck_recovery_until = None  # シフト完了につき正常終了へ
 
                 # 後退（REVERSE）リカバリーシーケンス
                 else:
-                    gear_status_known = self._gear_report is not None
                     gear_is_reverse = self._current_gear_is_reverse()
                     if (
                         gear_is_reverse
@@ -1640,18 +1794,17 @@ class MPCController(Node):
                         self._publish_gear_command(now, self._gear_pre_reverse_command)
                     else:
                         self._stuck_pre_reverse_until = None
-                        self._publish_gear_command(now, self._gear_reverse_command)
-                    waiting_for_reverse = (
-                        (pre_shifting or self._stuck_wait_for_reverse_gear)
-                        and (
-                            pre_shifting
-                            or (gear_status_known and not gear_is_reverse)
-                            or (
-                                not gear_status_known
-                                and self._stuck_reverse_drive_after is not None
-                                and now_sec < self._stuck_reverse_drive_after
-                            )
+                        reverse_request_due = (
+                            self._stuck_last_reverse_request_at is None
+                            or now_sec - self._stuck_last_reverse_request_at
+                                >= self._stuck_reverse_request_resend_sec
                         )
+                        if reverse_request_due:
+                            self._publish_gear_command(
+                                now, self._gear_reverse_command, force=True)
+                            self._stuck_last_reverse_request_at = now_sec
+                    waiting_for_reverse = (
+                        pre_shifting or not gear_is_reverse
                     )
                     if waiting_for_reverse:
                         # Never send a positive speed while AWSIM may still be
@@ -1660,6 +1813,12 @@ class MPCController(Node):
                         u[0] = 0.0
                         u[1] = 0.0
                         self._stuck_reverse_drive_active = False
+                        if self._gear_report is None:
+                            self.get_logger().warn(
+                                "[StuckRecovery] waiting for AWSIM GearReport "
+                                "to confirm REVERSE; holding zero speed.",
+                                throttle_duration_sec=1.0,
+                            )
                     else:
                         self._apply_stuck_reverse_command(u)
                         self._publish_stuck_actuation_command(now, self._stuck_actuation_accel_cmd, 0.0, u[1])
@@ -1681,8 +1840,11 @@ class MPCController(Node):
             self._stuck_recovery_until = None
             self._stuck_cooldown_until = now_sec + self._stuck_cooldown
             self._stuck_since = None
+            self._stuck_reverse_start_target_longitudinal = None
             self._gnss_history = []
             self._last_stuck_gear_command = None
+            self._stuck_last_drive_request_at = None
+            self._stuck_last_reverse_request_at = None
             self._stuck_reverse_drive_after = None
             self._stuck_reverse_drive_active = False
             self._stuck_recovery_started_at = None
@@ -1749,6 +1911,13 @@ class MPCController(Node):
             self._stuck_since = None
             return False
 
+        if self._intentional_follow_stop_active:
+            # Stopping at the configured following gap is commanded behavior,
+            # not a vehicle stall. Do not turn that stop into reverse recovery.
+            self._stuck_since = None
+            self._gnss_history = []
+            return False
+
         # GNSSによる位置変化のチェック
         gnss_is_stuck = False
         gnss_moved_dist = None
@@ -1777,13 +1946,37 @@ class MPCController(Node):
         should_recover_from_close_obstacle = (
             self._close_obstacle_reverse_requested and is_stuck_state
         )
+        # MPC safety recovery intentionally sets u[0] to zero when no valid
+        # prediction exists. In that state, use low actual speed plus GNSS
+        # immobility instead of requiring a positive forward command.
+        should_recover_from_mpc_stall = (
+            self._mpc_safety_recovery_active
+            and abs(actual_speed) <= self._mpc_stall_speed_threshold
+            and gnss_is_stuck
+        )
         if is_stuck_state and (
             u[0] > self._stuck_forward_cmd_threshold
             or should_recover_from_close_obstacle
+            or should_recover_from_mpc_stall
         ):
             if self._stuck_since is None:
-                self._stuck_since = now_sec
+                # gnss_is_stuck already covers the observation period, so an
+                # MPC stall must not wait for the same duration a second time.
+                self._stuck_since = (
+                    now_sec - self._stuck_time_threshold
+                    if should_recover_from_mpc_stall
+                    else now_sec
+                )
             elif now_sec - self._stuck_since >= self._stuck_time_threshold:
+                if should_recover_from_mpc_stall:
+                    self.get_logger().warn(
+                        "[MPCStallRecovery] starting reverse after GNSS "
+                        f"movement stayed below "
+                        f"{self._stuck_gnss_distance_threshold:.2f}m for "
+                        f"{self._stuck_time_threshold:.1f}s at "
+                        f"speed={abs(actual_speed):.2f}m/s; "
+                        f"mpc_infeasible={self._mpc.infeasibility_counter}."
+                    )
                 self._stuck_recovery_until = now_sec + self._stuck_max_shift_wait
                 self._stuck_reverse_drive_after = now_sec + self._stuck_gear_shift_delay
                 self._stuck_pre_reverse_until = (
@@ -1792,12 +1985,21 @@ class MPCController(Node):
                     else None
                 )
                 self._stuck_recovery_started_at = None
+                target = self._latched_follow_target_state(pose, now_sec)
+                self._stuck_reverse_start_target_longitudinal = (
+                    float(target["longitudinal"])
+                    if target is not None and target["longitudinal"] > 0.0
+                    else None
+                )
                 self._last_stuck_gear_command = None
+                self._stuck_last_drive_request_at = None
+                self._stuck_last_reverse_request_at = None
                 self._request_awsim_control_mode_for_recovery()
                 if self._stuck_pre_reverse_until is not None:
                     self._publish_gear_command(now, self._gear_pre_reverse_command)
                 else:
                     self._publish_gear_command(now, self._gear_reverse_command)
+                    self._stuck_last_reverse_request_at = now_sec
                 u[0] = 0.0
                 u[1] = 0.0
                 self._stuck_reverse_drive_active = False
@@ -2926,7 +3128,17 @@ class MPCController(Node):
         left_is_free = False
         right_is_free = False
 
-        if opponent_ahead_detected and opponent_ahead is not None:
+        if (
+            self._follow_only
+            and opponent_ahead_detected
+            and opponent_ahead is not None
+        ):
+            # Follow-only mode keeps the Center trajectory and constrains the
+            # vehicle to L1. It must never create an L0/L2 overtake request.
+            new_target_lane_idx = 1
+            left_is_free = False
+            right_is_free = False
+        elif opponent_ahead_detected and opponent_ahead is not None:
             if is_overtake_zone:
                 opp_wp = self._reference_path.get_waypoint(opponent_ahead)
                 # 追い越しに必要な最小の横方向スペース [m] (自車幅 + 相手車幅半分 + マージン)
@@ -3007,6 +3219,15 @@ class MPCController(Node):
             overtake_latch_started = False
             self._overtake_lane_idx = None
             self._outer_lane_released_vehicle_id = None
+        elif self._follow_only:
+            overtake_latch_started = False
+            self._overtake_target_vehicle_id = None
+            self._overtake_lane_idx = None
+            self._outer_lane_released_vehicle_id = None
+            self._prepass_fallback_lane_idx = None
+            self._prepass_fallback_blocked = False
+            self._prepass_fallback_follow_active = False
+            self._prepass_fallback_recovery_active = False
         else:
             (
                 new_target_lane_idx,
@@ -3106,6 +3327,7 @@ class MPCController(Node):
         )
         if (
             lead_is_stationary
+            and not self._follow_only
             and not self._prepass_fallback_follow_active
             and not self._parallel_abort_active
         ):
@@ -3181,6 +3403,7 @@ class MPCController(Node):
             self._prepass_fallback_recovery_active = True
             self._prepass_fallback_recovery_stable_since = None
             self._prepass_fallback_recovery_started_at = current_time_sec
+            self._prepass_failed_lane_idx = self._overtake_lane_idx
             self.get_logger().warn(
                 "[PrepassLaneFallbackRecovery] fixed lane became infeasible; "
                 "releasing lane constraint to full width before selecting "
@@ -3189,6 +3412,11 @@ class MPCController(Node):
             )
 
         if self._prepass_fallback_recovery_active:
+            failed_lane_idx = (
+                self._prepass_failed_lane_idx
+                if self._prepass_failed_lane_idx in (0, 2)
+                else self._overtake_lane_idx
+            )
             if self._prepass_fallback_recovery_started_at is None:
                 self._prepass_fallback_recovery_started_at = current_time_sec
             recovery_total_elapsed = (
@@ -3205,7 +3433,11 @@ class MPCController(Node):
                 self._prepass_fallback_recovery_started_at = None
                 retry_lane_idx, latched_target_distance, passage_conflicts = (
                     self._select_prepass_retry_lane(
-                        pose, v, self._overtake_lane_idx)
+                        pose,
+                        v,
+                        failed_lane_idx,
+                        exclude_lane_idx=failed_lane_idx,
+                    )
                 )
                 reverse_rear_clear = self._reverse_rear_is_clear(pose, v)
 
@@ -3255,6 +3487,7 @@ class MPCController(Node):
                     f"heading_error={math.degrees(center_heading_error):.1f}deg, "
                     f"conflicts={passage_conflicts}"
                 )
+                self._prepass_failed_lane_idx = None
 
             # Full-width recovery must be stable both numerically and
             # dynamically before committing to another narrow lane. Reuse the
@@ -3298,7 +3531,7 @@ class MPCController(Node):
                 relative_samples = self._relative_lane_vehicle_samples(pose, v)
                 physical_passage, _ = self._latched_target_passage(pose)
                 opposite_outer_lane = (
-                    2 if self._overtake_lane_idx == 0 else 0)
+                    2 if failed_lane_idx == 0 else 0)
                 candidate_conflicts = {}
                 for candidate_lane_idx in (opposite_outer_lane, 1):
                     candidate_conflicts[candidate_lane_idx] = (
@@ -3328,7 +3561,7 @@ class MPCController(Node):
                 self._prepass_fallback_recovery_stable_since = None
                 self._prepass_fallback_recovery_started_at = None
                 if selected_fallback_lane is not None:
-                    previous_lane = self._overtake_lane_idx
+                    previous_lane = failed_lane_idx
                     if selected_fallback_lane == 1:
                         self._prepass_fallback_lane_idx = None
                         self._l1_probe_active = True
@@ -3354,6 +3587,7 @@ class MPCController(Node):
                         "both fallback lanes are unsafe; switching to "
                         f"follow: conflicts={candidate_conflicts}"
                     )
+                self._prepass_failed_lane_idx = None
 
         # Check if vehicle is in or near a curve based on waypoint ranges (when following centerline)
         is_curve_locked = False
@@ -3479,6 +3713,11 @@ class MPCController(Node):
                     "overtake selection."
                 )
 
+        if self._mpc_safety_recovery_active:
+            # Solver recovery exclusively owns lateral selection. No
+            # overtake/rejoin/start state may narrow the next MPC problem.
+            new_target_lane_idx = None
+
         if new_target_lane_idx != prev_lane_idx:
             can_change_lane = True
             
@@ -3519,6 +3758,10 @@ class MPCController(Node):
                 self._prepass_fallback_recovery_active
                 or self._prepass_fallback_blocked
             ):
+                can_change_lane = True
+            if self._mpc_safety_recovery_active:
+                # Releasing an unsafe lane constraint must bypass the normal
+                # lane-change cooldown.
                 can_change_lane = True
             if can_change_lane:
                 self._target_lane_idx = new_target_lane_idx
@@ -3637,6 +3880,87 @@ class MPCController(Node):
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
 
+        if self._mpc.used_prediction_fallback:
+            self._mpc_prediction_fallback_cycles += 1
+        elif self._mpc.infeasibility_counter == 0:
+            self._mpc_prediction_fallback_cycles = 0
+
+        max_fallback_cycles = max(int(getattr(
+            self._cfg.mpc, "max_prediction_fallback_cycles", 3)), 0)
+        if self._mpc_prediction_fallback_cycles > max_fallback_cycles:
+            # Keep the limit valid even when Race/Center switches between two
+            # MPC instances during one failure sequence.
+            self._mpc.current_prediction = None
+            self._mpc.current_control = np.zeros_like(
+                self._mpc.current_control)
+            self._mpc.used_prediction_fallback = False
+            self._mpc.recovery_requested = True
+            self._mpc.failure_reason = (
+                "prediction fallback exceeded controller-wide limit "
+                f"({max_fallback_cycles} cycles)")
+
+        applied_lane_idx = (
+            self._reference_path.target_lane_idx
+            if self._reference_path.is_overtaking else None
+        )
+        if should_start_prepass_recovery_from_safety(
+            recovery_requested=self._mpc.recovery_requested,
+            fallback_enabled=self._prepass_lane_fallback_enabled,
+            applied_lane_idx=applied_lane_idx,
+            latched_vehicle_id=self._overtake_target_vehicle_id,
+            opponent_ahead=opponent_ahead_detected,
+            fallback_recovery_active=self._prepass_fallback_recovery_active,
+            fallback_follow_active=self._prepass_fallback_follow_active,
+        ):
+            self._prepass_failed_lane_idx = applied_lane_idx
+            self._overtake_lane_idx = applied_lane_idx
+            self._prepass_fallback_lane_idx = None
+            self._prepass_fallback_blocked = False
+            self._prepass_fallback_recovery_active = True
+            self._prepass_fallback_recovery_stable_since = None
+            self._prepass_fallback_recovery_started_at = current_time_sec
+            self.get_logger().warn(
+                "[PrepassLaneFallbackSafetyTrigger] outer-lane MPC failure "
+                "starts full-width fallback recovery immediately: "
+                f"vehicle_id={self._overtake_target_vehicle_id}, "
+                f"failed_lane=L{applied_lane_idx}, "
+                f"mpc_infeasible={self._mpc.infeasibility_counter}, "
+                f"reason={self._mpc.failure_reason}"
+            )
+
+        if self._mpc.recovery_requested:
+            if not self._mpc_safety_recovery_active:
+                self.get_logger().error(
+                    "[MPCSafetyRecovery] discarding stale prediction and "
+                    "switching to full-width recovery: "
+                    f"reason={self._mpc.failure_reason}, "
+                    f"failed_cycles={self._mpc.infeasibility_counter}, "
+                    f"time_budget_exceeded="
+                    f"{self._mpc.time_budget_exceeded}"
+                )
+            self._mpc_safety_recovery_active = True
+            self._mpc_safety_recovery_success_cycles = 0
+            u[0] = 0.0
+        elif self._mpc_safety_recovery_active:
+            if (
+                self._mpc.infeasibility_counter == 0
+                and self._mpc.current_prediction is not None
+            ):
+                self._mpc_safety_recovery_success_cycles += 1
+                if (
+                    self._mpc_safety_recovery_success_cycles
+                    >= self._mpc_safety_recovery_success_required_cycles
+                ):
+                    self._mpc_safety_recovery_active = False
+                    self._mpc_safety_recovery_success_cycles = 0
+                    self.get_logger().info(
+                        "[MPCSafetyRecovery] full-width MPC recovered for "
+                        f"{self._mpc_safety_recovery_success_sec:.2f}s "
+                        "continuously; normal lane selection resumed."
+                    )
+            else:
+                self._mpc_safety_recovery_success_cycles = 0
+
         forced_overtake_prediction_clear = (
             forced_overtake_active
             and not in_transition
@@ -3657,11 +3981,13 @@ class MPCController(Node):
         follow_restart_active = False
         follow_restart_target = 0.0
         follow_target_expired = False
+        follow_control_active = False
+        intentional_follow_stop_active = False
         if self.USE_OBSTACLE_AVOIDANCE:
             # --- ACC spacing control (車間距離維持制御) ---
             # 前方車両がいて、かつ自車の走行ライン上（横方向の差が 1.2m 未満）に他車が位置する場合に
-            # 追従状態とみなして車間制御（5m〜10m）を有効化する。
-            # 横方向の差が 1.2m 以上の場合は、別車線での追い越し中とみなして加速を許可する。
+            # 追従状態とみなして、設定された距離内で車間制御を有効化する。
+            # 横方向の差が設定値以上の場合は、別車線の車両として扱う。
             acc_vehicle_id = opponent_vehicle_id
             acc_distance = opponent_distance
             acc_lead_speed = opponent_v_lead
@@ -3698,19 +4024,26 @@ class MPCController(Node):
             if (
                 (opponent_ahead is not None or latched_follow_state is not None)
                 and (
-                    lat_dist < 1.2
+                    lat_dist < self._follow_lateral_distance
                     or self._prepass_fallback_follow_active
                 )
                 and not forced_overtake_active
-                and not initial_start_boost_active
+                and (
+                    not initial_start_boost_active
+                    or self._follow_only
+                )
             ):
                 if follow_target_expired:
                     ref_vel_kmph = 0.0
                     self._release_lost_follow_target()
-                elif acc_distance < 15.0:
-                    d_target = 8.0 # 目標車間距離 (5m 〜 10m の中央値 7.5m)
-                    K_p = 1.2       # 比例ゲイン
-                    v_ref_acc = acc_lead_speed + K_p * (acc_distance - d_target)
+                elif acc_distance < self._follow_engage_distance:
+                    follow_control_active = True
+                    v_ref_acc = (
+                        acc_lead_speed
+                        + self._follow_spacing_kp * (
+                            acc_distance - self._follow_desired_distance
+                        )
+                    )
                     v_ref_acc = max(0.0, v_ref_acc)  # 後退は禁止のため下限は0
 
                     if (
@@ -3729,6 +4062,22 @@ class MPCController(Node):
                         and acc_lead_speed
                             < self._stopped_lead_speed_threshold
                     )
+                    intentional_follow_stop_active = (
+                        self._follow_only
+                        and lead_is_stopped_for_follow
+                        and acc_distance <= self._follow_desired_distance
+                    )
+                    if intentional_follow_stop_active:
+                        ref_vel_kmph = 0.0
+                        follow_restart_active = False
+                        self.get_logger().info(
+                            "[FollowOnlyStop] stopped lead reached the target "
+                            f"gap: vehicle_id={acc_vehicle_id}, "
+                            f"distance={acc_distance:.2f}m/"
+                            f"{self._follow_desired_distance:.2f}m; "
+                            "holding speed at zero.",
+                            throttle_duration_sec=1.0,
+                        )
                     if ego_is_stopped and lead_is_stopped_for_follow:
                         self._follow_stopped_vehicle_id = acc_vehicle_id
                         self._follow_restart_until = 0.0
@@ -4088,10 +4437,18 @@ class MPCController(Node):
 
         if (
             initial_start_boost_active
+            and not follow_control_active
             and not emergency_brake_active
             and not self._close_obstacle_reverse_requested
         ):
             ref_vel_kmph = self._mpc_cfg.v_max
+        if self._mpc_safety_recovery_active:
+            # Apply after every longitudinal override so recovery cannot be
+            # accelerated by start boost or follow restart.
+            ref_vel_kmph = min(
+                ref_vel_kmph,
+                float(getattr(
+                    self._cfg.mpc, "safety_recovery_speed", 1.0)))
         self._mpc.update_v_max(ref_vel_kmph)
         v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
         self._reference_path.set_v_ref(v_ref)
@@ -4107,12 +4464,24 @@ class MPCController(Node):
                 u[0] = max(u[0], follow_restart_target)
         if (
             initial_start_boost_active
+            and not follow_control_active
             and not emergency_brake_active
             and not self._close_obstacle_reverse_requested
         ):
             u[0] = max(u[0], ref_vel_kmph)
         if emergency_brake_active or self._close_obstacle_reverse_requested:
             u[0] = min(u[0], ref_vel_kmph)
+        if intentional_follow_stop_active:
+            # The MPC solve above still contains the previous cycle's speed
+            # limit, so apply the newly detected stop immediately as well.
+            u[0] = 0.0
+        if self._mpc_safety_recovery_active:
+            # The trigger cycle remains stopped. Valid full-width solves may
+            # creep at the configured recovery speed on later cycles.
+            if self._mpc.recovery_requested:
+                u[0] = 0.0
+            else:
+                u[0] = min(u[0], ref_vel_kmph)
 
         # 停止命令がコマンドで入力させたら減速させる
         if not self._enable_control:
@@ -4127,6 +4496,7 @@ class MPCController(Node):
             self.get_logger().error("No control signal", throttle_duration_sec=1)
             u = [0.0, 0.0]
 
+        self._intentional_follow_stop_active = intentional_follow_stop_active
         recovering_from_stuck = self._apply_stuck_recovery(now, u, v, pose)
 
         acc = 0.
@@ -4156,7 +4526,11 @@ class MPCController(Node):
                 throttle_duration_sec=1.0,
             )
             self._pred_marker_color = YELLOW
-        elif emergency_brake_active or self._close_obstacle_reverse_requested:
+        elif (
+            emergency_brake_active
+            or self._close_obstacle_reverse_requested
+            or intentional_follow_stop_active
+        ):
             bug_acc_enabled = False
             acc = np.clip(
                 self.KP * (u[0] - abs(v)),
@@ -4172,7 +4546,7 @@ class MPCController(Node):
             )
             acc = np.clip(acc, 0.0, self._mpc_cfg.a_max)
             self._pred_marker_color = CYAN
-        elif initial_start_boost_active:
+        elif initial_start_boost_active and not follow_control_active:
             bug_acc_enabled = False
             acc = self._mpc_cfg.a_max
             self._pred_marker_color = CYAN

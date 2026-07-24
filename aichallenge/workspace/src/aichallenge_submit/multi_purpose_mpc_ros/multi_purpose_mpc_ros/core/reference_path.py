@@ -1010,16 +1010,16 @@ class ReferencePath:
                 angle_ub = np.mod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
                 
                 if target_lane == 0:  # 右車線 (L0)
-                    # 左端 (ub_p, イエローライン側) は L0 の下限 (lb_lane) を使用
-                    ub_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
+                    # 左端は L0 の上限。下限を使うと走査幅がほぼゼロになる。
+                    ub_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
                     ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
                     # 右端 (lb_p, コース境界側) はマップ本来の右端 static_border_cells[1] を直接使用
                     lb_p = self.map.w2m(wp.static_border_cells[1][0], wp.static_border_cells[1][1])
                 elif target_lane == 2:  # 左車線 (L2)
                     # 左端 (ub_p, コース境界側) はマップ本来の左端 static_border_cells[0] を直接使用
                     ub_p = self.map.w2m(wp.static_border_cells[0][0], wp.static_border_cells[0][1])
-                    # 右端 (lb_p, イエローライン側) は L2 の上限 (ub_lane) を使用
-                    lb_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
+                    # 右端は L2 の下限。上限を使うと走査幅がほぼゼロになる。
+                    lb_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
                     lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
                 else:  # 中央車線 (L1) またはその他
                     ub_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
