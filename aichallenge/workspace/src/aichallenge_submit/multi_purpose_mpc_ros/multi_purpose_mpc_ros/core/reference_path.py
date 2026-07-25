@@ -18,6 +18,12 @@ WAYPOINTS = '#D0D3D4'
 PATH_CONSTRAINTS = '#F5B041'
 OBSTACLE = '#2E4053'
 
+# Keep a small clearance only from the physical outside edges of the course.
+# Since ub is the left course edge and lb is the right course edge, this
+# becomes the outside margin of L2 and L0 respectively.  It must not be
+# applied to the lane boundaries adjoining L1.
+OUTER_COURSE_MARGIN = 0.3
+
 
 def dist(x1, y1, x2, y2):
     return np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
@@ -103,6 +109,24 @@ def has_collision_in_line(map, p0, p1):
         return True
     else:
         return False
+
+
+def lane_constraint_margins(target_lane, safety_margin):
+    """Return (upper, lower) margins for a dynamic free-space segment.
+
+    A selected L0/L1/L2 corridor already uses lane boundaries generated from
+    course bounds whose physical outside edges include OUTER_COURSE_MARGIN.
+    Applying the model safety margin again to both sides used to consume up to
+    40 percent of each side of a lane and also narrowed the boundary adjoining
+    L1.  Selected lanes therefore receive no additional dynamic edge margin.
+
+    Full-width driving (target_lane is None) retains the normal model safety
+    margin on both physical course edges for recovery and ordinary Race mode.
+    """
+    margin = max(float(safety_margin), 0.0)
+    if target_lane in (0, 1, 2):
+        return 0.0, 0.0
+    return margin, margin
 
 ############
 # Waypoint #
@@ -777,13 +801,11 @@ class ReferencePath:
         ub_arr = self.bounds[:,1]
         lb_arr = self.bounds[:,2]
 
-        # 車両のマージンを考慮して幅を少し狭める
-        # During overtaking, we keep the same constraints and rely on
-        # target_lane positioning in MPC. Do NOT narrow constraints here.
-        MARGIN = 0.3
-
-        ub_arr = ub_arr - MARGIN
-        lb_arr = lb_arr + MARGIN
+        # Apply 0.3 m only to the two physical outside course edges.  Lane
+        # splitting happens after this operation, so no extra margin is added
+        # at the L0-L1 or L1-L2 boundaries.
+        ub_arr = ub_arr - OUTER_COURSE_MARGIN  # left outside edge (L2 side)
+        lb_arr = lb_arr + OUTER_COURSE_MARGIN  # right outside edge (L0 side)
 
         # 最低幅の保証（自車の幅 2.0m に対して、最低でも 2.2m の全幅を確保）
         center = (ub_arr + lb_arr) / 2.0 #中心線
@@ -1092,14 +1114,16 @@ class ReferencePath:
         lower_bounds = []
         dynamic_upper_bounds = []
         dynamic_lower_bounds = []
+        upper_margin, lower_margin = lane_constraint_margins(
+            getattr(self, 'target_lane_idx', None), safety_margin)
 
         for wp_id in range(self.n_waypoints-1):
             for n in range(N):
                 wp = self.get_waypoint(wp_id+n)
 
                 # Subtract safety margin
-                ub_sm = wp.ub - safety_margin
-                lb_sm = wp.lb + safety_margin
+                ub_sm = wp.ub - upper_margin
+                lb_sm = wp.lb + lower_margin
 
                 # Check feasibility of the path after subtracting safety margin
                 if ub_sm < lb_sm:
@@ -1136,14 +1160,16 @@ class ReferencePath:
         lower_bounds = []
         dynamic_upper_bounds = []
         dynamic_lower_bounds = []
+        upper_margin, lower_margin = lane_constraint_margins(
+            getattr(self, 'target_lane_idx', None), safety_margin)
 
         for n in range(N):
             # print(f"wp_id: {wp_id}, N: {N}, n: {n}")
             wp = self.get_waypoint(wp_id+n)
 
             # Subtract safety margin
-            ub_sm = wp.ub - safety_margin
-            lb_sm = wp.lb + safety_margin
+            ub_sm = wp.ub - upper_margin
+            lb_sm = wp.lb + lower_margin
 
             # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
@@ -1231,16 +1257,10 @@ class ReferencePath:
 
             segment_length = ub - lb
             
-            # 追い越し中（target_lane が設定されているとき）は、安全マージンが車線幅に対して大きすぎる場合に
-            # コリドーが潰れてしまわないよう、safety_margin を車線幅の 40% 以下に自動制限する
-            active_safety_margin = safety_margin
             target_lane = getattr(self, 'target_lane_idx', None)
-            if target_lane is not None:
-                max_margin = segment_length * 0.4
-                if active_safety_margin > max_margin:
-                    active_safety_margin = max(max_margin, 0.05)
-
-            segment_length_sm = segment_length - 2.0 * active_safety_margin
+            upper_margin, lower_margin = lane_constraint_margins(
+                target_lane, safety_margin)
+            segment_length_sm = segment_length - upper_margin - lower_margin
 
             # Check feasibility of the path
             # segment_lengthから両側のsafety_marginを引いた値がmin_segment_lengthより小さい場合は、
@@ -1251,12 +1271,13 @@ class ReferencePath:
                 # print(f"Waypoint: {wp_id}, n: {n}, Upper bound: {ub}")
                 # print(f"min_width: {min_width}, safety_margin: {safety_margin}, segment_length: {segment_length}, segment_length_sm: {segment_length_sm}")
                 (ub, lb) = (wp.ub, wp.lb)
-                active_safety_margin = safety_margin
+                upper_margin, lower_margin = lane_constraint_margins(
+                    target_lane, safety_margin)
                 # print(f"Updated Upper bound: {wp.ub}, Updated Lower bound: {wp.lb}")
 
             # Subtract safety margin
-            ub_sm = ub - active_safety_margin
-            lb_sm = lb + active_safety_margin
+            ub_sm = ub - upper_margin
+            lb_sm = lb + lower_margin
 
             if wp.ub_sm < ub_sm:
               ub_sm = wp.ub_sm

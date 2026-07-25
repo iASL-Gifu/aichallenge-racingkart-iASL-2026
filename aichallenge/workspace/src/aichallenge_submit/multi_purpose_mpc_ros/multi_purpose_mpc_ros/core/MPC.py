@@ -235,6 +235,12 @@ class MPC:
         self.time_budget_exceeded = False
         self.recovery_requested = False
         self.failure_reason = None
+        # Snapshot of the exact corridor used by the latest solve attempt.
+        # These values remain available after an infeasible solve so the
+        # controller can diagnose lane-bound and obstacle-induced failures.
+        self._constraint_wp_ids = np.array([], dtype=int)
+        self._constraint_target_lane = None
+        self._constraint_safety_margin = 0.0
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
         self.optimizer = osqp.OSQP()
@@ -395,6 +401,20 @@ class MPC:
         t_linearize = time.perf_counter()
 
         # Update path constraints
+        self._constraint_wp_ids = np.array([
+            (self.model.wp_id + 1 + n)
+            % self.model.reference_path.n_waypoints
+            for n in range(N)
+        ], dtype=int)
+        self._constraint_target_lane = getattr(
+            self.model.reference_path, 'target_lane_idx', None)
+        # Selected lanes no longer receive the former symmetric 40%-of-lane
+        # margin.  Keep the diagnostic snapshot aligned with the bounds that
+        # reference_path actually sends to the solver.
+        self._constraint_safety_margin = (
+            0.0 if self._constraint_target_lane in (0, 1, 2)
+            else float(safety_margin)
+        )
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
                 self.model.wp_id + 1,

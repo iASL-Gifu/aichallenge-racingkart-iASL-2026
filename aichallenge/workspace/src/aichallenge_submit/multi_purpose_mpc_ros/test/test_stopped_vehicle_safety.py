@@ -4,16 +4,32 @@ import unittest
 
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     absolute_heading_difference,
+    classify_prepass_timeout_reasons,
     classify_lane_conflicts,
+    circular_forward_progress,
+    continuous_condition_confirmed,
     evaluate_stopped_lead_overtake,
+    is_follow_target_ahead,
+    is_follow_retry_within_distance,
+    is_prepass_fallback_lane_change,
     lane_conflicts_are_clear,
     is_parallel_vehicle,
     ordered_outer_lane_candidates,
+    ordered_prepass_fallback_candidates,
+    prepass_recovery_owns_lane_selection,
     prediction_clears_moving_vehicle,
     relative_longitudinal_distance,
     select_latched_overtake_lane,
     should_release_latched_overtake_lane,
+    should_reevaluate_follow_overtake,
+    should_count_mpc_recovery_success,
+    should_recover_from_mpc_stall,
+    should_release_prepass_distance_gate,
+    should_start_l1_recovery_from_safety,
     should_start_prepass_recovery_from_safety,
+    should_exit_l1_probe_backoff,
+    update_continuous_condition_since,
+    update_fallback_commit_success_since,
 )
 
 
@@ -60,8 +76,133 @@ class StoppedVehicleSafetyTest(unittest.TestCase):
             distance=2.5,
         ), (False, False))
 
+    def test_follow_target_must_be_ahead(self):
+        self.assertTrue(is_follow_target_ahead(0.01))
+        self.assertFalse(is_follow_target_ahead(0.0))
+        self.assertFalse(is_follow_target_ahead(-0.01))
+        self.assertFalse(is_follow_target_ahead(None))
+
 
 class PrepassSafetyRecoveryTest(unittest.TestCase):
+    def test_recovery_success_is_not_counted_during_reverse(self):
+        self.assertFalse(should_count_mpc_recovery_success(
+            stuck_recovery_active=True,
+            gear_is_drive=False,
+            infeasibility_counter=0,
+            has_current_prediction=True,
+            used_prediction_fallback=False,
+        ))
+
+    def test_recovery_success_requires_confirmed_drive(self):
+        self.assertFalse(should_count_mpc_recovery_success(
+            stuck_recovery_active=False,
+            gear_is_drive=False,
+            infeasibility_counter=0,
+            has_current_prediction=True,
+            used_prediction_fallback=False,
+        ))
+        self.assertTrue(should_count_mpc_recovery_success(
+            stuck_recovery_active=False,
+            gear_is_drive=True,
+            infeasibility_counter=0,
+            has_current_prediction=True,
+            used_prediction_fallback=False,
+        ))
+
+    def test_fresh_feasible_prediction_prevents_mpc_stall_reverse(self):
+        self.assertFalse(should_recover_from_mpc_stall(
+            safety_recovery_active=True,
+            actual_speed=0.0,
+            stall_speed_threshold=0.4,
+            gnss_is_stuck=True,
+            infeasibility_counter=0,
+            has_fresh_valid_prediction=True,
+        ))
+
+    def test_missing_prediction_allows_mpc_stall_reverse(self):
+        self.assertTrue(should_recover_from_mpc_stall(
+            safety_recovery_active=True,
+            actual_speed=0.0,
+            stall_speed_threshold=0.4,
+            gnss_is_stuck=True,
+            infeasibility_counter=4,
+            has_fresh_valid_prediction=False,
+        ))
+
+    def test_follow_overtake_is_reevaluated_every_two_seconds(self):
+        self.assertFalse(should_reevaluate_follow_overtake(
+            True, 11.9, 10.0, 2.0))
+        self.assertTrue(should_reevaluate_follow_overtake(
+            True, 12.0, 10.0, 2.0))
+        self.assertFalse(should_reevaluate_follow_overtake(
+            False, 20.0, 10.0, 2.0))
+
+    def test_follow_retry_distance_gate_is_strictly_below_ten_metres(self):
+        self.assertTrue(is_follow_retry_within_distance(9.999, 10.0))
+        self.assertFalse(is_follow_retry_within_distance(10.0, 10.0))
+        self.assertFalse(is_follow_retry_within_distance(10.001, 10.0))
+
+    def test_active_prepass_releases_immediately_at_distance_gate(self):
+        self.assertFalse(should_release_prepass_distance_gate(
+            recovery_active=True, distance=9.999, max_distance=10.0))
+        self.assertTrue(should_release_prepass_distance_gate(
+            recovery_active=True, distance=10.0, max_distance=10.0))
+        self.assertTrue(should_release_prepass_distance_gate(
+            recovery_active=True, distance=12.0, max_distance=10.0))
+
+    def test_missing_distance_does_not_confirm_prepass_gate_exit(self):
+        self.assertFalse(should_release_prepass_distance_gate(
+            recovery_active=True, distance=None, max_distance=10.0))
+        self.assertFalse(should_release_prepass_distance_gate(
+            recovery_active=False, distance=12.0, max_distance=10.0))
+
+    def test_prepass_behind_release_requires_continuous_confirmation(self):
+        since = update_continuous_condition_since(
+            None, now_sec=10.0, condition=True)
+        self.assertFalse(continuous_condition_confirmed(
+            since, now_sec=10.24, confirm_sec=0.25))
+        self.assertTrue(continuous_condition_confirmed(
+            since, now_sec=10.25, confirm_sec=0.25))
+        self.assertIsNone(update_continuous_condition_since(
+            since, now_sec=10.2, condition=False))
+
+    def test_timeout_reasons_are_machine_readable(self):
+        self.assertEqual(classify_prepass_timeout_reasons(
+            mpc_stable=False,
+            heading_stable=False,
+            dynamics_stable=True,
+            physical_passage_available=True,
+            traffic_clear=False,
+            distance_within_gate=True,
+            target_behind=False,
+        ), ("mpc_unstable", "heading_unstable", "traffic_blocked"))
+
+    def test_timeout_reports_physical_block_separately_from_traffic(self):
+        self.assertEqual(classify_prepass_timeout_reasons(
+            mpc_stable=True,
+            heading_stable=True,
+            dynamics_stable=True,
+            physical_passage_available=False,
+            traffic_clear=False,
+            distance_within_gate=True,
+            target_behind=False,
+        ), ("physical_passage_blocked",))
+
+    def test_fallback_commit_tracks_continuous_success_time(self):
+        success_since = update_fallback_commit_success_since(
+            None, now_sec=10.0,
+            lane_applied=True, feasible_solution=True)
+        self.assertEqual(success_since, 10.0)
+        self.assertEqual(update_fallback_commit_success_since(
+            success_since, now_sec=10.3,
+            lane_applied=True, feasible_solution=True), 10.0)
+        self.assertIsNone(update_fallback_commit_success_since(
+            success_since, now_sec=10.2,
+            lane_applied=True, feasible_solution=False))
+        self.assertIsNone(update_fallback_commit_success_since(
+            success_since, now_sec=10.2,
+            lane_applied=False, feasible_solution=True))
+
     def should_start(self, **overrides):
         values = {
             "recovery_requested": True,
@@ -98,6 +239,97 @@ class PrepassSafetyRecoveryTest(unittest.TestCase):
     def test_normal_retry_still_checks_opposite_lane_first(self):
         self.assertEqual(ordered_outer_lane_candidates(0), (2, 0))
         self.assertEqual(ordered_outer_lane_candidates(2), (0, 2))
+
+    def test_fallback_reprobes_failed_lane_before_l1(self):
+        self.assertEqual(
+            ordered_prepass_fallback_candidates(0), (2, 0, 1))
+        self.assertEqual(
+            ordered_prepass_fallback_candidates(2), (0, 2, 1))
+
+    def test_failed_fallback_attempts_advance_toward_l1(self):
+        self.assertEqual(
+            ordered_prepass_fallback_candidates(0, {2}), (0, 1))
+        self.assertEqual(
+            ordered_prepass_fallback_candidates(0, {0, 2}), (1,))
+
+
+class L1SafetyRecoveryTest(unittest.TestCase):
+    def test_circular_waypoint_progress_handles_lap_wrap(self):
+        self.assertEqual(circular_forward_progress(310, 3, 313), 6)
+        self.assertEqual(circular_forward_progress(20, 25, 313), 5)
+
+    def test_l1_backoff_requires_all_release_conditions(self):
+        ready = {
+            "elapsed_sec": 2.0,
+            "cooldown_sec": 2.0,
+            "waypoint_progress": 5,
+            "minimum_waypoint_progress": 5,
+            "full_width_success_sec": 0.5,
+            "required_full_width_success_sec": 0.5,
+        }
+        self.assertTrue(should_exit_l1_probe_backoff(**ready))
+        for key, value in (
+            ("elapsed_sec", 1.99),
+            ("waypoint_progress", 4),
+            ("full_width_success_sec", 0.49),
+        ):
+            blocked = dict(ready)
+            blocked[key] = value
+            self.assertFalse(should_exit_l1_probe_backoff(**blocked))
+
+    def test_applied_l1_failure_starts_direct_recovery(self):
+        self.assertTrue(should_start_l1_recovery_from_safety(
+            recovery_requested=True,
+            applied_lane_idx=1,
+            l1_recovery_pending=False,
+        ))
+
+    def test_full_width_and_outer_lane_failures_are_not_l1_failures(self):
+        for lane_idx in (None, 0, 2):
+            self.assertFalse(should_start_l1_recovery_from_safety(
+                recovery_requested=True,
+                applied_lane_idx=lane_idx,
+                l1_recovery_pending=False,
+            ))
+
+    def test_transition_request_without_applied_l1_is_not_attributed(self):
+        self.assertFalse(should_start_l1_recovery_from_safety(
+            recovery_requested=False,
+            applied_lane_idx=1,
+            l1_recovery_pending=False,
+        ))
+
+    def test_pending_l1_recovery_is_not_restarted(self):
+        self.assertFalse(should_start_l1_recovery_from_safety(
+            recovery_requested=True,
+            applied_lane_idx=1,
+            l1_recovery_pending=True,
+        ))
+
+
+class PrepassFallbackLaneChangeTest(unittest.TestCase):
+    def test_recovery_exclusively_owns_lane_selection(self):
+        self.assertTrue(prepass_recovery_owns_lane_selection(True))
+        self.assertTrue(prepass_recovery_owns_lane_selection(
+            False, fallback_commit_pending=True))
+        self.assertFalse(prepass_recovery_owns_lane_selection(False))
+
+    def test_selected_fallback_lane_bypasses_cooldown(self):
+        for lane_idx in (0, 1, 2):
+            self.assertTrue(is_prepass_fallback_lane_change(
+                fallback_lane_idx=lane_idx,
+                requested_lane_idx=lane_idx,
+            ))
+
+    def test_normal_or_different_lane_does_not_bypass_cooldown(self):
+        self.assertFalse(is_prepass_fallback_lane_change(
+            fallback_lane_idx=None,
+            requested_lane_idx=0,
+        ))
+        self.assertFalse(is_prepass_fallback_lane_change(
+            fallback_lane_idx=2,
+            requested_lane_idx=0,
+        ))
 
 
 class OvertakeGeometryTest(unittest.TestCase):

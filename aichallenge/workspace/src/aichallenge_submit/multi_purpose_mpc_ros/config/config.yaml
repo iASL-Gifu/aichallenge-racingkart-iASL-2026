@@ -51,6 +51,7 @@ reference_path:
 trajectory_switch:
   enter_center_wps: 20   # 前方車がこのWaypoint差未満ならCenterへ切り替え
   exit_center_wps: 25    # Center中はこのWaypoint差を超えるまで維持
+  overtake_latch_max_distance: 10.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
   center_lane_rejoin_behind_wps: 6 # 追い越した車が後方へこの差以上 離れたらCenter軌道のL1へ戻る
   behind_release_wps: 12 # 追い越した車が後方へこの差以上離れるまで維持
   min_hold_sec: 1.0      # 切り替え直後の再切り替え禁止時間
@@ -63,8 +64,15 @@ trajectory_switch:
 prepass_lane_fallback:
   enabled: true
   infeasible_cycles: 20 # 追越し前、固定車線がこの回数連続失敗したら代替車線を評価
-  recovery_stable_sec: 0.5 # 全幅解除後、MPC正常かつL1復帰と同じ車両安定条件がこの時間続いてから代替車線を選択
+  recovery_stable_sec: 0.5 # 全幅解除後、MPC正常かつ候補車線基準の車両安定条件がこの時間続いてから代替車線を選択
   recovery_timeout_sec: 5.0 # 全幅回復がこの時間成立しなければラッチ対象を再評価。通過不可/後方危険なら追従、近すぎて通過可能なら後退後に再評価
+  follow_retry_sec: 2.0 # [s] 追従へ移行後も、この周期で外側車線の通過幅とV2X競合を再評価する
+  follow_retry_max_distance: 10.0 # [m] 追従から追い越しを再評価する最大距離（この値未満のみ）
+  behind_release_longitudinal: 0.5 # [m] 対象がこの距離より後方にいる状態が継続したらPrepassを解除
+  behind_release_confirm_sec: 0.25 # [s] V2X位置揺れで誤解除しないための後方判定継続時間
+  max_heading_error_deg: 10.0 # [deg] 候補車線中心軌道に対するPrepass回復時の許容方位誤差
+  heading_lookahead_wps: 3 # 候補車線中心軌道の方位を算出する前方Waypoint数
+  commit_success_sec: 0.3 # [s] fallback車線をこの時間連続で正常に解けた場合だけ確定する
   front_distance: 8.0  # [m] 候補車線の前方確認距離
   side_distance: 2.0   # [m] 候補車線の側方・並走確認距離
   rear_distance: 5.0   # [m] 候補車線の後方確認距離
@@ -81,11 +89,19 @@ follow_control:
 
 center_lane_rejoin_stability:
   enabled: true
+  constraint_diagnostics_enabled: true # L1 probe失敗時だけ境界幅・障害物・予測区間を詳細出力
+  constraint_diagnostics_points: 5 # 有効幅が狭い順に出力する予測点数
   max_heading_error_deg: 5.0 # Center軌道に対する方位誤差
   max_lateral_speed: 0.5     # [m/s] odom横速度と方位誤差からの推定値の大きい方
   max_yaw_rate: 0.5         # [rad/s]
   stable_sec: 0.4            # 全条件が連続成立してからL1復帰を開始
-  probe_success_cycles: 3    # L1制約でこの回数連続して正常に解けた場合だけL1固定を確定
+  max_l1_lateral_error: 0.25 # [m] L1中心からの横誤差がこの値未満の場合だけprobeを開始
+  prediction_fit_points: 0  # 0なら全幅MPC予測の全点をL1内判定に使用
+  prediction_fit_ratio: 1.0 # 全予測点の車両中心がL1境界内に入ることを要求
+  probe_success_cycles: 15    # L1制約でこの回数連続して正常に解けた場合だけL1固定を確定
+  probe_retry_cooldown_sec: 2.0 # [s] L1 probe失敗後の再試行禁止時間
+  probe_retry_min_wp_progress: 5 # probe失敗地点からこのWaypoint数以上進むまで再試行しない
+  backoff_full_width_success_sec: 0.5 # [s] BACKOFF解除に必要な全幅MPC連続成功時間
   release_infeasible_cycles: 5 # L1復帰中にこの回数連続失敗したらL1固定を解除
 
 bicycle_model:

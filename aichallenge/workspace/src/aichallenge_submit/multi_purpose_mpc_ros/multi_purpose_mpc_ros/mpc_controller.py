@@ -49,17 +49,33 @@ from v2x_msgs.msg import V2XVehiclePositionArray
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     V2XVehicleTracker,
     absolute_heading_difference,
+    classify_prepass_timeout_reasons,
     classify_lane_conflicts,
+    circular_forward_progress,
+    continuous_condition_confirmed,
     evaluate_stopped_lead_overtake,
+    is_follow_target_ahead,
+    is_follow_retry_within_distance,
+    is_prepass_fallback_lane_change,
     lane_conflicts_are_clear,
     is_parallel_vehicle,
     ordered_outer_lane_candidates,
+    ordered_prepass_fallback_candidates,
+    prepass_recovery_owns_lane_selection,
     prediction_clears_moving_vehicle,
     predictions_to_obstacles,
     relative_longitudinal_distance,
     select_latched_overtake_lane,
     should_release_latched_overtake_lane,
+    should_reevaluate_follow_overtake,
+    should_count_mpc_recovery_success,
+    should_recover_from_mpc_stall,
+    should_release_prepass_distance_gate,
+    should_start_l1_recovery_from_safety,
     should_start_prepass_recovery_from_safety,
+    should_exit_l1_probe_backoff,
+    update_continuous_condition_since,
+    update_fallback_commit_success_since,
 )
 
 # Multi_Purpose_MPC
@@ -568,6 +584,7 @@ class MPCController(Node):
         self._target_lane_idx = None
         self._mpc_safety_recovery_active = False
         self._mpc_safety_recovery_success_cycles = 0
+        self._post_reverse_full_width_recovery_active = False
         self._mpc_safety_recovery_success_sec = max(float(getattr(
             cfg_mpc, "safety_recovery_success_sec", 0.5)), 0.0)
         self._mpc_safety_recovery_success_required_cycles = max(
@@ -584,6 +601,8 @@ class MPCController(Node):
             getattr(switch_cfg, "enter_center_wps", 25))
         self._trajectory_exit_center_wps = int(
             getattr(switch_cfg, "exit_center_wps", 35))
+        self._overtake_latch_max_distance = max(float(getattr(
+            switch_cfg, "overtake_latch_max_distance", 10.0)), 0.0)
         self._center_lane_rejoin_behind_wps = int(
             getattr(switch_cfg, "center_lane_rejoin_behind_wps", 6))
         self._trajectory_behind_release_wps = int(
@@ -610,10 +629,18 @@ class MPCController(Node):
         self._l1_probe_context = None
         self._l1_probe_success_cycles = 0
         self._l1_probe_constraint_applied = False
+        self._l1_safety_recovery_active = False
+        self._l1_safety_recovery_stable_since = None
+        self._l1_safety_recovery_context = None
+        self._l1_safety_reprobe_pending = False
         rejoin_stability_cfg = getattr(
             self._cfg, "center_lane_rejoin_stability", None)
         self._center_lane_rejoin_stability_enabled = bool(getattr(
             rejoin_stability_cfg, "enabled", True))
+        self._l1_constraint_diagnostics_enabled = bool(getattr(
+            rejoin_stability_cfg, "constraint_diagnostics_enabled", True))
+        self._l1_constraint_diagnostics_points = max(int(getattr(
+            rejoin_stability_cfg, "constraint_diagnostics_points", 5)), 1)
         self._center_lane_rejoin_max_heading = math.radians(max(float(getattr(
             rejoin_stability_cfg, "max_heading_error_deg", 5.0)), 0.0))
         self._center_lane_rejoin_max_lateral_speed = max(float(getattr(
@@ -626,6 +653,22 @@ class MPCController(Node):
             rejoin_stability_cfg, "release_infeasible_cycles", 8)), 1)
         self._l1_probe_required_success_cycles = max(int(getattr(
             rejoin_stability_cfg, "probe_success_cycles", 3)), 1)
+        self._l1_rejoin_max_lateral_error = max(float(getattr(
+            rejoin_stability_cfg, "max_l1_lateral_error", 0.25)), 0.0)
+        self._l1_prediction_fit_points = max(int(getattr(
+            rejoin_stability_cfg, "prediction_fit_points", 0)), 0)
+        self._l1_prediction_min_fit_ratio = min(max(float(getattr(
+            rejoin_stability_cfg, "prediction_fit_ratio", 1.0)), 0.0), 1.0)
+        self._l1_probe_retry_cooldown_sec = max(float(getattr(
+            rejoin_stability_cfg, "probe_retry_cooldown_sec", 2.0)), 0.0)
+        self._l1_probe_retry_min_wp_progress = max(int(getattr(
+            rejoin_stability_cfg, "probe_retry_min_wp_progress", 5)), 0)
+        self._l1_backoff_full_width_success_sec = max(float(getattr(
+            rejoin_stability_cfg, "backoff_full_width_success_sec", 0.5)), 0.0)
+        self._l1_rejoin_backoff_active = False
+        self._l1_rejoin_backoff_started_at = None
+        self._l1_rejoin_backoff_failed_wp = None
+        self._l1_rejoin_backoff_full_width_success_since = None
         self._outer_lane_released_vehicle_id = None
         self._post_overtake_vehicle_id = None
         self._race_return_time = None
@@ -644,6 +687,20 @@ class MPCController(Node):
             prepass_fallback_cfg, "recovery_stable_sec", 0.5)), 0.0)
         self._prepass_lane_fallback_recovery_timeout_sec = max(float(getattr(
             prepass_fallback_cfg, "recovery_timeout_sec", 5.0)), 0.0)
+        self._prepass_follow_retry_sec = max(float(getattr(
+            prepass_fallback_cfg, "follow_retry_sec", 2.0)), 0.0)
+        self._prepass_follow_retry_max_distance = max(float(getattr(
+            prepass_fallback_cfg, "follow_retry_max_distance", 10.0)), 0.0)
+        self._prepass_behind_release_longitudinal = max(float(getattr(
+            prepass_fallback_cfg, "behind_release_longitudinal", 0.5)), 0.0)
+        self._prepass_behind_release_confirm_sec = max(float(getattr(
+            prepass_fallback_cfg, "behind_release_confirm_sec", 0.25)), 0.0)
+        self._prepass_max_heading = math.radians(max(float(getattr(
+            prepass_fallback_cfg, "max_heading_error_deg", 10.0)), 0.0))
+        self._prepass_heading_lookahead_wps = max(int(getattr(
+            prepass_fallback_cfg, "heading_lookahead_wps", 3)), 1)
+        self._prepass_commit_required_success_sec = max(float(getattr(
+            prepass_fallback_cfg, "commit_success_sec", 0.3)), 0.0)
         self._prepass_lane_fallback_front_distance = max(float(getattr(
             prepass_fallback_cfg, "front_distance", 8.0)), 0.0)
         self._prepass_lane_fallback_side_distance = max(float(getattr(
@@ -669,6 +726,7 @@ class MPCController(Node):
         self._prepass_fallback_lane_idx = None
         self._prepass_fallback_blocked = False
         self._prepass_fallback_follow_active = False
+        self._prepass_follow_last_retry_at = None
         self._prepass_retry_after_reverse = False
         self._prepass_retry_lane_idx = None
         self._prepass_reverse_motion_started = False
@@ -677,7 +735,12 @@ class MPCController(Node):
         self._prepass_fallback_recovery_active = False
         self._prepass_fallback_recovery_stable_since = None
         self._prepass_fallback_recovery_started_at = None
+        self._prepass_target_behind_since = None
         self._prepass_failed_lane_idx = None
+        self._prepass_fallback_commit_pending = False
+        self._prepass_fallback_commit_lane_idx = None
+        self._prepass_fallback_commit_success_since = None
+        self._prepass_attempted_outer_lanes = set()
         self._follow_latched_cache = None
         overtake_cfg = getattr(self._cfg, "stopped_vehicle_overtake", None)
         self._stopped_lead_speed_threshold = float(
@@ -1161,6 +1224,12 @@ class MPCController(Node):
             return False
         return int(getattr(self._gear_report, "report", -1)) in self._gear_reverse_reports
 
+    def _current_gear_is_drive(self) -> bool:
+        if self._gear_report is None:
+            return False
+        return int(getattr(
+            self._gear_report, "report", -1)) == self._gear_drive_command
+
     def _gear_status_callback(self, msg) -> None:
         self._gear_report = msg
 
@@ -1336,6 +1405,8 @@ class MPCController(Node):
         self._prepass_fallback_recovery_stable_since = None
         self._prepass_fallback_recovery_started_at = None
         self._prepass_fallback_lane_idx = None
+        self._prepass_fallback_commit_pending = False
+        self._prepass_fallback_commit_lane_idx = None
         self._prepass_retry_after_reverse = True
         self._prepass_retry_lane_idx = retry_lane_idx
         self._prepass_reverse_motion_started = False
@@ -1376,13 +1447,376 @@ class MPCController(Node):
         ), None)
         return lane_idx, target_distance, conflicts
 
+    def _select_prepass_fallback_lane(
+        self, pose, ego_speed: float, failed_lane_idx
+    ):
+        """Select opposite outer, failed-lane re-probe, then L1."""
+        physical_passage, target_distance = self._latched_target_passage(pose)
+        samples = self._relative_lane_vehicle_samples(pose, ego_speed)
+        candidate_order = ordered_prepass_fallback_candidates(
+            failed_lane_idx,
+            self._prepass_attempted_outer_lanes,
+        )
+        conflicts = {
+            lane_idx: classify_lane_conflicts(
+                lane_idx,
+                samples,
+                front_distance=self._prepass_lane_fallback_front_distance,
+                side_distance=self._prepass_lane_fallback_side_distance,
+                rear_distance=self._prepass_lane_fallback_rear_distance,
+            )
+            # Keep diagnostics for every lane even when a previously attempted
+            # lane is excluded from this selection pass.
+            for lane_idx in (0, 1, 2)
+        }
+        selected_lane_idx = next((
+            lane_idx for lane_idx in candidate_order
+            if lane_conflicts_are_clear(conflicts[lane_idx])
+            and (
+                lane_idx == 1
+                or physical_passage.get(lane_idx, False)
+            )
+        ), None)
+        return selected_lane_idx, target_distance, conflicts, physical_passage
+
+    def _candidate_lane_heading(self, lane_idx, wp_id: int) -> float:
+        """Estimate heading along a candidate lane's actual center geometry."""
+        def lane_center_point(candidate_wp_id):
+            candidate_wp = self._reference_path.get_waypoint(candidate_wp_id)
+            lanes = self._reference_path.get_lane_bounds(candidate_wp_id)
+            if lane_idx not in (0, 1, 2) or lane_idx >= len(lanes):
+                return candidate_wp.x, candidate_wp.y
+            upper, lower = lanes[lane_idx]
+            lateral_offset = 0.5 * (upper + lower)
+            normal_angle = candidate_wp.psi + math.pi / 2.0
+            return (
+                candidate_wp.x + lateral_offset * math.cos(normal_angle),
+                candidate_wp.y + lateral_offset * math.sin(normal_angle),
+            )
+
+        x0, y0 = lane_center_point(wp_id)
+        x1, y1 = lane_center_point(
+            wp_id + self._prepass_heading_lookahead_wps)
+        if math.hypot(x1 - x0, y1 - y0) < 1e-6:
+            return self._reference_path.get_waypoint(wp_id).psi
+        return math.atan2(y1 - y0, x1 - x0)
+
+    def _lane_lateral_error(self, x: float, y: float, lane_idx: int):
+        """Return distance from a point to the selected lane center."""
+        # L1 rejoin is defined on the Center path even when the currently
+        # active path is still Race during a trajectory transition.
+        car = self._carN_center
+        reference_path = self._reference_pathN_center
+        wp_id = car.get_closest_waypoint(x, y)
+        wp = reference_path.get_waypoint(wp_id)
+        lanes = reference_path.get_lane_bounds(wp_id)
+        if lane_idx < 0 or lane_idx >= len(lanes):
+            return math.inf
+        upper, lower = lanes[lane_idx]
+        normal_angle = wp.psi + math.pi / 2.0
+        lateral_offset = (
+            (x - wp.x) * math.cos(normal_angle)
+            + (y - wp.y) * math.sin(normal_angle)
+        )
+        return abs(lateral_offset - 0.5 * (upper + lower))
+
+    def _current_prediction_l1_fit_ratio(self) -> float:
+        """Measure how much of the full MPC center prediction lies in L1."""
+        if self._mpc.current_prediction is None:
+            return 0.0
+        pred_x, pred_y = self._mpc.current_prediction
+        available_count = min(len(pred_x), len(pred_y))
+        count = (
+            available_count
+            if self._l1_prediction_fit_points <= 0
+            else min(available_count, self._l1_prediction_fit_points)
+        )
+        if count <= 0:
+            return 0.0
+        inside = 0
+        car = self._carN_center
+        reference_path = self._reference_pathN_center
+        for x, y in zip(pred_x[:count], pred_y[:count]):
+            wp_id = car.get_closest_waypoint(float(x), float(y))
+            wp = reference_path.get_waypoint(wp_id)
+            lanes = reference_path.get_lane_bounds(wp_id)
+            if len(lanes) <= 1:
+                continue
+            upper, lower = lanes[1]
+            normal_angle = wp.psi + math.pi / 2.0
+            lateral_offset = (
+                (float(x) - wp.x) * math.cos(normal_angle)
+                + (float(y) - wp.y) * math.sin(normal_angle)
+            )
+            if lower <= lateral_offset <= upper:
+                inside += 1
+        return float(inside) / float(count)
+
+    def _log_l1_constraint_diagnostics(
+        self, *, context: str, failed_wp: int, reason: str
+    ) -> None:
+        """Log the exact L1 corridor and nearby obstacles after a failed solve.
+
+        This runs only on an L1 failure.  It intentionally uses the bound
+        snapshot retained by MPC, which represents the final relaxed retry,
+        rather than recomputing a potentially different corridor.
+        """
+        if not self._l1_constraint_diagnostics_enabled:
+            return
+        try:
+            upper = np.asarray(
+                getattr(self._mpc, "_prediction_upper_bounds", []),
+                dtype=float,
+            ).reshape(-1)
+            lower = np.asarray(
+                getattr(self._mpc, "_prediction_lower_bounds", []),
+                dtype=float,
+            ).reshape(-1)
+            wp_ids = np.asarray(
+                getattr(self._mpc, "_constraint_wp_ids", []),
+                dtype=int,
+            ).reshape(-1)
+            count = min(len(upper), len(lower), len(wp_ids))
+            if count <= 0:
+                self.get_logger().warn(
+                    "[L1ConstraintDiagnostic] corridor snapshot unavailable: "
+                    f"context={context}, failed_wp={failed_wp}, reason={reason}"
+                )
+                return
+
+            reference_path = self._reference_path
+            rows = []
+            horizon_centers = []
+            for i in range(count):
+                wp_id = int(wp_ids[i])
+                wp = reference_path.get_waypoint(wp_id)
+                lanes = reference_path.get_lane_bounds(wp_id)
+                if len(lanes) <= 1:
+                    base_upper = math.nan
+                    base_lower = math.nan
+                    base_width = math.nan
+                    lane_center = 0.0
+                else:
+                    base_upper, base_lower = lanes[1]
+                    base_width = float(base_upper - base_lower)
+                    lane_center = 0.5 * float(base_upper + base_lower)
+                effective_width = float(upper[i] - lower[i])
+                center_margin = min(
+                    float(upper[i]) - lane_center,
+                    lane_center - float(lower[i]),
+                )
+                narrowing = (
+                    float(base_width - effective_width)
+                    if math.isfinite(base_width) else math.nan
+                )
+                normal_angle = wp.psi + math.pi / 2.0
+                center_x = wp.x + lane_center * math.cos(normal_angle)
+                center_y = wp.y + lane_center * math.sin(normal_angle)
+                horizon_centers.append((center_x, center_y, wp_id))
+                rows.append({
+                    "index": i,
+                    "wp": wp_id,
+                    "base_upper": float(base_upper),
+                    "base_lower": float(base_lower),
+                    "base_width": base_width,
+                    "upper": float(upper[i]),
+                    "lower": float(lower[i]),
+                    "width": effective_width,
+                    "center_margin": center_margin,
+                    "narrowing": narrowing,
+                })
+
+            widths = np.asarray([row["width"] for row in rows])
+            base_widths = np.asarray([row["base_width"] for row in rows])
+            center_margins = np.asarray([
+                row["center_margin"] for row in rows])
+            invalid_count = int(np.count_nonzero(
+                ~np.isfinite(widths) | (widths <= 0.0)))
+            vehicle_width = float(self._cfg.bicycle_model.width)
+            below_vehicle_count = int(np.count_nonzero(
+                np.isfinite(widths) & (widths < vehicle_width)))
+            center_excluded_count = int(np.count_nonzero(
+                np.isfinite(center_margins) & (center_margins < 0.0)))
+
+            obstacle_records = []
+            seen_obstacles = set()
+            for obstacle in getattr(self._map, "obstacles", []):
+                key = (
+                    round(float(obstacle.cx), 2),
+                    round(float(obstacle.cy), 2),
+                    round(float(obstacle.radius), 2),
+                )
+                if key in seen_obstacles:
+                    continue
+                seen_obstacles.add(key)
+                nearest = min(
+                    (
+                        math.hypot(
+                            float(obstacle.cx) - center_x,
+                            float(obstacle.cy) - center_y,
+                        ) - float(obstacle.radius),
+                        index,
+                        wp_id,
+                    )
+                    for index, (center_x, center_y, wp_id)
+                    in enumerate(horizon_centers)
+                )
+                obstacle_records.append((
+                    nearest[0], nearest[1], nearest[2],
+                    float(obstacle.cx), float(obstacle.cy),
+                    float(obstacle.radius),
+                ))
+            obstacle_records.sort(key=lambda item: item[0])
+            nearest_obstacle_clearance = (
+                obstacle_records[0][0] if obstacle_records else math.inf)
+
+            finite_narrowing = [
+                row["narrowing"] for row in rows
+                if math.isfinite(row["narrowing"])
+            ]
+            max_narrowing = max(finite_narrowing, default=0.0)
+            if invalid_count:
+                likely_cause = "invalid_or_collapsed_bounds"
+            elif below_vehicle_count:
+                likely_cause = "effective_width_below_vehicle_width"
+            elif center_excluded_count:
+                likely_cause = "l1_center_excluded_from_free_segment"
+            elif max_narrowing > 0.20:
+                likely_cause = (
+                    "obstacle_narrowing"
+                    if nearest_obstacle_clearance < vehicle_width
+                    else "static_map_or_boundary_narrowing"
+                )
+            else:
+                likely_cause = "solver_dynamics_or_rate_constraints"
+
+            min_row = min(rows, key=lambda row: row["width"])
+            self.get_logger().warn(
+                "[L1ConstraintDiagnostic] "
+                f"context={context}, failed_wp={failed_wp}, reason={reason}, "
+                f"mpc_failure={self._mpc.failure_reason}, "
+                f"target_lane={getattr(self._mpc, '_constraint_target_lane', None)}, "
+                f"safety_margin={getattr(self._mpc, '_constraint_safety_margin', math.nan):.3f}m, "
+                f"horizon={count}, base_width_min={np.nanmin(base_widths):.3f}m, "
+                f"effective_width_min={min_row['width']:.3f}m@"
+                f"i{min_row['index']}/wp{min_row['wp']}, "
+                f"invalid={invalid_count}, below_vehicle_width="
+                f"{below_vehicle_count}/{count}, center_excluded="
+                f"{center_excluded_count}/{count}, max_narrowing="
+                f"{max_narrowing:.3f}m, nearest_obstacle_clearance="
+                f"{nearest_obstacle_clearance:.3f}m, likely_cause={likely_cause}"
+            )
+
+            detail_rows = sorted(rows, key=lambda row: row["width"])[
+                :self._l1_constraint_diagnostics_points]
+            detail = "; ".join(
+                f"i{row['index']}/wp{row['wp']}:"
+                f"base=[{row['base_lower']:.2f},{row['base_upper']:.2f}]"
+                f"({row['base_width']:.2f}m),"
+                f"effective=[{row['lower']:.2f},{row['upper']:.2f}]"
+                f"({row['width']:.2f}m),"
+                f"center_margin={row['center_margin']:.2f}m"
+                for row in detail_rows
+            )
+            self.get_logger().warn(
+                f"[L1ConstraintDetail] {detail}"
+            )
+
+            if obstacle_records:
+                obstacle_detail = "; ".join(
+                    f"i{index}/wp{wp_id}:clearance={clearance:.2f}m,"
+                    f"pos=({cx:.2f},{cy:.2f}),r={radius:.2f}m"
+                    for clearance, index, wp_id, cx, cy, radius
+                    in obstacle_records[:3]
+                )
+                self.get_logger().warn(
+                    f"[L1ObstacleDiagnostic] {obstacle_detail}"
+                )
+
+            if hasattr(self, "_v2x_tracker"):
+                v2x_records = []
+                for vehicle_id in self._v2x_tracker.active_vehicle_ids():
+                    samples = self._v2x_tracker._samples.get(vehicle_id)
+                    if not samples:
+                        continue
+                    _, vehicle_x, vehicle_y = samples[-1]
+                    clearance, index, wp_id = min(
+                        (
+                            math.hypot(
+                                float(vehicle_x) - center_x,
+                                float(vehicle_y) - center_y,
+                            ) - self._v2x_vehicle_radius,
+                            index,
+                            wp_id,
+                        )
+                        for index, (center_x, center_y, wp_id)
+                        in enumerate(horizon_centers)
+                    )
+                    velocity_x, velocity_y = self._v2x_tracker.velocity(
+                        vehicle_id)
+                    v2x_records.append((
+                        clearance, str(vehicle_id), index, wp_id,
+                        math.hypot(velocity_x, velocity_y),
+                        float(vehicle_x), float(vehicle_y),
+                    ))
+                v2x_records.sort(key=lambda item: item[0])
+                if v2x_records:
+                    v2x_detail = "; ".join(
+                        f"vehicle_id={vehicle_id},i{index}/wp{wp_id},"
+                        f"clearance={clearance:.2f}m,speed={speed:.2f}m/s,"
+                        f"pos=({vehicle_x:.2f},{vehicle_y:.2f})"
+                        for clearance, vehicle_id, index, wp_id, speed,
+                        vehicle_x, vehicle_y in v2x_records[:3]
+                    )
+                    self.get_logger().warn(
+                        f"[L1V2XDiagnostic] {v2x_detail}"
+                    )
+        except Exception as error:
+            # Diagnostics must never interfere with the safety state machine.
+            self.get_logger().warn(
+                "[L1ConstraintDiagnostic] collection failed: "
+                f"context={context}, failed_wp={failed_wp}, error={error}"
+            )
+
+    def _reset_l1_rejoin_backoff(self) -> None:
+        self._l1_rejoin_backoff_active = False
+        self._l1_rejoin_backoff_started_at = None
+        self._l1_rejoin_backoff_failed_wp = None
+        self._l1_rejoin_backoff_full_width_success_since = None
+
+    def _start_l1_rejoin_backoff(
+        self, now_sec: float, failed_wp: int, reason: str
+    ) -> None:
+        self._l1_rejoin_backoff_active = True
+        self._l1_rejoin_backoff_started_at = float(now_sec)
+        self._l1_rejoin_backoff_failed_wp = int(failed_wp)
+        self._l1_rejoin_backoff_full_width_success_since = None
+        self._center_lane_rejoin_stable_since = None
+        self.get_logger().warn(
+            "[L1ProbeBackoff] L1 probe failed; holding full width until "
+            "cooldown, waypoint progress, and fresh MPC recovery complete: "
+            f"failed_wp={failed_wp}, reason={reason}, "
+            f"cooldown={self._l1_probe_retry_cooldown_sec:.2f}s, "
+            f"min_wp_progress={self._l1_probe_retry_min_wp_progress}, "
+            f"full_width_success="
+            f"{self._l1_backoff_full_width_success_sec:.2f}s"
+        )
+
     def _switch_prepass_to_follow(self, reason: str) -> None:
         self._prepass_fallback_blocked = False
         self._prepass_fallback_follow_active = True
+        self._prepass_follow_last_retry_at = (
+            float(self.get_clock().now().nanoseconds) / 1e9
+        )
         self._prepass_fallback_recovery_active = False
         self._prepass_fallback_recovery_stable_since = None
         self._prepass_fallback_recovery_started_at = None
+        self._prepass_target_behind_since = None
         self._prepass_failed_lane_idx = None
+        self._prepass_fallback_commit_pending = False
+        self._prepass_fallback_commit_lane_idx = None
+        self._prepass_fallback_commit_success_since = None
+        self._prepass_attempted_outer_lanes.clear()
         self._prepass_retry_after_reverse = False
         self._prepass_retry_lane_idx = None
         self._forced_overtake_vehicle_id = None
@@ -1394,6 +1828,18 @@ class MPCController(Node):
         ):
             self._follow_latched_cache = None
         self.get_logger().warn(f"[PrepassLaneFallbackFollow] {reason}")
+
+    def _cancel_normal_l1_rejoin_for_prepass(self) -> None:
+        """Give a newly started Prepass recovery exclusive lateral ownership."""
+        self._center_lane_rejoin_active = False
+        self._center_lane_rejoin_constraint_released = False
+        self._center_lane_rejoin_stable_since = None
+        self._reset_l1_rejoin_backoff()
+        if self._l1_probe_active and self._l1_probe_context == "rejoin":
+            self._l1_probe_active = False
+            self._l1_probe_context = None
+            self._l1_probe_success_cycles = 0
+            self._l1_probe_constraint_applied = False
 
     def _latched_follow_target_state(self, pose, now_sec: float):
         """Resolve ACC input from the latched vehicle, with short loss hold."""
@@ -1493,17 +1939,27 @@ class MPCController(Node):
             )
         return False, ""
 
-    def _release_lost_follow_target(self) -> None:
+    def _release_lost_follow_target(self, reason="hold expired") -> None:
         lost_id = self._overtake_target_vehicle_id
         self._prepass_fallback_follow_active = False
+        self._prepass_follow_last_retry_at = None
         self._overtake_target_vehicle_id = None
         self._overtake_lane_idx = None
         self._forced_overtake_vehicle_id = None
         self._prepass_fallback_lane_idx = None
+        self._prepass_fallback_recovery_active = False
+        self._prepass_fallback_recovery_stable_since = None
+        self._prepass_fallback_recovery_started_at = None
+        self._prepass_failed_lane_idx = None
+        self._prepass_target_behind_since = None
+        self._prepass_fallback_commit_pending = False
+        self._prepass_fallback_commit_lane_idx = None
+        self._prepass_fallback_commit_success_since = None
+        self._prepass_attempted_outer_lanes.clear()
         self._follow_latched_cache = None
         self.get_logger().warn(
-            "[FollowTargetLost] hold expired; stopping once and releasing "
-            f"vehicle_id={lost_id} for full-traffic re-evaluation"
+            "[FollowTargetRelease] releasing latched follow target for "
+            f"full-traffic re-evaluation: vehicle_id={lost_id}, reason={reason}"
         )
 
     def _overtake_prediction_is_clear(self, target_id) -> bool:
@@ -1837,6 +2293,9 @@ class MPCController(Node):
                     return True
 
             # 3. 正常終了・タイムアウト終了後のリセット処理
+            reverse_drive_completed = (
+                self._stuck_recovery_started_at is not None
+            )
             self._stuck_recovery_until = None
             self._stuck_cooldown_until = now_sec + self._stuck_cooldown
             self._stuck_since = None
@@ -1852,36 +2311,54 @@ class MPCController(Node):
             self._stuck_pre_drive_until = None
             self._stuck_wait_for_drive = False
             self._publish_gear_command(now, self._gear_drive_command)
+            if reverse_drive_completed:
+                # DRIVE confirmation is only the end of the gear transition.
+                # Keep the next MPC problems full-width until a fresh
+                # prediction succeeds continuously for the normal safety
+                # recovery duration.
+                self._post_reverse_full_width_recovery_active = True
+                self._mpc_safety_recovery_active = True
+                self._mpc_safety_recovery_success_cycles = 0
+                self._stuck_since = None
+                self._gnss_history = []
+                self.get_logger().info(
+                    "[PostReverseFullWidthRecovery] DRIVE confirmed; holding "
+                    "full width until fresh MPC predictions recover "
+                    f"continuously for {self._mpc_safety_recovery_success_sec:.2f}s."
+                )
             if self._prepass_retry_after_reverse:
                 requested_lane_idx = self._prepass_retry_lane_idx
                 reverse_succeeded = self._prepass_reverse_motion_started
                 self._prepass_retry_after_reverse = False
                 self._prepass_retry_lane_idx = None
-                if reverse_succeeded:
-                    retry_lane_idx, _, conflicts = self._select_prepass_retry_lane(
-                        pose, actual_speed, requested_lane_idx)
-                else:
-                    retry_lane_idx, conflicts = None, {}
-                if retry_lane_idx is None:
+                if not reverse_succeeded:
                     self._switch_prepass_to_follow(
-                        "reverse did not move the vehicle" if not reverse_succeeded
-                        else "no safe lane remains after reverse; "
-                        f"following instead: conflicts={conflicts}"
+                        "reverse did not move the vehicle"
                     )
                 else:
+                    # Do not choose L0/L2 here.  A fresh conflict/passability
+                    # check is deferred until post-reverse full-width MPC has
+                    # recovered continuously.
                     self._prepass_fallback_blocked = False
                     self._prepass_fallback_follow_active = False
-                    self._prepass_fallback_recovery_active = False
+                    self._prepass_fallback_recovery_active = True
                     self._prepass_fallback_recovery_stable_since = None
                     self._prepass_fallback_recovery_started_at = None
-                    self._prepass_fallback_lane_idx = retry_lane_idx
-                    self._overtake_lane_idx = retry_lane_idx
-                    self._mpc.infeasibility_counter = 0
+                    self._prepass_target_behind_since = None
+                    self._prepass_fallback_lane_idx = None
+                    self._prepass_failed_lane_idx = (
+                        2 if requested_lane_idx == 0 else 0
+                        if requested_lane_idx == 2 else None
+                    )
+                    self._prepass_fallback_commit_pending = False
+                    self._prepass_fallback_commit_lane_idx = None
+                    self._prepass_fallback_commit_success_since = None
                     self._mpc.osqp_initialized = False
                     self.get_logger().warn(
-                        "[PrepassLaneFallbackRetry] reverse motion confirmed "
-                        f"({self._prepass_reverse_distance:.2f}m); latest V2X "
-                        f"selects L{retry_lane_idx}: conflicts={conflicts}"
+                        "[PrepassLaneFallbackRetryDeferred] reverse motion "
+                        f"confirmed ({self._prepass_reverse_distance:.2f}m); "
+                        "deferring lane selection until post-reverse "
+                        "full-width MPC recovery completes."
                     )
                 self._prepass_reverse_motion_started = False
                 self._prepass_reverse_start_xy = None
@@ -1949,26 +2426,45 @@ class MPCController(Node):
         # MPC safety recovery intentionally sets u[0] to zero when no valid
         # prediction exists. In that state, use low actual speed plus GNSS
         # immobility instead of requiring a positive forward command.
-        should_recover_from_mpc_stall = (
+        has_fresh_valid_prediction = (
+            self._mpc.infeasibility_counter == 0
+            and self._mpc.current_prediction is not None
+            and not self._mpc.used_prediction_fallback
+            and not self._mpc.recovery_requested
+        )
+        if (
             self._mpc_safety_recovery_active
-            and abs(actual_speed) <= self._mpc_stall_speed_threshold
-            and gnss_is_stuck
+            and has_fresh_valid_prediction
+        ):
+            # A newly solved prediction takes priority over every stall path,
+            # including the generic positive-command detector.  Restart the
+            # observation window if MPC becomes invalid again later.
+            self._stuck_since = None
+            self._gnss_history = []
+            return False
+        recover_from_mpc_stall = should_recover_from_mpc_stall(
+            safety_recovery_active=self._mpc_safety_recovery_active,
+            actual_speed=actual_speed,
+            stall_speed_threshold=self._mpc_stall_speed_threshold,
+            gnss_is_stuck=gnss_is_stuck,
+            infeasibility_counter=self._mpc.infeasibility_counter,
+            has_fresh_valid_prediction=has_fresh_valid_prediction,
         )
         if is_stuck_state and (
             u[0] > self._stuck_forward_cmd_threshold
             or should_recover_from_close_obstacle
-            or should_recover_from_mpc_stall
+            or recover_from_mpc_stall
         ):
             if self._stuck_since is None:
                 # gnss_is_stuck already covers the observation period, so an
                 # MPC stall must not wait for the same duration a second time.
                 self._stuck_since = (
                     now_sec - self._stuck_time_threshold
-                    if should_recover_from_mpc_stall
+                    if recover_from_mpc_stall
                     else now_sec
                 )
             elif now_sec - self._stuck_since >= self._stuck_time_threshold:
-                if should_recover_from_mpc_stall:
+                if recover_from_mpc_stall:
                     self.get_logger().warn(
                         "[MPCStallRecovery] starting reverse after GNSS "
                         f"movement stayed below "
@@ -2552,6 +3048,157 @@ class MPCController(Node):
             and center_yaw_rate <= self._center_lane_rejoin_max_yaw_rate
             and self._mpc.infeasibility_counter == 0
         )
+        l1_lateral_error = self._lane_lateral_error(pose.x, pose.y, 1)
+        fresh_full_width_prediction = (
+            self._reference_path is self._reference_pathN_center
+            and self._reference_path.target_lane_idx is None
+            and self._mpc.infeasibility_counter == 0
+            and self._mpc.current_prediction is not None
+            and not getattr(self._mpc, "used_prediction_fallback", False)
+            and not self._mpc_safety_recovery_active
+            and not recovery_active
+            and not self._post_reverse_full_width_recovery_active
+        )
+        l1_prediction_fit_ratio = (
+            self._current_prediction_l1_fit_ratio()
+            if fresh_full_width_prediction else 0.0
+        )
+        l1_entry_geometry_ready = (
+            l1_lateral_error < self._l1_rejoin_max_lateral_error
+            and l1_prediction_fit_ratio >= self._l1_prediction_min_fit_ratio
+        )
+
+        # An L1 failure attributed by SafetyRecovery owns lateral selection
+        # until full-width MPC and the vehicle state are both stable.  Only
+        # then is L1 allowed back as an explicit feasibility probe.
+        if self._l1_safety_recovery_active:
+            l1_full_width_stable = (
+                not self._mpc_safety_recovery_active
+                and not recovery_active
+                and center_rejoin_stable
+                and fresh_full_width_prediction
+                and l1_entry_geometry_ready
+            )
+            if l1_full_width_stable:
+                if self._l1_safety_recovery_stable_since is None:
+                    self._l1_safety_recovery_stable_since = now_sec
+                stable_elapsed = (
+                    now_sec - self._l1_safety_recovery_stable_since)
+                if stable_elapsed >= self._center_lane_rejoin_stable_sec:
+                    probe_context = (
+                        self._l1_safety_recovery_context or "rejoin")
+                    self._l1_safety_recovery_active = False
+                    self._l1_safety_recovery_stable_since = None
+                    self._l1_probe_active = True
+                    self._l1_probe_context = probe_context
+                    self._l1_probe_success_cycles = 0
+                    self._l1_probe_constraint_applied = False
+                    self.get_logger().info(
+                        "[L1SafetyRecovery] full-width vehicle state stable; "
+                        "starting controlled L1 feasibility probe: "
+                        f"context={probe_context}, "
+                        f"stable_sec={self._center_lane_rejoin_stable_sec:.2f}, "
+                        f"heading_error="
+                        f"{math.degrees(center_heading_error):.1f}deg, "
+                        f"l1_lateral_error={l1_lateral_error:.2f}m, "
+                        f"prediction_fit={l1_prediction_fit_ratio:.2f}, "
+                        f"lateral_speed={center_lateral_speed:.2f}m/s, "
+                        f"yaw_rate={center_yaw_rate:.2f}rad/s"
+                    )
+            else:
+                self._l1_safety_recovery_stable_since = None
+                self.get_logger().info(
+                    "[L1SafetyRecoveryHold] keeping full width until MPC "
+                    "and vehicle state are stable: "
+                    f"generic_recovery={self._mpc_safety_recovery_active}, "
+                    f"heading_error="
+                    f"{math.degrees(center_heading_error):.1f}deg/"
+                    f"{math.degrees(self._center_lane_rejoin_max_heading):.1f}, "
+                    f"l1_lateral_error={l1_lateral_error:.2f}/"
+                    f"{self._l1_rejoin_max_lateral_error:.2f}m, "
+                    f"prediction_fit={l1_prediction_fit_ratio:.2f}/"
+                    f"{self._l1_prediction_min_fit_ratio:.2f}, "
+                    f"lateral_speed={center_lateral_speed:.2f}/"
+                    f"{self._center_lane_rejoin_max_lateral_speed:.2f}m/s, "
+                    f"yaw_rate={center_yaw_rate:.2f}/"
+                    f"{self._center_lane_rejoin_max_yaw_rate:.2f}rad/s, "
+                    f"mpc_infeasible={self._mpc.infeasibility_counter}",
+                    throttle_duration_sec=1.0,
+                )
+
+        # Evaluate a SafetyRecovery-originated L1 probe independently from
+        # opponent/trajectory state.  L1 may also be requested by fallback,
+        # parallel-yield, or curve logic while Race is active.
+        if (
+            self._l1_safety_reprobe_pending
+            and self._l1_probe_active
+            and self._l1_probe_constraint_applied
+            and not recovery_active
+        ):
+            if self._mpc.infeasibility_counter > 0:
+                failed_context = self._l1_probe_context or "rejoin"
+                self._log_l1_constraint_diagnostics(
+                    context=f"safety_reprobe:{failed_context}",
+                    failed_wp=center_wp_temp,
+                    reason="safety-reprobe L1 infeasible",
+                )
+                self._l1_probe_active = False
+                self._l1_probe_context = None
+                self._l1_probe_success_cycles = 0
+                self._l1_probe_constraint_applied = False
+                self._center_lane_rejoin_stable_since = None
+                l1_probe_failed_this_cycle = True
+                if failed_context == "fallback":
+                    self._l1_safety_recovery_active = False
+                    self._l1_safety_recovery_stable_since = None
+                    self._l1_safety_recovery_context = None
+                    self._l1_safety_reprobe_pending = False
+                    self._switch_prepass_to_follow(
+                        "L1 fallback probe is infeasible after outer-lane "
+                        "candidates were exhausted"
+                    )
+                else:
+                    self._l1_safety_recovery_active = False
+                    self._l1_safety_recovery_stable_since = None
+                    self._l1_safety_recovery_context = None
+                    self._l1_safety_reprobe_pending = False
+                    self._start_l1_rejoin_backoff(
+                        now_sec, center_wp_temp,
+                        "safety-reprobe L1 infeasible")
+                    self.get_logger().warn(
+                        "[L1SafetyRecoveryProbe] L1 probe infeasible; returning "
+                        "to dedicated full-width BACKOFF: "
+                        f"context={failed_context}, "
+                        f"mpc_infeasible={self._mpc.infeasibility_counter}"
+                    )
+            else:
+                self._l1_probe_success_cycles += 1
+                if (
+                    self._l1_probe_success_cycles
+                    >= self._l1_probe_required_success_cycles
+                ):
+                    confirmed_context = self._l1_probe_context or "rejoin"
+                    self._l1_probe_active = False
+                    self._l1_probe_context = None
+                    self._l1_probe_success_cycles = 0
+                    self._l1_probe_constraint_applied = False
+                    if confirmed_context == "rejoin":
+                        self._center_lane_rejoin_active = True
+                    elif confirmed_context == "fallback":
+                        self._prepass_fallback_lane_idx = 1
+                        self._overtake_lane_idx = None
+                        self._outer_lane_released_vehicle_id = None
+                        self._prepass_attempted_outer_lanes.clear()
+                    self._l1_safety_recovery_active = False
+                    self._l1_safety_recovery_stable_since = None
+                    self._l1_safety_recovery_context = None
+                    self._l1_safety_reprobe_pending = False
+                    self.get_logger().info(
+                        "[L1SafetyRecoveryProbe] L1 constraint confirmed "
+                        "feasible; normal L1 ownership may resume: "
+                        f"context={confirmed_context}, success_cycles="
+                        f"{self._l1_probe_required_success_cycles}"
+                    )
 
         initial_start_lateral_hold_active = (
             self._initial_start_hold_l0
@@ -2583,6 +3230,9 @@ class MPCController(Node):
             self._l1_probe_context = None
             self._l1_probe_success_cycles = 0
             self._l1_probe_constraint_applied = False
+            if self._l1_safety_reprobe_pending:
+                self._l1_safety_recovery_active = True
+                self._l1_safety_recovery_stable_since = None
             self.get_logger().info(
                 "[InitialStartLaneHold] cancelled pending L1 rejoin while "
                 "initial/post-boost L0 hold is active."
@@ -2659,6 +3309,9 @@ class MPCController(Node):
         if recovery_active:
             self._trajectory_clear_since = None
             self._center_lane_rejoin_stable_since = None
+            if self._l1_safety_reprobe_pending:
+                self._l1_safety_recovery_active = True
+                self._l1_safety_recovery_stable_since = None
             self._l1_probe_active = False
             self._l1_probe_context = None
             self._l1_probe_success_cycles = 0
@@ -2673,15 +3326,74 @@ class MPCController(Node):
                 closest_opp_ahead > self._trajectory_exit_center_wps
                 and closest_opp_behind > self._trajectory_behind_release_wps
             )
+            if self._l1_rejoin_backoff_active:
+                self._l1_rejoin_backoff_full_width_success_since = (
+                    update_continuous_condition_since(
+                        self._l1_rejoin_backoff_full_width_success_since,
+                        now_sec=now_sec,
+                        condition=fresh_full_width_prediction,
+                    )
+                )
+                backoff_elapsed = (
+                    0.0 if self._l1_rejoin_backoff_started_at is None
+                    else now_sec - self._l1_rejoin_backoff_started_at
+                )
+                backoff_wp_progress = circular_forward_progress(
+                    self._l1_rejoin_backoff_failed_wp,
+                    center_wp_temp,
+                    self._reference_pathN_center.n_waypoints,
+                )
+                full_width_success_elapsed = (
+                    0.0
+                    if self._l1_rejoin_backoff_full_width_success_since is None
+                    else now_sec
+                        - self._l1_rejoin_backoff_full_width_success_since
+                )
+                if should_exit_l1_probe_backoff(
+                    elapsed_sec=backoff_elapsed,
+                    cooldown_sec=self._l1_probe_retry_cooldown_sec,
+                    waypoint_progress=backoff_wp_progress,
+                    minimum_waypoint_progress=(
+                        self._l1_probe_retry_min_wp_progress),
+                    full_width_success_sec=full_width_success_elapsed,
+                    required_full_width_success_sec=(
+                        self._l1_backoff_full_width_success_sec),
+                ):
+                    self.get_logger().info(
+                        "[L1ProbeBackoffRelease] full-width recovery complete; "
+                        "returning to FULL_WIDTH_WAIT: "
+                        f"elapsed={backoff_elapsed:.2f}s, "
+                        f"wp_progress={backoff_wp_progress}, "
+                        f"full_width_success="
+                        f"{full_width_success_elapsed:.2f}s"
+                    )
+                    self._reset_l1_rejoin_backoff()
+                else:
+                    self.get_logger().info(
+                        "[L1ProbeBackoffHold] keeping full width: "
+                        f"elapsed={backoff_elapsed:.2f}/"
+                        f"{self._l1_probe_retry_cooldown_sec:.2f}s, "
+                        f"wp_progress={backoff_wp_progress}/"
+                        f"{self._l1_probe_retry_min_wp_progress}, "
+                        f"full_width_success={full_width_success_elapsed:.2f}/"
+                        f"{self._l1_backoff_full_width_success_sec:.2f}s",
+                        throttle_duration_sec=1.0,
+                    )
             # L1 is first applied as a short feasibility probe. The counter
             # observed here is the result of the previous cycle's L1-constrained
             # solve, so no second MPC solve is needed.
             if (
                 self._l1_probe_active
                 and self._l1_probe_constraint_applied
+                and not self._l1_safety_reprobe_pending
             ):
                 if self._mpc.infeasibility_counter > 0:
                     failed_context = self._l1_probe_context
+                    self._log_l1_constraint_diagnostics(
+                        context=f"probe:{failed_context}",
+                        failed_wp=center_wp_temp,
+                        reason="L1 constrained MPC infeasible",
+                    )
                     self._l1_probe_active = False
                     self._l1_probe_context = None
                     self._l1_probe_success_cycles = 0
@@ -2689,9 +3401,14 @@ class MPCController(Node):
                     l1_probe_failed_this_cycle = True
                     self._center_lane_rejoin_stable_since = None
                     if failed_context == "fallback":
-                        self._prepass_fallback_recovery_active = True
-                        self._prepass_fallback_recovery_stable_since = None
-                        self._prepass_fallback_recovery_started_at = now_sec
+                        self._switch_prepass_to_follow(
+                            "L1 fallback probe is infeasible after outer-lane "
+                            "candidates were exhausted"
+                        )
+                    elif failed_context == "rejoin":
+                        self._start_l1_rejoin_backoff(
+                            now_sec, center_wp_temp,
+                            "L1 constrained MPC infeasible")
                     self.get_logger().warn(
                         "[L1Probe] L1 constraint infeasible; returning to "
                         f"full width: context={failed_context}, "
@@ -2714,6 +3431,7 @@ class MPCController(Node):
                             self._prepass_fallback_lane_idx = 1
                             self._overtake_lane_idx = None
                             self._outer_lane_released_vehicle_id = None
+                            self._prepass_attempted_outer_lanes.clear()
                         self.get_logger().info(
                             "[L1Probe] L1 constraint confirmed feasible: "
                             f"context={confirmed_context}, "
@@ -2726,11 +3444,17 @@ class MPCController(Node):
             if (
                 not self._center_lane_rejoin_active
                 and not self._l1_probe_active
+                and not self._l1_safety_reprobe_pending
+                and not self._l1_rejoin_backoff_active
             ):
                 can_start_center_rejoin = (
                     center_lane_rejoin_clear
                     and not forced_overtake_pending
                     and not initial_start_lateral_hold_active
+                    and not self._prepass_fallback_recovery_active
+                    and not self._prepass_fallback_commit_pending
+                    and fresh_full_width_prediction
+                    and l1_entry_geometry_ready
                     and (
                         not self._center_lane_rejoin_stability_enabled
                         or center_rejoin_stable
@@ -2756,6 +3480,10 @@ class MPCController(Node):
                             "L1 feasibility probe: "
                             f"heading_error="
                             f"{math.degrees(center_heading_error):.1f}deg, "
+                            f"l1_lateral_error={l1_lateral_error:.2f}m/"
+                            f"{self._l1_rejoin_max_lateral_error:.2f}m, "
+                            f"prediction_fit={l1_prediction_fit_ratio:.2f}/"
+                            f"{self._l1_prediction_min_fit_ratio:.2f}, "
                             f"lateral_speed={center_lateral_speed:.2f}m/s, "
                             f"yaw_rate={center_yaw_rate:.2f}rad/s."
                         )
@@ -2767,6 +3495,12 @@ class MPCController(Node):
                             f"heading_error="
                             f"{math.degrees(center_heading_error):.1f}deg/"
                             f"{math.degrees(self._center_lane_rejoin_max_heading):.1f}, "
+                            f"l1_lateral_error={l1_lateral_error:.2f}/"
+                            f"{self._l1_rejoin_max_lateral_error:.2f}m, "
+                            f"prediction_fit={l1_prediction_fit_ratio:.2f}/"
+                            f"{self._l1_prediction_min_fit_ratio:.2f}, "
+                            f"full_width_prediction="
+                            f"{fresh_full_width_prediction}, "
                             f"lateral_speed={center_lateral_speed:.2f}/"
                             f"{self._center_lane_rejoin_max_lateral_speed:.2f}m/s, "
                             f"yaw_rate={center_yaw_rate:.2f}/"
@@ -2779,6 +3513,7 @@ class MPCController(Node):
                 self, '_constraint_transition_until', 0.0)
             center_lane_rejoin_ready = (
                 self._center_lane_rejoin_active
+                and not self._l1_safety_reprobe_pending
                 and (
                     self._target_lane_idx == 1
                     or self._center_lane_rejoin_constraint_released
@@ -2817,13 +3552,15 @@ class MPCController(Node):
                         throttle_duration_sec=1.0,
                     )
         else:
+            self._reset_l1_rejoin_backoff()
             self._center_lane_rejoin_active = False
             self._center_lane_rejoin_constraint_released = False
             self._center_lane_rejoin_stable_since = None
-            self._l1_probe_active = False
-            self._l1_probe_context = None
-            self._l1_probe_success_cycles = 0
-            self._l1_probe_constraint_applied = False
+            if not self._l1_safety_reprobe_pending:
+                self._l1_probe_active = False
+                self._l1_probe_context = None
+                self._l1_probe_success_cycles = 0
+                self._l1_probe_constraint_applied = False
             self._trajectory_clear_since = None
             if (
                 closest_opp_ahead < self._trajectory_enter_center_wps
@@ -2941,6 +3678,8 @@ class MPCController(Node):
                 self._prepass_retry_lane_idx = None
                 self._prepass_fallback_recovery_active = False
                 self._prepass_fallback_recovery_stable_since = None
+                self._prepass_fallback_commit_pending = False
+                self._prepass_fallback_commit_lane_idx = None
             else:
                 self._post_overtake_vehicle_id = (
                     self._overtake_target_vehicle_id
@@ -2961,6 +3700,8 @@ class MPCController(Node):
                 self._prepass_fallback_follow_active = False
                 self._prepass_fallback_recovery_active = False
                 self._prepass_fallback_recovery_stable_since = None
+                self._prepass_fallback_commit_pending = False
+                self._prepass_fallback_commit_lane_idx = None
                 self._trajectory_vehicle_id = None
 
         # --- 重要: self._car / self._mpc / self._reference_path を _carN / _mpcN / _reference_pathN に同期 ---
@@ -3171,7 +3912,7 @@ class MPCController(Node):
             # 追い越しモード自体が終了した場合はターゲット車線をクリア
             new_target_lane_idx = None
 
-        if self._parallel_abort_active:
+        if self._parallel_abort_active and not recovery_active:
             abort_vehicle_active = (
                 self._parallel_abort_vehicle_id
                 in self._v2x_tracker.active_vehicle_ids()
@@ -3199,14 +3940,46 @@ class MPCController(Node):
                 self._parallel_abort_active = False
                 self._parallel_abort_vehicle_id = None
 
-        exclusive_l1_rejoin = (
-            self._center_lane_rejoin_active
-            or (
-                self._l1_probe_active
-                and self._l1_probe_context == "rejoin"
+        prepass_selection_exclusive = (
+            recovery_active
+            or self._post_reverse_full_width_recovery_active
+            or prepass_recovery_owns_lane_selection(
+                self._prepass_fallback_recovery_active,
+                self._prepass_fallback_commit_pending,
             )
         )
-        if exclusive_l1_rejoin:
+        exclusive_l1_rejoin = (
+            not prepass_selection_exclusive
+            and (
+                self._center_lane_rejoin_active
+                or self._l1_safety_reprobe_pending
+                or self._l1_rejoin_backoff_active
+                or (
+                    self._l1_probe_active
+                    and self._l1_probe_context == "rejoin"
+                )
+            )
+        )
+        if recovery_active:
+            # Freeze all lateral selection while shifting/reversing.  The
+            # applied constraint is released to full width below, but no
+            # latch, probe, or fallback decision may advance in this state.
+            overtake_latch_started = False
+            new_target_lane_idx = None
+        elif self._prepass_fallback_recovery_active:
+            # Prepass exclusively owns the lateral state from the moment the
+            # failed outer lane is released until it selects a fallback or
+            # switches to follow/reverse.  Do not let the ordinary selector
+            # recreate L0/L2 latches during full-width recovery.
+            overtake_latch_started = False
+            new_target_lane_idx = None
+        elif self._prepass_fallback_commit_pending:
+            # Recovery has selected a concrete fallback.  Keep ordinary L1
+            # rejoin and L0/L2 selection suspended until this lane has really
+            # been applied to MPC and produced a feasible solution.
+            overtake_latch_started = False
+            new_target_lane_idx = self._prepass_fallback_commit_lane_idx
+        elif exclusive_l1_rejoin:
             # L1 rejoin exclusively owns lateral selection. Calling the outer
             # lane selector here would recreate an L0/L2 latch every cycle,
             # only for the block below to clear it again in the same cycle.
@@ -3228,7 +4001,38 @@ class MPCController(Node):
             self._prepass_fallback_blocked = False
             self._prepass_fallback_follow_active = False
             self._prepass_fallback_recovery_active = False
+            self._prepass_fallback_commit_pending = False
+            self._prepass_fallback_commit_lane_idx = None
         else:
+            # Race->Center remains controlled by enter_center_wps.  Only the
+            # creation of a *new* L0/L2 latch is delayed until the selected
+            # opponent is inside the metric distance gate.  An already active
+            # latch is preserved here and is released by the existing pass and
+            # Prepass state machines.
+            existing_outer_latch = self._overtake_lane_idx in (0, 2)
+            new_latch_within_distance = is_follow_retry_within_distance(
+                opponent_distance,
+                self._overtake_latch_max_distance,
+            )
+            latch_candidate_vehicle_id = opponent_vehicle_id
+            latch_candidate_lane_idx = new_target_lane_idx
+            if (
+                not existing_outer_latch
+                and new_target_lane_idx in (0, 2)
+                and not new_latch_within_distance
+            ):
+                # Stay on Center/L1 while the high-level opponent-ahead mode
+                # is active, then choose and latch an outer lane below 10 m.
+                latch_candidate_vehicle_id = None
+                latch_candidate_lane_idx = 1
+                self.get_logger().info(
+                    "[OvertakeLatchDistanceHold] opponent detected but outside "
+                    "new-latch gate; keeping L1: "
+                    f"vehicle_id={opponent_vehicle_id}, "
+                    f"distance={opponent_distance:.2f}m/"
+                    f"{self._overtake_latch_max_distance:.2f}m",
+                    throttle_duration_sec=1.0,
+                )
             (
                 new_target_lane_idx,
                 self._overtake_target_vehicle_id,
@@ -3236,18 +4040,21 @@ class MPCController(Node):
                 overtake_latch_started,
             ) = select_latched_overtake_lane(
                 opponent_ahead_detected and not self._parallel_abort_active,
-                opponent_vehicle_id,
+                latch_candidate_vehicle_id,
                 (
                     1 if (
                         self._prepass_fallback_lane_idx == 1
                         or self._prepass_fallback_follow_active
                     )
-                    else new_target_lane_idx
+                    else latch_candidate_lane_idx
                 ),
                 self._overtake_target_vehicle_id,
                 self._overtake_lane_idx,
             )
-        if self._parallel_abort_active:
+        if (
+            self._parallel_abort_active
+            and not prepass_selection_exclusive
+        ):
             # This state exclusively owns lateral selection until the parallel
             # vehicle has moved safely ahead. Do not let an outer-lane latch,
             # prepass fallback, or L1 rejoin overwrite it.
@@ -3259,14 +4066,17 @@ class MPCController(Node):
             self._prepass_fallback_blocked = False
             self._prepass_fallback_follow_active = False
             self._prepass_fallback_recovery_active = False
+            self._prepass_fallback_commit_pending = False
+            self._prepass_fallback_commit_lane_idx = None
             self._prepass_retry_after_reverse = False
             self._center_lane_rejoin_active = False
             self._center_lane_rejoin_constraint_released = False
             self._center_lane_rejoin_stable_since = None
-            self._l1_probe_active = False
-            self._l1_probe_context = None
-            self._l1_probe_success_cycles = 0
-            self._l1_probe_constraint_applied = False
+            if not self._l1_safety_reprobe_pending:
+                self._l1_probe_active = False
+                self._l1_probe_context = None
+                self._l1_probe_success_cycles = 0
+                self._l1_probe_constraint_applied = False
         # Once the post-pass L1 rejoin starts, it owns the lateral state.
         # Drop every outer-lane latch so the old passing-side release cannot
         # compete with the L1 infeasibility release later in the same manoeuvre.
@@ -3277,7 +4087,10 @@ class MPCController(Node):
                 or self._prepass_fallback_lane_idx is not None
                 or self._prepass_fallback_recovery_active
             )
-            if self._l1_probe_context != "fallback":
+            if (
+                self._l1_probe_context != "fallback"
+                and self._l1_safety_recovery_context != "fallback"
+            ):
                 self._overtake_target_vehicle_id = None
                 self._overtake_lane_idx = None
                 self._outer_lane_released_vehicle_id = None
@@ -3311,6 +4124,8 @@ class MPCController(Node):
             self._follow_latched_cache = None
             self._prepass_fallback_recovery_active = False
             self._prepass_fallback_recovery_stable_since = None
+            self._prepass_fallback_commit_pending = False
+            self._prepass_fallback_commit_lane_idx = None
             lane_label = "L0" if self._overtake_lane_idx == 0 else "L2"
             self.get_logger().info(
                 "[OvertakeLatch] fixed passing side: "
@@ -3319,6 +4134,90 @@ class MPCController(Node):
             )
 
         current_time_sec = float(now.nanoseconds) / 1e9
+        prepass_distance_gate_released_this_cycle = False
+
+        if (
+            not self._follow_only
+            and not recovery_active
+            and should_reevaluate_follow_overtake(
+                self._prepass_fallback_follow_active,
+                current_time_sec,
+                self._prepass_follow_last_retry_at,
+                self._prepass_follow_retry_sec,
+            )
+        ):
+            self._prepass_follow_last_retry_at = current_time_sec
+            follow_retry_state = self._latched_follow_target_state(
+                pose, current_time_sec)
+            if (
+                follow_retry_state is not None
+                and not follow_retry_state.get("expired", False)
+                and is_follow_target_ahead(
+                    follow_retry_state.get("longitudinal"))
+            ):
+                follow_retry_distance = float(
+                    follow_retry_state.get("distance", math.inf))
+                if not is_follow_retry_within_distance(
+                    follow_retry_distance,
+                    self._prepass_follow_retry_max_distance,
+                ):
+                    self.get_logger().info(
+                        "[PrepassFollowRetryHold] periodic follow "
+                        "re-evaluation is outside the overtake distance gate; "
+                        f"keeping follow: vehicle_id="
+                        f"{self._overtake_target_vehicle_id}, "
+                        f"target_distance={follow_retry_distance:.2f}m/"
+                        f"{self._prepass_follow_retry_max_distance:.2f}m"
+                    )
+                else:
+                    (
+                        follow_retry_lane_idx,
+                        _,
+                        follow_retry_conflicts,
+                    ) = self._select_prepass_retry_lane(
+                        pose, v, self._overtake_lane_idx)
+                    follow_retry_passage, _ = self._latched_target_passage(pose)
+                    if follow_retry_lane_idx in (0, 2):
+                        self._cancel_normal_l1_rejoin_for_prepass()
+                        self._prepass_fallback_follow_active = False
+                        self._prepass_fallback_blocked = False
+                        self._prepass_fallback_recovery_active = True
+                        self._prepass_fallback_recovery_stable_since = None
+                        self._prepass_fallback_recovery_started_at = (
+                            current_time_sec)
+                        self._prepass_target_behind_since = None
+                        # Make the newly verified lane the opposite-first choice
+                        # when recovery becomes dynamically stable.
+                        self._prepass_failed_lane_idx = (
+                            2 if follow_retry_lane_idx == 0 else 0)
+                        self._overtake_lane_idx = follow_retry_lane_idx
+                        self._prepass_fallback_lane_idx = None
+                        self._prepass_fallback_commit_pending = False
+                        self._prepass_fallback_commit_lane_idx = None
+                        self._prepass_fallback_commit_success_since = None
+                        self._prepass_attempted_outer_lanes.clear()
+                        self._mpc.infeasibility_counter = 0
+                        self._mpc.osqp_initialized = False
+                        self.get_logger().warn(
+                            "[PrepassFollowRetry] periodic follow re-evaluation "
+                            "found a clear outer lane inside the distance gate; "
+                            "returning to full-width recovery before probing "
+                            f"L{follow_retry_lane_idx}: vehicle_id="
+                            f"{self._overtake_target_vehicle_id}, "
+                            f"target_distance={follow_retry_distance:.2f}m, "
+                            f"physical_passage={follow_retry_passage}, "
+                            f"conflicts={follow_retry_conflicts}"
+                        )
+                    else:
+                        self.get_logger().info(
+                            "[PrepassFollowRetryHold] periodic follow "
+                            "re-evaluation found no clear outer lane; keeping "
+                            f"follow: vehicle_id="
+                            f"{self._overtake_target_vehicle_id}, "
+                            f"target_distance={follow_retry_distance:.2f}m, "
+                            f"physical_passage={follow_retry_passage}, "
+                            f"conflicts={follow_retry_conflicts}"
+                        )
 
         lead_is_stationary = (
             opponent_vehicle_id is not None
@@ -3327,6 +4226,7 @@ class MPCController(Node):
         )
         if (
             lead_is_stationary
+            and not recovery_active
             and not self._follow_only
             and not self._prepass_fallback_follow_active
             and not self._parallel_abort_active
@@ -3344,14 +4244,15 @@ class MPCController(Node):
                     throttle_duration_sec=1.0,
                 )
             self._forced_overtake_vehicle_id = opponent_vehicle_id
-        elif self._prepass_fallback_follow_active:
+        elif self._prepass_fallback_follow_active and not recovery_active:
             # A timed-out overtake is now ordinary longitudinal following,
             # including following a stopped lead. Do not re-arm forced
             # overtaking or its close-obstacle reverse fallback.
             self._forced_overtake_vehicle_id = None
 
         if (
-            self._forced_overtake_vehicle_id is not None
+            not recovery_active
+            and self._forced_overtake_vehicle_id is not None
             and opponent_vehicle_id != self._forced_overtake_vehicle_id
         ):
             forced_id = self._forced_overtake_vehicle_id
@@ -3386,8 +4287,49 @@ class MPCController(Node):
                     pose.theta,
                 )
 
+        prepass_target_tracking_active = bool(
+            self._prepass_fallback_recovery_active
+            or self._prepass_fallback_commit_pending
+            or self._prepass_fallback_lane_idx in (0, 1, 2)
+        )
+        target_is_confirmably_behind = bool(
+            prepass_target_tracking_active
+            and latched_target_longitudinal is not None
+            and latched_target_longitudinal
+                < -self._prepass_behind_release_longitudinal
+        )
+        self._prepass_target_behind_since = update_continuous_condition_since(
+            self._prepass_target_behind_since,
+            now_sec=current_time_sec,
+            condition=target_is_confirmably_behind,
+        )
+        if continuous_condition_confirmed(
+            self._prepass_target_behind_since,
+            now_sec=current_time_sec,
+            confirm_sec=self._prepass_behind_release_confirm_sec,
+        ):
+            behind_elapsed = current_time_sec - self._prepass_target_behind_since
+            released_target_id = self._overtake_target_vehicle_id
+            self._release_lost_follow_target(
+                reason=(
+                    "Prepass target remained behind ego: "
+                    f"longitudinal={latched_target_longitudinal:.2f}m < "
+                    f"-{self._prepass_behind_release_longitudinal:.2f}m "
+                    f"for {behind_elapsed:.2f}s"
+                )
+            )
+            self.get_logger().info(
+                "[PrepassBehindRelease] confirmed target behind ego; "
+                "ending Prepass immediately: "
+                f"vehicle_id={released_target_id}, "
+                f"longitudinal={latched_target_longitudinal:.2f}m, "
+                f"confirm_sec={behind_elapsed:.2f}/"
+                f"{self._prepass_behind_release_confirm_sec:.2f}"
+            )
+
         prepass_fallback_triggered = (
             self._prepass_lane_fallback_enabled
+            and not recovery_active
             and opponent_ahead_detected
             and self._overtake_lane_idx in (0, 2)
             and self._prepass_fallback_lane_idx is None
@@ -3400,10 +4342,15 @@ class MPCController(Node):
                 >= self._prepass_lane_fallback_infeasible_cycles
         )
         if prepass_fallback_triggered:
+            self._cancel_normal_l1_rejoin_for_prepass()
+            self._prepass_attempted_outer_lanes.clear()
             self._prepass_fallback_recovery_active = True
             self._prepass_fallback_recovery_stable_since = None
             self._prepass_fallback_recovery_started_at = current_time_sec
+            self._prepass_target_behind_since = None
             self._prepass_failed_lane_idx = self._overtake_lane_idx
+            self._prepass_fallback_commit_pending = False
+            self._prepass_fallback_commit_lane_idx = None
             self.get_logger().warn(
                 "[PrepassLaneFallbackRecovery] fixed lane became infeasible; "
                 "releasing lane constraint to full width before selecting "
@@ -3411,7 +4358,11 @@ class MPCController(Node):
                 f"mpc_infeasible={self._mpc.infeasibility_counter}"
             )
 
-        if self._prepass_fallback_recovery_active:
+        if (
+            self._prepass_fallback_recovery_active
+            and not recovery_active
+            and not self._post_reverse_full_width_recovery_active
+        ):
             failed_lane_idx = (
                 self._prepass_failed_lane_idx
                 if self._prepass_failed_lane_idx in (0, 2)
@@ -3423,29 +4374,157 @@ class MPCController(Node):
                 current_time_sec
                 - self._prepass_fallback_recovery_started_at
             )
+            (
+                recovery_candidate_lane,
+                latched_target_distance,
+                passage_conflicts,
+                recovery_physical_passage,
+            ) = self._select_prepass_fallback_lane(
+                pose,
+                v,
+                failed_lane_idx,
+            )
+            if should_release_prepass_distance_gate(
+                recovery_active=self._prepass_fallback_recovery_active,
+                distance=latched_target_distance,
+                max_distance=self._prepass_follow_retry_max_distance,
+            ):
+                released_target_id = self._overtake_target_vehicle_id
+                released_distance = float(latched_target_distance)
+                prepass_distance_gate_released_this_cycle = True
+                self._release_lost_follow_target(
+                    reason=(
+                        "active Prepass target exited overtake distance gate: "
+                        f"distance={released_distance:.2f}m, "
+                        f"gate=<{self._prepass_follow_retry_max_distance:.2f}m"
+                    )
+                )
+                self.get_logger().info(
+                    "[PrepassDistanceGateRelease] target left the overtake "
+                    "gate during full-width recovery; ending Prepass "
+                    "immediately: "
+                    f"vehicle_id={released_target_id}, "
+                    f"target_distance={released_distance:.2f}m/"
+                    f"{self._prepass_follow_retry_max_distance:.2f}m, "
+                    f"elapsed={recovery_total_elapsed:.2f}s"
+                )
+            candidate_heading = self._candidate_lane_heading(
+                recovery_candidate_lane, wp)
+            candidate_heading_error = absolute_heading_difference(
+                pose.theta, candidate_heading)
+            candidate_lateral_speed = max(
+                measured_lateral_speed,
+                abs(float(v) * math.sin(candidate_heading_error)),
+            )
+            prepass_mpc_stable = (
+                self._mpc.infeasibility_counter == 0
+                and self._mpc.current_prediction is not None
+                and not getattr(self._mpc, "used_prediction_fallback", False)
+                and not self._mpc_safety_recovery_active
+            )
+            prepass_heading_stable = (
+                recovery_candidate_lane is not None
+                and candidate_heading_error <= self._prepass_max_heading
+            )
+            prepass_dynamics_stable = (
+                candidate_lateral_speed
+                    <= self._center_lane_rejoin_max_lateral_speed
+                and center_yaw_rate <= self._center_lane_rejoin_max_yaw_rate
+            )
+
             if (
-                self._prepass_lane_fallback_recovery_timeout_sec > 0.0
+                self._prepass_fallback_recovery_active
+                and self._prepass_lane_fallback_recovery_timeout_sec > 0.0
                 and recovery_total_elapsed
                     >= self._prepass_lane_fallback_recovery_timeout_sec
             ):
                 self._prepass_fallback_recovery_active = False
                 self._prepass_fallback_recovery_stable_since = None
                 self._prepass_fallback_recovery_started_at = None
-                retry_lane_idx, latched_target_distance, passage_conflicts = (
-                    self._select_prepass_retry_lane(
-                        pose,
-                        v,
-                        failed_lane_idx,
-                        exclude_lane_idx=failed_lane_idx,
-                    )
-                )
+                timeout_target_id = self._overtake_target_vehicle_id
+                retry_lane_idx = recovery_candidate_lane
+                timeout_physical_passage = recovery_physical_passage
+                timeout_target_distance = latched_target_distance
                 reverse_rear_clear = self._reverse_rear_is_clear(pose, v)
+                timeout_follow_state = self._latched_follow_target_state(
+                    pose, current_time_sec)
+                timeout_target_longitudinal = (
+                    timeout_follow_state.get("longitudinal")
+                    if timeout_follow_state is not None
+                    and not timeout_follow_state.get("expired", False)
+                    else None
+                )
+                distance_within_gate = is_follow_retry_within_distance(
+                    latched_target_distance,
+                    self._prepass_follow_retry_max_distance,
+                )
+                candidate_outer_lanes = tuple(
+                    lane_idx for lane_idx in passage_conflicts
+                    if lane_idx in (0, 2)
+                )
+                physical_passage_available = any(
+                    timeout_physical_passage.get(lane_idx, False)
+                    for lane_idx in candidate_outer_lanes
+                )
+                traffic_clear = any(
+                    timeout_physical_passage.get(lane_idx, False)
+                    and lane_conflicts_are_clear(passage_conflicts[lane_idx])
+                    for lane_idx in candidate_outer_lanes
+                )
+                timeout_reasons = classify_prepass_timeout_reasons(
+                    mpc_stable=prepass_mpc_stable,
+                    heading_stable=prepass_heading_stable,
+                    dynamics_stable=prepass_dynamics_stable,
+                    physical_passage_available=physical_passage_available,
+                    traffic_clear=traffic_clear,
+                    distance_within_gate=distance_within_gate,
+                    target_behind=(
+                        timeout_target_longitudinal is not None
+                        and not is_follow_target_ahead(
+                            timeout_target_longitudinal)
+                    ),
+                )
 
-                if retry_lane_idx is None:
-                    self._switch_prepass_to_follow(
-                        "both outer lanes are unsafe for the latched target"
+                if (
+                    timeout_target_longitudinal is not None
+                    and not is_follow_target_ahead(timeout_target_longitudinal)
+                ):
+                    self._release_lost_follow_target(
+                        reason=(
+                            "latched vehicle is behind ego "
+                            f"(longitudinal={timeout_target_longitudinal:.2f}m)"
+                        )
                     )
-                    action = "no passable side; switching to follow"
+                    action = "latched target is behind; releasing without follow"
+                elif not distance_within_gate:
+                    self._release_lost_follow_target(
+                        reason=(
+                            "Prepass timeout target is outside overtake "
+                            "distance gate: "
+                            f"distance={latched_target_distance}, "
+                            f"gate=<{self._prepass_follow_retry_max_distance:.2f}m"
+                        )
+                    )
+                    action = (
+                        "target is outside 10m overtake gate; releasing for "
+                        "full-traffic re-evaluation"
+                    )
+                elif retry_lane_idx is None:
+                    self._switch_prepass_to_follow(
+                        "all fallback candidates are unsafe for the latched target"
+                    )
+                    action = "no feasible fallback candidate; switching to follow"
+                elif retry_lane_idx == 1:
+                    self._prepass_fallback_blocked = False
+                    self._prepass_fallback_follow_active = False
+                    self._prepass_fallback_lane_idx = None
+                    self._prepass_fallback_commit_pending = False
+                    self._prepass_fallback_commit_lane_idx = None
+                    self._l1_probe_active = True
+                    self._l1_probe_context = "fallback"
+                    self._l1_probe_success_cycles = 0
+                    self._l1_probe_constraint_applied = False
+                    action = "outer lanes unavailable; probing L1"
                 elif (
                     latched_target_distance is not None
                     and latched_target_distance
@@ -3477,6 +4556,10 @@ class MPCController(Node):
                     self._prepass_fallback_follow_active = False
                     self._prepass_fallback_lane_idx = retry_lane_idx
                     self._overtake_lane_idx = retry_lane_idx
+                    self._prepass_attempted_outer_lanes.add(retry_lane_idx)
+                    self._prepass_fallback_commit_pending = True
+                    self._prepass_fallback_commit_lane_idx = retry_lane_idx
+                    self._prepass_fallback_commit_success_since = None
                     self._mpc.infeasibility_counter = 0
                     self._mpc.osqp_initialized = False
                     action = f"passage L{retry_lane_idx} exists; retrying in place"
@@ -3484,19 +4567,35 @@ class MPCController(Node):
                 self.get_logger().warn(
                     "[PrepassLaneFallbackTimeout] full-width recovery timed "
                     f"out; {action}: elapsed={recovery_total_elapsed:.2f}s, "
-                    f"heading_error={math.degrees(center_heading_error):.1f}deg, "
-                    f"conflicts={passage_conflicts}"
+                    f"reasons={list(timeout_reasons)}, "
+                    f"candidate_lane=L{recovery_candidate_lane}, "
+                    f"candidate_heading_error="
+                    f"{math.degrees(candidate_heading_error):.1f}deg/"
+                    f"{math.degrees(self._prepass_max_heading):.1f}deg, "
+                    f"mpc_stable={prepass_mpc_stable}, "
+                    f"dynamics_stable={prepass_dynamics_stable}, "
+                    f"vehicle_id={timeout_target_id}, "
+                    f"target_distance={timeout_target_distance}, "
+                    f"target_longitudinal={timeout_target_longitudinal}, "
+                    f"physical_passage={timeout_physical_passage}, "
+                    f"conflicts={passage_conflicts}, "
+                    f"reverse_rear_clear={reverse_rear_clear}"
                 )
                 self._prepass_failed_lane_idx = None
 
             # Full-width recovery must be stable both numerically and
-            # dynamically before committing to another narrow lane. Reuse the
-            # same heading/lateral-speed/yaw-rate limits as the L1 rejoin gate.
+            # dynamically before committing to another narrow lane. Heading
+            # and estimated lateral speed are evaluated against the selected
+            # candidate lane geometry, not the Center reference heading.
             prepass_recovery_stable = (
-                self._mpc.infeasibility_counter == 0
+                self._prepass_fallback_recovery_active
+                and prepass_mpc_stable
                 and (
                     not self._center_lane_rejoin_stability_enabled
-                    or center_rejoin_stable
+                    or (
+                        prepass_heading_stable
+                        and prepass_dynamics_stable
+                    )
                 )
             )
             if prepass_recovery_stable:
@@ -3509,53 +4608,30 @@ class MPCController(Node):
             else:
                 self._prepass_fallback_recovery_stable_since = None
                 recovery_stable_elapsed = 0.0
-                self.get_logger().info(
-                    "[PrepassLaneFallbackHold] keeping full width until "
-                    "vehicle state is stable: "
-                    f"heading_error="
-                    f"{math.degrees(center_heading_error):.1f}deg/"
-                    f"{math.degrees(self._center_lane_rejoin_max_heading):.1f}, "
-                    f"lateral_speed={center_lateral_speed:.2f}/"
-                    f"{self._center_lane_rejoin_max_lateral_speed:.2f}m/s, "
-                    f"yaw_rate={center_yaw_rate:.2f}/"
-                    f"{self._center_lane_rejoin_max_yaw_rate:.2f}rad/s, "
-                    f"mpc_infeasible={self._mpc.infeasibility_counter}",
-                    throttle_duration_sec=1.0,
-                )
+                if self._prepass_fallback_recovery_active:
+                    self.get_logger().info(
+                        "[PrepassLaneFallbackHold] keeping full width until "
+                        "vehicle state is stable: "
+                        f"candidate_lane=L{recovery_candidate_lane}, "
+                        f"candidate_heading_error="
+                        f"{math.degrees(candidate_heading_error):.1f}deg/"
+                        f"{math.degrees(self._prepass_max_heading):.1f}, "
+                        f"lateral_speed={candidate_lateral_speed:.2f}/"
+                        f"{self._center_lane_rejoin_max_lateral_speed:.2f}m/s, "
+                        f"yaw_rate={center_yaw_rate:.2f}/"
+                        f"{self._center_lane_rejoin_max_yaw_rate:.2f}rad/s, "
+                        f"mpc_infeasible={self._mpc.infeasibility_counter}",
+                        throttle_duration_sec=1.0,
+                    )
 
             if (
                 self._prepass_fallback_recovery_active
                 and recovery_stable_elapsed
                 >= self._prepass_lane_fallback_recovery_stable_sec
             ):
-                relative_samples = self._relative_lane_vehicle_samples(pose, v)
-                physical_passage, _ = self._latched_target_passage(pose)
-                opposite_outer_lane = (
-                    2 if failed_lane_idx == 0 else 0)
-                candidate_conflicts = {}
-                for candidate_lane_idx in (opposite_outer_lane, 1):
-                    candidate_conflicts[candidate_lane_idx] = (
-                        classify_lane_conflicts(
-                            candidate_lane_idx,
-                            relative_samples,
-                            front_distance=(
-                                self._prepass_lane_fallback_front_distance),
-                            side_distance=(
-                                self._prepass_lane_fallback_side_distance),
-                            rear_distance=(
-                                self._prepass_lane_fallback_rear_distance),
-                        )
-                    )
-                selected_fallback_lane = next((
-                    candidate_lane_idx
-                    for candidate_lane_idx in (opposite_outer_lane, 1)
-                    if lane_conflicts_are_clear(
-                        candidate_conflicts[candidate_lane_idx])
-                    and (
-                        candidate_lane_idx == 1
-                        or physical_passage.get(candidate_lane_idx, False)
-                    )
-                ), None)
+                selected_fallback_lane = recovery_candidate_lane
+                candidate_conflicts = passage_conflicts
+                physical_passage = recovery_physical_passage
 
                 self._prepass_fallback_recovery_active = False
                 self._prepass_fallback_recovery_stable_since = None
@@ -3564,6 +4640,8 @@ class MPCController(Node):
                     previous_lane = failed_lane_idx
                     if selected_fallback_lane == 1:
                         self._prepass_fallback_lane_idx = None
+                        self._prepass_fallback_commit_pending = False
+                        self._prepass_fallback_commit_lane_idx = None
                         self._l1_probe_active = True
                         self._l1_probe_context = "fallback"
                         self._l1_probe_success_cycles = 0
@@ -3571,11 +4649,27 @@ class MPCController(Node):
                     else:
                         self._prepass_fallback_lane_idx = selected_fallback_lane
                         self._overtake_lane_idx = selected_fallback_lane
+                        self._prepass_attempted_outer_lanes.add(
+                            selected_fallback_lane)
+                        self._prepass_fallback_commit_pending = True
+                        self._prepass_fallback_commit_lane_idx = (
+                            selected_fallback_lane)
+                        self._prepass_fallback_commit_success_since = None
+                    fallback_action = (
+                        "probing"
+                        if selected_fallback_lane == 1
+                        else (
+                            "re-probing"
+                            if selected_fallback_lane == failed_lane_idx
+                            else "switching"
+                        )
+                    )
                     self.get_logger().warn(
                         "[PrepassLaneFallback] full-width recovery stable; "
-                        f"{'probing' if selected_fallback_lane == 1 else 'switching'} "
+                        f"{fallback_action} "
                         f"L{previous_lane}->L{selected_fallback_lane}, "
                         f"stable_sec={recovery_stable_elapsed:.2f}, "
+                        f"physical_passage={physical_passage}, "
                         f"conflicts={candidate_conflicts}"
                     )
                 else:
@@ -3585,7 +4679,8 @@ class MPCController(Node):
                     self.get_logger().warn(
                         "[PrepassLaneFallback] full-width recovery stable but "
                         "both fallback lanes are unsafe; switching to "
-                        f"follow: conflicts={candidate_conflicts}"
+                        f"follow: physical_passage={physical_passage}, "
+                        f"conflicts={candidate_conflicts}"
                     )
                 self._prepass_failed_lane_idx = None
 
@@ -3622,6 +4717,7 @@ class MPCController(Node):
                 and not self._center_lane_rejoin_active
                 and not self._l1_probe_active
                 and not self._prepass_fallback_follow_active
+                and not self._prepass_fallback_recovery_active
             ),
             latched_vehicle_id=self._overtake_target_vehicle_id,
             latched_lane_idx=self._overtake_lane_idx,
@@ -3652,7 +4748,12 @@ class MPCController(Node):
             # full track width until the normal Race-return conditions pass.
             new_target_lane_idx = None
 
-        if self._prepass_fallback_follow_active:
+        if prepass_distance_gate_released_this_cycle:
+            # Release the old outer-lane constraint in this same cycle; do not
+            # let a lane request computed before the Prepass gate check survive
+            # until the next control period.
+            new_target_lane_idx = None
+        elif self._prepass_fallback_follow_active:
             new_target_lane_idx = None
         elif l1_probe_failed_this_cycle:
             new_target_lane_idx = None
@@ -3695,7 +4796,14 @@ class MPCController(Node):
             # remains latched until the normal heading-safe Race return.
             new_target_lane_idx = None
 
-        if self._parallel_abort_active:
+        if self._prepass_fallback_commit_pending:
+            # A confirmed fallback outranks ordinary L1 rejoin and ordinary
+            # outer-lane selection until an actually constrained MPC solve
+            # succeeds.  The initial L0 boost below intentionally remains the
+            # sole non-safety exception requested by the launch configuration.
+            new_target_lane_idx = self._prepass_fallback_commit_lane_idx
+
+        if self._parallel_abort_active and not prepass_selection_exclusive:
             # Final exclusive override: no other release/rejoin branch may
             # reassert L0/L2 while yielding to the parallel vehicle.
             new_target_lane_idx = 1
@@ -3713,9 +4821,37 @@ class MPCController(Node):
                     "overtake selection."
                 )
 
+        if self._prepass_fallback_recovery_active:
+            # Final exclusive override.  Curve hold, L1 rejoin, parallel
+            # selection, and initial boost must not narrow the corridor while
+            # Prepass is validating recovery with the full track width.
+            new_target_lane_idx = None
+
         if self._mpc_safety_recovery_active:
             # Solver recovery exclusively owns lateral selection. No
             # overtake/rejoin/start state may narrow the next MPC problem.
+            new_target_lane_idx = None
+
+        if self._post_reverse_full_width_recovery_active:
+            # DRIVE is confirmed, but lateral selection remains frozen until
+            # the solver has produced fresh full-width predictions for the
+            # configured continuous-success interval.
+            new_target_lane_idx = None
+
+        if recovery_active:
+            # Final override for the complete REVERSE/gear-transition window.
+            # This also defeats initial boost, parallel handling, and L1 probe
+            # requests that were computed earlier in the cycle.
+            new_target_lane_idx = None
+
+        if self._l1_safety_recovery_active:
+            # This final override also wins over parallel/boost L1 requests.
+            # The only path that may set L1 again is the controlled probe.
+            new_target_lane_idx = None
+
+        if self._l1_rejoin_backoff_active:
+            # A failed normal rejoin probe owns lateral selection until the
+            # time/progress/full-width recovery gate releases it.
             new_target_lane_idx = None
 
         if new_target_lane_idx != prev_lane_idx:
@@ -3748,6 +4884,8 @@ class MPCController(Node):
                 can_change_lane = True
             if self._prepass_fallback_follow_active:
                 can_change_lane = True
+            if prepass_distance_gate_released_this_cycle:
+                can_change_lane = True
             if self._parallel_abort_active:
                 can_change_lane = True
             if initial_start_lateral_hold_active:
@@ -3762,6 +4900,18 @@ class MPCController(Node):
             if self._mpc_safety_recovery_active:
                 # Releasing an unsafe lane constraint must bypass the normal
                 # lane-change cooldown.
+                can_change_lane = True
+            if self._l1_safety_recovery_active:
+                can_change_lane = True
+            if self._l1_rejoin_backoff_active:
+                can_change_lane = True
+            if is_prepass_fallback_lane_change(
+                fallback_lane_idx=self._prepass_fallback_lane_idx,
+                requested_lane_idx=new_target_lane_idx,
+            ):
+                # The fallback was selected only after full-width recovery and
+                # a fresh conflict check.  Apply it immediately instead of
+                # losing another two seconds to the ordinary lane cooldown.
                 can_change_lane = True
             if can_change_lane:
                 self._target_lane_idx = new_target_lane_idx
@@ -3903,7 +5053,91 @@ class MPCController(Node):
             self._reference_path.target_lane_idx
             if self._reference_path.is_overtaking else None
         )
-        if should_start_prepass_recovery_from_safety(
+        if self._prepass_fallback_commit_pending:
+            commit_lane_applied = (
+                applied_lane_idx == self._prepass_fallback_commit_lane_idx)
+            commit_solution_feasible = (
+                not recovery_active
+                and not self._mpc.recovery_requested
+                and self._mpc.infeasibility_counter == 0
+                and self._mpc.current_prediction is not None
+            )
+            self._prepass_fallback_commit_success_since = (
+                update_fallback_commit_success_since(
+                    self._prepass_fallback_commit_success_since,
+                    now_sec=current_time_sec,
+                    lane_applied=commit_lane_applied,
+                    feasible_solution=commit_solution_feasible,
+                )
+            )
+
+        commit_success_elapsed = (
+            current_time_sec - self._prepass_fallback_commit_success_since
+            if self._prepass_fallback_commit_success_since is not None
+            else 0.0
+        )
+
+        if (
+            self._prepass_fallback_commit_pending
+            and commit_success_elapsed
+                >= self._prepass_commit_required_success_sec
+        ):
+            committed_lane_idx = self._prepass_fallback_commit_lane_idx
+            self._prepass_fallback_commit_pending = False
+            self._prepass_fallback_commit_lane_idx = None
+            self._prepass_fallback_commit_success_since = None
+            self._prepass_attempted_outer_lanes.clear()
+            self.get_logger().info(
+                "[PrepassFallbackCommit] selected fallback lane was applied "
+                "and solved successfully for the required duration; releasing "
+                f"exclusive ownership: lane=L{committed_lane_idx}, "
+                f"success_sec={commit_success_elapsed:.2f}"
+            )
+
+        if not recovery_active and should_start_l1_recovery_from_safety(
+            recovery_requested=self._mpc.recovery_requested,
+            applied_lane_idx=applied_lane_idx,
+            l1_recovery_pending=self._l1_safety_reprobe_pending,
+        ):
+            failed_context = (
+                self._l1_probe_context
+                or (
+                    "fallback"
+                    if self._prepass_fallback_lane_idx == 1
+                    else "rejoin"
+                )
+            )
+            self._log_l1_constraint_diagnostics(
+                context=f"safety_trigger:{failed_context}",
+                failed_wp=center_wp_temp,
+                reason=(self._mpc.failure_reason or "L1 SafetyRecovery"),
+            )
+            self._l1_safety_recovery_active = True
+            self._l1_safety_recovery_stable_since = None
+            self._l1_safety_recovery_context = failed_context
+            self._l1_safety_reprobe_pending = True
+            self._center_lane_rejoin_active = False
+            self._center_lane_rejoin_constraint_released = False
+            self._center_lane_rejoin_stable_since = None
+            self._l1_probe_active = False
+            self._l1_probe_context = None
+            self._l1_probe_success_cycles = 0
+            self._l1_probe_constraint_applied = False
+            if failed_context == "fallback":
+                self._prepass_fallback_lane_idx = None
+                self._prepass_fallback_recovery_active = False
+                self._prepass_fallback_recovery_stable_since = None
+                self._prepass_fallback_commit_pending = False
+                self._prepass_fallback_commit_lane_idx = None
+            self.get_logger().warn(
+                "[L1SafetyRecoveryTrigger] applied L1 MPC failure recorded; "
+                "holding full width until stable before re-probe: "
+                f"context={failed_context}, "
+                f"mpc_infeasible={self._mpc.infeasibility_counter}, "
+                f"reason={self._mpc.failure_reason}"
+            )
+
+        if not recovery_active and should_start_prepass_recovery_from_safety(
             recovery_requested=self._mpc.recovery_requested,
             fallback_enabled=self._prepass_lane_fallback_enabled,
             applied_lane_idx=applied_lane_idx,
@@ -3912,6 +5146,13 @@ class MPCController(Node):
             fallback_recovery_active=self._prepass_fallback_recovery_active,
             fallback_follow_active=self._prepass_fallback_follow_active,
         ):
+            continuing_failed_fallback = bool(
+                self._prepass_fallback_commit_pending
+                and applied_lane_idx == self._prepass_fallback_commit_lane_idx
+            )
+            if not continuing_failed_fallback:
+                self._prepass_attempted_outer_lanes.clear()
+            self._cancel_normal_l1_rejoin_for_prepass()
             self._prepass_failed_lane_idx = applied_lane_idx
             self._overtake_lane_idx = applied_lane_idx
             self._prepass_fallback_lane_idx = None
@@ -3919,6 +5160,9 @@ class MPCController(Node):
             self._prepass_fallback_recovery_active = True
             self._prepass_fallback_recovery_stable_since = None
             self._prepass_fallback_recovery_started_at = current_time_sec
+            self._prepass_target_behind_since = None
+            self._prepass_fallback_commit_pending = False
+            self._prepass_fallback_commit_lane_idx = None
             self.get_logger().warn(
                 "[PrepassLaneFallbackSafetyTrigger] outer-lane MPC failure "
                 "starts full-width fallback recovery immediately: "
@@ -3930,6 +5174,11 @@ class MPCController(Node):
 
         if self._mpc.recovery_requested:
             if not self._mpc_safety_recovery_active:
+                # Start the immobility observation window at SafetyRecovery
+                # entry.  Old GNSS samples from the preceding stop must not
+                # make reverse eligible immediately.
+                self._gnss_history = []
+                self._stuck_since = None
                 self.get_logger().error(
                     "[MPCSafetyRecovery] discarding stale prediction and "
                     "switching to full-width recovery: "
@@ -3942,9 +5191,13 @@ class MPCController(Node):
             self._mpc_safety_recovery_success_cycles = 0
             u[0] = 0.0
         elif self._mpc_safety_recovery_active:
-            if (
-                self._mpc.infeasibility_counter == 0
-                and self._mpc.current_prediction is not None
+            if should_count_mpc_recovery_success(
+                stuck_recovery_active=recovery_active,
+                gear_is_drive=self._current_gear_is_drive(),
+                infeasibility_counter=self._mpc.infeasibility_counter,
+                has_current_prediction=(
+                    self._mpc.current_prediction is not None),
+                used_prediction_fallback=self._mpc.used_prediction_fallback,
             ):
                 self._mpc_safety_recovery_success_cycles += 1
                 if (
@@ -3953,11 +5206,30 @@ class MPCController(Node):
                 ):
                     self._mpc_safety_recovery_active = False
                     self._mpc_safety_recovery_success_cycles = 0
+                    post_reverse_recovery_completed = (
+                        self._post_reverse_full_width_recovery_active
+                    )
+                    self._post_reverse_full_width_recovery_active = False
+                    if (
+                        post_reverse_recovery_completed
+                        and self._prepass_fallback_recovery_active
+                    ):
+                        # Start Prepass timing only now. Its first action is a
+                        # fresh physical-passage/V2X evaluation; no lane was
+                        # selected during gear or MPC recovery.
+                        self._prepass_fallback_recovery_started_at = (
+                            current_time_sec)
+                        self._prepass_fallback_recovery_stable_since = None
                     self.get_logger().info(
                         "[MPCSafetyRecovery] full-width MPC recovered for "
                         f"{self._mpc_safety_recovery_success_sec:.2f}s "
                         "continuously; normal lane selection resumed."
                     )
+                    if post_reverse_recovery_completed:
+                        self.get_logger().info(
+                            "[PostReverseFullWidthRecovery] complete; "
+                            "Prepass/lane selection may resume."
+                        )
             else:
                 self._mpc_safety_recovery_success_cycles = 0
 
@@ -4002,6 +5274,17 @@ class MPCController(Node):
                     or latched_follow_state.get("expired", False)
                 ):
                     follow_target_expired = True
+                elif not is_follow_target_ahead(
+                    latched_follow_state.get("longitudinal")
+                ):
+                    behind_longitudinal = latched_follow_state["longitudinal"]
+                    self._release_lost_follow_target(
+                        reason=(
+                            "latched vehicle moved behind ego "
+                            f"(longitudinal={behind_longitudinal:.2f}m)"
+                        )
+                    )
+                    latched_follow_state = None
                 else:
                     acc_vehicle_id = latched_follow_state["vehicle_id"]
                     acc_distance = latched_follow_state["distance"]
@@ -4414,6 +5697,8 @@ class MPCController(Node):
                     self._prepass_fallback_lane_idx = None
                     self._prepass_fallback_blocked = False
                     self._prepass_fallback_recovery_active = False
+                    self._prepass_fallback_commit_pending = False
+                    self._prepass_fallback_commit_lane_idx = None
                     self._prepass_retry_after_reverse = False
                     ref_vel_kmph = 0.0
                     self._parallel_start_time = None
