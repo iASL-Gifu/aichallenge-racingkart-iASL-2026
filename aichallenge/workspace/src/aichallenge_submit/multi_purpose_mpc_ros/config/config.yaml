@@ -86,16 +86,27 @@ follow_control:
   desired_distance: 8.0  # [m] 目標車間距離
   lateral_distance: 1.2  # [m] 同一車線とみなす横方向距離
   spacing_kp: 1.2        # [1/s] target=front_speed+Kp*(distance-desired_distance)
+  deadlock_escape_enabled: true # 追従対象と自車が停止した際に安全な前進probe/後退で脱出
+  deadlock_ego_speed_threshold: 0.15 # [m/s]
+  deadlock_lead_speed_threshold: 0.3 # [m/s]
+  deadlock_forward_command_threshold: 0.3 # [m/s] これ未満は実行可能な前進指令なし
+  deadlock_gnss_distance_threshold: 0.3 # [m]
+  deadlock_hold_sec: 2.0 # [s] 全停止条件の連続成立時間
+  escape_probe_success_cycles: 3 # 車線MPC・予測安全の連続成功回数
+  escape_probe_timeout_sec: 1.0 # [s] 1候補車線の最大probe時間
+  escape_reevaluate_sec: 0.75 # [s] 前後とも不安全な場合の再評価周期
+  escape_creep_speed: 1.0 # [m/s] probe成功後の低速前進速度
+  escape_forward_sec: 1.0 # [s] 低速前進後に追従状態を再評価
 
 center_lane_rejoin_stability:
   enabled: true
   constraint_diagnostics_enabled: true # L1 probe失敗時だけ境界幅・障害物・予測区間を詳細出力
   constraint_diagnostics_points: 5 # 有効幅が狭い順に出力する予測点数
-  max_heading_error_deg: 5.0 # Center軌道に対する方位誤差
-  max_lateral_speed: 0.5     # [m/s] odom横速度と方位誤差からの推定値の大きい方
-  max_yaw_rate: 0.5         # [rad/s]
-  stable_sec: 0.4            # 全条件が連続成立してからL1復帰を開始
-  max_l1_lateral_error: 0.25 # [m] L1中心からの横誤差がこの値未満の場合だけprobeを開始
+  max_heading_error_deg: 8.0 # Center軌道に対する方位誤差
+  max_lateral_speed: 0.8     # [m/s] odom横速度と方位誤差からの推定値の大きい方
+  max_yaw_rate: 1.0         # [rad/s]
+  stable_sec: 0.3            # 全条件が連続成立してからL1復帰を開始
+  max_l1_lateral_error: 0.4 # [m] L1中心からの横誤差がこの値未満の場合だけprobeを開始
   prediction_fit_points: 0  # 0なら全幅MPC予測の全点をL1内判定に使用
   prediction_fit_ratio: 1.0 # 全予測点の車両中心がL1境界内に入ることを要求
   probe_success_cycles: 15    # L1制約でこの回数連続して正常に解けた場合だけL1固定を確定

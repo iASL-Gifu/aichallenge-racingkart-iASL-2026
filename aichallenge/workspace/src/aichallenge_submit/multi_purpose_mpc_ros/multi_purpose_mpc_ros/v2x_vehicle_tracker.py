@@ -397,6 +397,49 @@ def lane_conflicts_are_clear(conflicts) -> bool:
     return not any(conflicts.get(group) for group in ("front", "side", "rear"))
 
 
+def follow_stop_deadlock_conditions_met(
+    *,
+    follow_active,
+    ego_speed,
+    lead_speed,
+    gnss_moved_distance,
+    forward_command,
+    ego_speed_threshold,
+    lead_speed_threshold,
+    gnss_distance_threshold,
+    forward_command_threshold,
+):
+    """Return whether a stopped follow pair needs an escape evaluation."""
+    return (
+        follow_active
+        and abs(ego_speed) < ego_speed_threshold
+        and lead_speed < lead_speed_threshold
+        and gnss_moved_distance < gnss_distance_threshold
+        and forward_command < forward_command_threshold
+    )
+
+
+def update_follow_escape_probe_success_cycles(
+    current_cycles,
+    *,
+    lane_applied,
+    feasible_solution,
+    executable_forward_prediction,
+    prediction_clear,
+    emergency_brake_active,
+):
+    """Count only consecutive, executable and collision-free lane probes."""
+    if (
+        lane_applied
+        and feasible_solution
+        and executable_forward_prediction
+        and prediction_clear
+        and not emergency_brake_active
+    ):
+        return current_cycles + 1
+    return 0
+
+
 def should_recover_from_mpc_stall(
     *,
     safety_recovery_active,

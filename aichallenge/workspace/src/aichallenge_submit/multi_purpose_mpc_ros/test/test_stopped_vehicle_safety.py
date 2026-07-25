@@ -9,6 +9,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     circular_forward_progress,
     continuous_condition_confirmed,
     evaluate_stopped_lead_overtake,
+    follow_stop_deadlock_conditions_met,
     is_follow_target_ahead,
     is_follow_retry_within_distance,
     is_prepass_fallback_lane_change,
@@ -30,6 +31,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     should_exit_l1_probe_backoff,
     update_continuous_condition_since,
     update_fallback_commit_success_since,
+    update_follow_escape_probe_success_cycles,
 )
 
 
@@ -81,6 +83,44 @@ class StoppedVehicleSafetyTest(unittest.TestCase):
         self.assertFalse(is_follow_target_ahead(0.0))
         self.assertFalse(is_follow_target_ahead(-0.01))
         self.assertFalse(is_follow_target_ahead(None))
+
+    def test_follow_deadlock_requires_every_stop_condition(self):
+        values = {
+            "follow_active": True,
+            "ego_speed": 0.0,
+            "lead_speed": 0.0,
+            "gnss_moved_distance": 0.0,
+            "forward_command": 0.0,
+            "ego_speed_threshold": 0.15,
+            "lead_speed_threshold": 0.3,
+            "gnss_distance_threshold": 0.3,
+            "forward_command_threshold": 0.3,
+        }
+        self.assertTrue(follow_stop_deadlock_conditions_met(**values))
+        values["lead_speed"] = 0.3
+        self.assertFalse(follow_stop_deadlock_conditions_met(**values))
+
+    def test_forward_escape_probe_requires_three_consecutive_safe_cycles(self):
+        cycles = 0
+        for expected in (1, 2, 3):
+            cycles = update_follow_escape_probe_success_cycles(
+                cycles,
+                lane_applied=True,
+                feasible_solution=True,
+                executable_forward_prediction=True,
+                prediction_clear=True,
+                emergency_brake_active=False,
+            )
+            self.assertEqual(cycles, expected)
+        cycles = update_follow_escape_probe_success_cycles(
+            cycles,
+            lane_applied=True,
+            feasible_solution=True,
+            executable_forward_prediction=True,
+            prediction_clear=False,
+            emergency_brake_active=False,
+        )
+        self.assertEqual(cycles, 0)
 
 
 class PrepassSafetyRecoveryTest(unittest.TestCase):

@@ -54,6 +54,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     circular_forward_progress,
     continuous_condition_confirmed,
     evaluate_stopped_lead_overtake,
+    follow_stop_deadlock_conditions_met,
     is_follow_target_ahead,
     is_follow_retry_within_distance,
     is_prepass_fallback_lane_change,
@@ -76,6 +77,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     should_exit_l1_probe_backoff,
     update_continuous_condition_since,
     update_fallback_commit_success_since,
+    update_follow_escape_probe_success_cycles,
 )
 
 # Multi_Purpose_MPC
@@ -723,6 +725,39 @@ class MPCController(Node):
             follow_cfg, "lateral_distance", 1.2)), 0.0)
         self._follow_spacing_kp = max(float(getattr(
             follow_cfg, "spacing_kp", 1.2)), 0.0)
+        self._follow_deadlock_escape_enabled = bool(getattr(
+            follow_cfg, "deadlock_escape_enabled", True))
+        self._follow_deadlock_ego_speed_threshold = max(float(getattr(
+            follow_cfg, "deadlock_ego_speed_threshold", 0.15)), 0.0)
+        self._follow_deadlock_lead_speed_threshold = max(float(getattr(
+            follow_cfg, "deadlock_lead_speed_threshold", 0.3)), 0.0)
+        self._follow_deadlock_forward_command_threshold = max(float(getattr(
+            follow_cfg, "deadlock_forward_command_threshold", 0.3)), 0.0)
+        self._follow_deadlock_gnss_distance_threshold = max(float(getattr(
+            follow_cfg, "deadlock_gnss_distance_threshold", 0.3)), 0.0)
+        self._follow_deadlock_hold_sec = max(float(getattr(
+            follow_cfg, "deadlock_hold_sec", 2.0)), 0.0)
+        self._follow_escape_probe_success_cycles_required = max(int(getattr(
+            follow_cfg, "escape_probe_success_cycles", 3)), 1)
+        self._follow_escape_probe_timeout_sec = max(float(getattr(
+            follow_cfg, "escape_probe_timeout_sec", 1.0)), 0.1)
+        self._follow_escape_reevaluate_sec = max(float(getattr(
+            follow_cfg, "escape_reevaluate_sec", 0.75)), 0.1)
+        self._follow_escape_creep_speed = max(float(getattr(
+            follow_cfg, "escape_creep_speed", 1.0)), 0.0)
+        self._follow_escape_forward_sec = max(float(getattr(
+            follow_cfg, "escape_forward_sec", 1.0)), 0.1)
+        self._follow_deadlock_since = None
+        self._follow_deadlock_start_xy = None
+        self._follow_escape_active = False
+        self._follow_escape_target_id = None
+        self._follow_escape_probe_lane_idx = None
+        self._follow_escape_probe_started_at = None
+        self._follow_escape_probe_success_cycles = 0
+        self._follow_escape_attempted_lanes = set()
+        self._follow_escape_forward_active = False
+        self._follow_escape_forward_until = None
+        self._follow_escape_last_reevaluate_at = None
         self._prepass_fallback_lane_idx = None
         self._prepass_fallback_blocked = False
         self._prepass_fallback_follow_active = False
@@ -1307,6 +1342,338 @@ class MPCController(Node):
             -self._prepass_lane_fallback_rear_distance <= longitudinal < 0.0
             for _, _, longitudinal in self._relative_lane_vehicle_samples(
                 pose, ego_speed)
+        )
+
+    def _follow_deadlock_position(self, pose):
+        """Use raw GNSS for the deadlock movement gate when it is available."""
+        if self._gnss_pose is not None:
+            position = self._gnss_pose.pose.pose.position
+            return float(position.x), float(position.y)
+        return float(pose.x), float(pose.y)
+
+    def _reset_follow_escape(self, reason=None) -> None:
+        was_active = self._follow_escape_active
+        self._follow_deadlock_since = None
+        self._follow_deadlock_start_xy = None
+        self._follow_escape_active = False
+        self._follow_escape_target_id = None
+        self._follow_escape_probe_lane_idx = None
+        self._follow_escape_probe_started_at = None
+        self._follow_escape_probe_success_cycles = 0
+        self._follow_escape_attempted_lanes.clear()
+        self._follow_escape_forward_active = False
+        self._follow_escape_forward_until = None
+        self._follow_escape_last_reevaluate_at = None
+        if was_active and reason:
+            self.get_logger().info(
+                f"[FollowDeadlockEscape] released: reason={reason}"
+            )
+
+    def _select_follow_escape_lane(self, pose, ego_speed: float):
+        """Prefer a physically passable outer lane, then collision-free L1."""
+        outer_order = ordered_outer_lane_candidates(self._overtake_lane_idx)
+        physical_passage, _ = self._latched_target_passage(pose)
+        samples = self._relative_lane_vehicle_samples(pose, ego_speed)
+        all_conflicts = {
+            lane_idx: classify_lane_conflicts(
+                lane_idx,
+                samples,
+                front_distance=self._prepass_lane_fallback_front_distance,
+                side_distance=self._prepass_lane_fallback_side_distance,
+                rear_distance=self._prepass_lane_fallback_rear_distance,
+            )
+            for lane_idx in (0, 1, 2)
+        }
+        for lane_idx in outer_order:
+            if (
+                lane_idx not in self._follow_escape_attempted_lanes
+                and physical_passage.get(lane_idx, False)
+                and lane_conflicts_are_clear(all_conflicts[lane_idx])
+            ):
+                return lane_idx, all_conflicts
+        if (
+            1 not in self._follow_escape_attempted_lanes
+            and lane_conflicts_are_clear(all_conflicts[1])
+        ):
+            return 1, all_conflicts
+        return None, all_conflicts
+
+    def _prediction_is_clear_of_vehicle(self, target_id) -> bool:
+        """Check the current MPC prediction against one moving V2X vehicle."""
+        if target_id is None or self._mpc.current_prediction is None:
+            return False
+        target_buf = self._v2x_tracker._samples.get(target_id)
+        if not target_buf:
+            return False
+        _, target_x, target_y = target_buf[-1]
+        velocity_x, velocity_y = self._v2x_tracker.velocity(target_id)
+        pred_x, pred_y = self._mpc.current_prediction
+        if not pred_x or len(pred_x) != len(pred_y):
+            return False
+        minimum_clearance = (
+            0.5 * float(self._cfg.bicycle_model.width)
+            + self._v2x_vehicle_radius
+        )
+        prediction_times = [
+            self._v2x_t_samples[min(index + 2, len(self._v2x_t_samples) - 1)]
+            for index in range(len(pred_x))
+        ]
+        return prediction_clears_moving_vehicle(
+            pred_x,
+            pred_y,
+            prediction_times,
+            vehicle_x=target_x,
+            vehicle_y=target_y,
+            vehicle_vx=velocity_x,
+            vehicle_vy=velocity_y,
+            minimum_clearance=minimum_clearance,
+        )
+
+    def _follow_escape_lane_traffic_is_clear(
+        self, pose, ego_speed: float, lane_idx
+    ) -> bool:
+        if lane_idx not in (0, 1, 2):
+            return False
+        conflicts = classify_lane_conflicts(
+            lane_idx,
+            self._relative_lane_vehicle_samples(pose, ego_speed),
+            front_distance=self._prepass_lane_fallback_front_distance,
+            side_distance=self._prepass_lane_fallback_side_distance,
+            rear_distance=self._prepass_lane_fallback_rear_distance,
+        )
+        return lane_conflicts_are_clear(conflicts)
+
+    def _prediction_has_forward_progress(self, pose, u) -> bool:
+        if self._mpc.current_prediction is None or float(u[0]) < (
+            self._follow_deadlock_forward_command_threshold
+        ):
+            return False
+        pred_x, pred_y = self._mpc.current_prediction
+        if not pred_x or len(pred_x) != len(pred_y):
+            return False
+        dx = float(pred_x[-1]) - float(pred_x[0])
+        dy = float(pred_y[-1]) - float(pred_y[0])
+        progress = dx * math.cos(pose.theta) + dy * math.sin(pose.theta)
+        return progress >= self._follow_deadlock_gnss_distance_threshold
+
+    def _update_follow_deadlock_escape(
+        self,
+        *,
+        now_sec: float,
+        pose,
+        ego_speed: float,
+        follow_active: bool,
+        target_id,
+        lead_speed: float,
+        forward_command: float,
+        emergency_brake_active: bool,
+    ) -> None:
+        """Detect and resolve a stopped-follow deadlock without blind motion."""
+        if not self._follow_deadlock_escape_enabled:
+            return
+
+        position = self._follow_deadlock_position(pose)
+        if self._follow_deadlock_start_xy is None:
+            self._follow_deadlock_start_xy = position
+        gnss_moved_distance = math.hypot(
+            position[0] - self._follow_deadlock_start_xy[0],
+            position[1] - self._follow_deadlock_start_xy[1],
+        )
+
+        if self._follow_escape_active:
+            target = self._latched_follow_target_state(pose, now_sec)
+            if (
+                target is None
+                or target.get("expired", False)
+                or not is_follow_target_ahead(target.get("longitudinal"))
+            ):
+                self._reset_follow_escape("target disappeared or moved behind")
+                return
+            if target.get("speed", 0.0) >= (
+                self._follow_deadlock_lead_speed_threshold
+            ):
+                self._reset_follow_escape(
+                    f"lead resumed at {target.get('speed', 0.0):.2f}m/s"
+                )
+                return
+
+            if self._follow_escape_forward_active:
+                if emergency_brake_active:
+                    failed_lane = self._follow_escape_probe_lane_idx
+                    if failed_lane is not None:
+                        self._follow_escape_attempted_lanes.add(failed_lane)
+                    self._follow_escape_forward_active = False
+                    self._follow_escape_forward_until = None
+                    self._follow_escape_probe_lane_idx = None
+                    self._follow_escape_probe_started_at = None
+                    self._follow_escape_probe_success_cycles = 0
+                    self.get_logger().warn(
+                        "[FollowDeadlockForwardAbort] EmergencyBrake became "
+                        f"active during low-speed escape: lane=L{failed_lane}"
+                    )
+                elif now_sec < self._follow_escape_forward_until:
+                    return
+                else:
+                    self._reset_follow_escape(
+                        "low-speed forward escape interval completed"
+                    )
+                    return
+
+            if self._follow_escape_probe_lane_idx is None:
+                reevaluate_due = (
+                    self._follow_escape_last_reevaluate_at is None
+                    or now_sec - self._follow_escape_last_reevaluate_at
+                        >= self._follow_escape_reevaluate_sec
+                )
+                if not reevaluate_due:
+                    return
+                self._follow_escape_last_reevaluate_at = now_sec
+                lane_idx, conflicts = self._select_follow_escape_lane(
+                    pose, ego_speed)
+                if lane_idx is not None:
+                    self._follow_escape_probe_lane_idx = lane_idx
+                    self._follow_escape_probe_started_at = now_sec
+                    self._follow_escape_probe_success_cycles = 0
+                    self._mpc.osqp_initialized = False
+                    self.get_logger().warn(
+                        "[FollowDeadlockForwardProbe] probing a stopped-follow "
+                        f"escape lane: vehicle_id={self._follow_escape_target_id}, "
+                        f"lane=L{lane_idx}, conflicts={conflicts}"
+                    )
+                    return
+
+                # Reconsider every lane when traffic changes. Between checks,
+                # keep zero speed rather than selecting a stale candidate.
+                self._follow_escape_attempted_lanes.clear()
+                rear_clear = self._reverse_rear_is_clear(pose, ego_speed)
+                if rear_clear:
+                    self._prepass_retry_after_reverse = True
+                    self._prepass_retry_lane_idx = None
+                    self._prepass_reverse_motion_started = False
+                    self._prepass_reverse_start_xy = None
+                    self._prepass_reverse_distance = 0.0
+                    self._close_obstacle_reverse_requested = True
+                    # The dedicated detector already observed two seconds of
+                    # immobility. Do not wait for the generic timer again.
+                    self._stuck_since = now_sec - self._stuck_time_threshold
+                    self.get_logger().warn(
+                        "[FollowDeadlockReverseRequest] no safe forward lane; "
+                        "rear corridor is clear, requesting reverse: "
+                        f"vehicle_id={self._follow_escape_target_id}"
+                    )
+                else:
+                    self._close_obstacle_reverse_requested = False
+                    self.get_logger().warn(
+                        "[FollowDeadlockBlocked] forward candidates and rear "
+                        "corridor are unsafe; holding zero speed until the "
+                        f"next check in {self._follow_escape_reevaluate_sec:.2f}s: "
+                        f"vehicle_id={self._follow_escape_target_id}, "
+                        f"conflicts={conflicts}"
+                    )
+                return
+
+            applied_lane_idx = (
+                self._reference_path.target_lane_idx
+                if self._reference_path.is_overtaking else None
+            )
+            lane_applied = (
+                applied_lane_idx == self._follow_escape_probe_lane_idx
+            )
+            feasible_solution = (
+                self._mpc.infeasibility_counter == 0
+                and self._mpc.current_prediction is not None
+                and not self._mpc.used_prediction_fallback
+                and not self._mpc.recovery_requested
+                and not self._mpc_safety_recovery_active
+            )
+            executable_prediction = self._prediction_has_forward_progress(
+                pose, [forward_command, 0.0])
+            prediction_clear = self._prediction_is_clear_of_vehicle(
+                self._follow_escape_target_id)
+            self._follow_escape_probe_success_cycles = (
+                update_follow_escape_probe_success_cycles(
+                    self._follow_escape_probe_success_cycles,
+                    lane_applied=lane_applied,
+                    feasible_solution=feasible_solution,
+                    executable_forward_prediction=executable_prediction,
+                    prediction_clear=prediction_clear,
+                    emergency_brake_active=emergency_brake_active,
+                )
+            )
+            if self._follow_escape_probe_success_cycles >= (
+                self._follow_escape_probe_success_cycles_required
+            ):
+                self._follow_escape_forward_active = True
+                self._follow_escape_forward_until = (
+                    now_sec + self._follow_escape_forward_sec)
+                self.get_logger().warn(
+                    "[FollowDeadlockForwardCommit] lane MPC, forward "
+                    "prediction and target clearance succeeded continuously; "
+                    f"creeping forward: vehicle_id={self._follow_escape_target_id}, "
+                    f"lane=L{self._follow_escape_probe_lane_idx}, "
+                    f"success_cycles={self._follow_escape_probe_success_cycles}, "
+                    f"speed={self._follow_escape_creep_speed:.2f}m/s"
+                )
+                return
+
+            probe_elapsed = now_sec - self._follow_escape_probe_started_at
+            if probe_elapsed >= self._follow_escape_probe_timeout_sec:
+                failed_lane = self._follow_escape_probe_lane_idx
+                self._follow_escape_attempted_lanes.add(failed_lane)
+                self._follow_escape_probe_lane_idx = None
+                self._follow_escape_probe_started_at = None
+                self._follow_escape_probe_success_cycles = 0
+                self._follow_escape_last_reevaluate_at = None
+                self.get_logger().warn(
+                    "[FollowDeadlockForwardProbeFailed] candidate did not "
+                    "produce three consecutive safe forward predictions: "
+                    f"lane=L{failed_lane}, elapsed={probe_elapsed:.2f}s, "
+                    f"lane_applied={lane_applied}, feasible={feasible_solution}, "
+                    f"forward={executable_prediction}, "
+                    f"prediction_clear={prediction_clear}, "
+                    f"emergency_brake={emergency_brake_active}"
+                )
+            return
+
+        deadlock_conditions = follow_stop_deadlock_conditions_met(
+            follow_active=follow_active,
+            ego_speed=ego_speed,
+            lead_speed=lead_speed,
+            gnss_moved_distance=gnss_moved_distance,
+            forward_command=forward_command,
+            ego_speed_threshold=self._follow_deadlock_ego_speed_threshold,
+            lead_speed_threshold=self._follow_deadlock_lead_speed_threshold,
+            gnss_distance_threshold=(
+                self._follow_deadlock_gnss_distance_threshold),
+            forward_command_threshold=(
+                self._follow_deadlock_forward_command_threshold),
+        )
+        if not deadlock_conditions or target_id is None:
+            self._follow_deadlock_since = None
+            self._follow_deadlock_start_xy = position
+            return
+        if self._follow_deadlock_since is None:
+            self._follow_deadlock_since = now_sec
+            self._follow_deadlock_start_xy = position
+            return
+        if now_sec - self._follow_deadlock_since < self._follow_deadlock_hold_sec:
+            return
+
+        self._follow_escape_active = True
+        self._follow_escape_target_id = target_id
+        self._overtake_target_vehicle_id = target_id
+        self._forced_overtake_vehicle_id = target_id
+        self._follow_latched_cache = None
+        self._follow_escape_last_reevaluate_at = None
+        self.get_logger().warn(
+            "[FollowDeadlockDetected] ego, lead, GNSS progress and forward "
+            "command stayed below thresholds; starting safe escape evaluation: "
+            f"vehicle_id={target_id}, elapsed="
+            f"{now_sec - self._follow_deadlock_since:.2f}s, "
+            f"ego_speed={abs(ego_speed):.2f}m/s, "
+            f"lead_speed={lead_speed:.2f}m/s, "
+            f"gnss_moved={gnss_moved_distance:.2f}m, "
+            f"forward_command={forward_command:.2f}m/s"
         )
 
     def _vehicle_passage(self, target_id, pose):
@@ -2500,6 +2867,9 @@ class MPCController(Node):
                 u[1] = 0.0
                 self._stuck_reverse_drive_active = False
                 self._close_obstacle_reverse_requested = False
+                self._reset_follow_escape(
+                    "reverse recovery sequence started"
+                )
                 
                 return True
         else:
@@ -3943,6 +4313,7 @@ class MPCController(Node):
         prepass_selection_exclusive = (
             recovery_active
             or self._post_reverse_full_width_recovery_active
+            or self._follow_escape_active
             or prepass_recovery_owns_lane_selection(
                 self._prepass_fallback_recovery_active,
                 self._prepass_fallback_commit_pending,
@@ -3979,6 +4350,11 @@ class MPCController(Node):
             # been applied to MPC and produced a feasible solution.
             overtake_latch_started = False
             new_target_lane_idx = self._prepass_fallback_commit_lane_idx
+        elif self._follow_escape_active:
+            # A stopped-follow escape owns lateral selection until a safe
+            # forward probe commits or the existing reverse sequence starts.
+            overtake_latch_started = False
+            new_target_lane_idx = self._follow_escape_probe_lane_idx
         elif exclusive_l1_rejoin:
             # L1 rejoin exclusively owns lateral selection. Calling the outer
             # lane selector here would recreate an L0/L2 latch every cycle,
@@ -4854,6 +5230,16 @@ class MPCController(Node):
             # time/progress/full-width recovery gate releases it.
             new_target_lane_idx = None
 
+        if (
+            self._follow_escape_active
+            and not recovery_active
+            and not self._mpc_safety_recovery_active
+            and not self._post_reverse_full_width_recovery_active
+        ):
+            # This safety state may temporarily override an L1 recovery hold.
+            # It applies only a lane that is being explicitly probed.
+            new_target_lane_idx = self._follow_escape_probe_lane_idx
+
         if new_target_lane_idx != prev_lane_idx:
             can_change_lane = True
             
@@ -4865,6 +5251,10 @@ class MPCController(Node):
 
             # Curve lock override: force lane constraint immediately if in curve
             if is_curve_locked:
+                can_change_lane = True
+            if self._follow_escape_active:
+                # Escape probes are safety decisions and must not be delayed
+                # by the ordinary two-second lane-change cooldown.
                 can_change_lane = True
             # A stationary lead must not remain trapped behind the normal
             # lane-change cooldown when a passing side is available.
@@ -5518,6 +5908,17 @@ class MPCController(Node):
                 self._arm_emergency_blocker_recovery(
                     emergency_stopped_blocker_id, pose, v)
 
+            self._update_follow_deadlock_escape(
+                now_sec=current_time_sec,
+                pose=pose,
+                ego_speed=v,
+                follow_active=follow_control_active,
+                target_id=(acc_vehicle_id if follow_control_active else None),
+                lead_speed=(acc_lead_speed if follow_control_active else 99999.0),
+                forward_command=max(float(u[0]), 0.0),
+                emergency_brake_active=emergency_brake_active,
+            )
+
             # --- Post-Overtake Cooldown: 追い越し後クールダウン中の後方車両監視 ---
             # Center→Race に切り替わった直後は、後方の近接車との衝突リスクが高い。
             # Race軌道がコーナーインを攻めて後方の相手と交差しないよう、
@@ -5734,6 +6135,19 @@ class MPCController(Node):
                 ref_vel_kmph,
                 float(getattr(
                     self._cfg.mpc, "safety_recovery_speed", 1.0)))
+        if (
+            self._follow_escape_active
+            and self._follow_escape_probe_lane_idx is not None
+            and not self._mpc_safety_recovery_active
+            and self._stuck_recovery_until is None
+            and not emergency_brake_active
+            and self._follow_escape_lane_traffic_is_clear(
+                pose, v, self._follow_escape_probe_lane_idx)
+        ):
+            # Feed a low-speed reference into the next constrained MPC solve.
+            # The actual command remains zero until three safe solves commit.
+            ref_vel_kmph = max(
+                ref_vel_kmph, self._follow_escape_creep_speed)
         self._mpc.update_v_max(ref_vel_kmph)
         v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
         self._reference_path.set_v_ref(v_ref)
@@ -5767,6 +6181,22 @@ class MPCController(Node):
                 u[0] = 0.0
             else:
                 u[0] = min(u[0], ref_vel_kmph)
+        if self._follow_escape_active:
+            if (
+                self._follow_escape_forward_active
+                and not emergency_brake_active
+                and self._prediction_is_clear_of_vehicle(
+                    self._follow_escape_target_id)
+                and self._follow_escape_lane_traffic_is_clear(
+                    pose, v, self._follow_escape_probe_lane_idx)
+            ):
+                u[0] = max(
+                    u[0],
+                    min(self._follow_escape_creep_speed, ref_vel_kmph),
+                )
+            else:
+                # Probe and rear-blocked states are observation-only.
+                u[0] = 0.0
 
         # 停止命令がコマンドで入力させたら減速させる
         if not self._enable_control:
@@ -5781,7 +6211,10 @@ class MPCController(Node):
             self.get_logger().error("No control signal", throttle_duration_sec=1)
             u = [0.0, 0.0]
 
-        self._intentional_follow_stop_active = intentional_follow_stop_active
+        self._intentional_follow_stop_active = (
+            intentional_follow_stop_active
+            and not self._follow_escape_active
+        )
         recovering_from_stuck = self._apply_stuck_recovery(now, u, v, pose)
 
         acc = 0.
