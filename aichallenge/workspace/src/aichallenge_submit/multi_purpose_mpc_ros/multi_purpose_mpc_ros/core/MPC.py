@@ -119,6 +119,27 @@ def can_reuse_prediction_fallback(
         and bool(control_valid)
     )
 
+
+def blend_lateral_reference(start_e_y, lane_center_e_y, alpha) -> float:
+    """Blend a full-width lateral reference toward a lane center."""
+    blend = float(np.clip(alpha, 0.0, 1.0))
+    return (
+        (1.0 - blend) * float(start_e_y)
+        + blend * float(lane_center_e_y)
+    )
+
+
+def lateral_reference_ramp_duration(
+    start_e_y, lane_center_e_y, minimum_sec, max_speed
+) -> float:
+    """Return a ramp duration that respects a lateral-reference speed cap."""
+    minimum = max(float(minimum_sec), 0.0)
+    speed = max(float(max_speed), 0.0)
+    if speed <= 0.0:
+        return minimum
+    distance = abs(float(lane_center_e_y) - float(start_e_y))
+    return max(minimum, distance / speed)
+
 ##################
 # MPC Controller #
 ##################
@@ -158,6 +179,12 @@ class MPC:
         self.model = model #車両モデル
         self.nx = self.model.n_states
         self.nu = 2
+        # This objective-only target is independent from target_lane_idx.
+        # It lets recovery keep full-width bounds while gently attracting the
+        # prediction toward L1 with the existing, fixed Q matrix.
+        self.soft_target_lane_idx = None
+        self.soft_target_start_e_y = 0.0
+        self.soft_target_alpha = 0.0
 
         # setupが済んでいるかどうか
         self.osqp_initialized = False
@@ -281,6 +308,16 @@ class MPC:
 
     def update_QN(self, QN: np.ndarray):
         self.QN = QN
+
+    def set_soft_lateral_reference(
+        self, lane_idx=None, start_e_y=0.0, alpha=0.0
+    ) -> None:
+        """Set an objective-only lane reference without narrowing bounds."""
+        self.soft_target_lane_idx = (
+            int(lane_idx) if lane_idx is not None else None
+        )
+        self.soft_target_start_e_y = float(start_e_y)
+        self.soft_target_alpha = float(np.clip(alpha, 0.0, 1.0))
 
     def _compute_lane_center(self, wp_id: int, target_lane: int) -> float:
         lanes = self.model.reference_path.get_lane_bounds(wp_id)
@@ -455,6 +492,25 @@ class MPC:
             for n in range(N):
                 lane_centers.append(self._compute_lane_center(self.model.wp_id + n, target_lane))
             xr[0:N*self.nx:self.nx] = lane_centers
+        elif self.soft_target_lane_idx is not None:
+            # Only xr changes here. lb/ub above remain the full-width corridor,
+            # and P/Q stay fixed, so obstacles may still move the solution away
+            # from L1 when required.
+            for n in range(N):
+                lane_center = self._compute_lane_center(
+                    self.model.wp_id + n, self.soft_target_lane_idx)
+                xr[n * self.nx] = blend_lateral_reference(
+                    self.soft_target_start_e_y,
+                    lane_center,
+                    self.soft_target_alpha,
+                )
+            terminal_center = self._compute_lane_center(
+                self.model.wp_id + N, self.soft_target_lane_idx)
+            xr[N * self.nx] = blend_lateral_reference(
+                self.soft_target_start_e_y,
+                terminal_center,
+                self.soft_target_alpha,
+            )
 
         t_constraints = time.perf_counter()
 

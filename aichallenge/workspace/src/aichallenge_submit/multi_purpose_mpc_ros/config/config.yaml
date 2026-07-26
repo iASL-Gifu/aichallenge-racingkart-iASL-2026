@@ -113,6 +113,9 @@ center_lane_rejoin_stability:
   probe_retry_cooldown_sec: 2.0 # [s] L1 probe失敗後の再試行禁止時間
   probe_retry_min_wp_progress: 5 # probe失敗地点からこのWaypoint数以上進むまで再試行しない
   backoff_full_width_success_sec: 0.5 # [s] BACKOFF解除に必要な全幅MPC連続成功時間
+  soft_rejoin_enabled: true # 全幅制約のまま参照横位置xrだけをL1中央へ誘導
+  soft_rejoin_ramp_sec: 1.5 # [s] L1参照移動の最低時間（距離/最大速度が長ければ自動延長）
+  soft_rejoin_max_reference_speed: 0.5 # [m/s] xrのL1中央への最大横移動速度
   release_infeasible_cycles: 5 # L1復帰中にこの回数連続失敗したらL1固定を解除
 
 bicycle_model:
