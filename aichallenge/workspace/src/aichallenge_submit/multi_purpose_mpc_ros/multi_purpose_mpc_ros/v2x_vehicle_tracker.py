@@ -11,6 +11,56 @@ from collections import deque
 from typing import Deque, Dict, List, Tuple
 
 
+def update_motion_latch(
+    has_moved_once: bool,
+    actual_speed: float,
+    movement_threshold: float = 1.0,
+) -> bool:
+    """Latch vehicle motion until an explicit simulator reset clears it."""
+    return bool(has_moved_once or abs(actual_speed) > movement_threshold)
+
+
+def should_reset_motion_latch(awsim_state) -> bool:
+    """Allow motion-latch reset only in AWSIM's pre-start states."""
+    return awsim_state in ("Grounded", "Ready")
+
+
+def should_suppress_overtake_before_grounded_snapshot(
+    awsim_state, snapshot_completed: bool
+) -> bool:
+    """Hold lateral manoeuvre state until the initial grid is captured.
+
+    ``None`` is included because the MPC node may start before the first
+    ``/awsim/state`` sample.  ``Start`` deliberately fails open: if this node
+    missed Grounded/Ready entirely, normal driving must not remain disabled
+    for the rest of the run.
+    """
+    return bool(not snapshot_completed and awsim_state != "Start")
+
+
+def startup_follow_restart_gap(
+    *, startup_waiting: bool, normal_min_gap: float, startup_min_gap: float
+) -> float:
+    """Use the shorter, separately configured restart gap only at launch."""
+    return float(startup_min_gap if startup_waiting else normal_min_gap)
+
+
+def startup_same_lane_lead_key(
+    *, vehicle_id, vehicle_lane_idx, ego_lane_idx,
+    longitudinal: float, distance: float,
+):
+    """Return a sortable key only for valid same-lane forward grid cars."""
+    if (
+        ego_lane_idx is None
+        or vehicle_lane_idx != ego_lane_idx
+        or not math.isfinite(float(longitudinal))
+        or float(longitudinal) <= 0.0
+        or not math.isfinite(float(distance))
+    ):
+        return None
+    return (float(longitudinal), float(distance), str(vehicle_id))
+
+
 def _stamp_to_seconds(stamp) -> float:
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
@@ -131,6 +181,35 @@ def is_follow_target_ahead(longitudinal) -> bool:
     )
 
 
+def should_reset_overtake_latch_for_target_change(
+    *, active_target_id, candidate_target_id, candidate_is_relevant
+) -> bool:
+    """Return whether a newly selected relevant lead replaces an old target.
+
+    Passing-side latches are deliberately sticky during one manoeuvre.  A
+    different nearby/stopped vehicle is a new manoeuvre, however, and must not
+    inherit the previous target's L0/L2 decision.
+    """
+    return bool(
+        candidate_is_relevant
+        and candidate_target_id is not None
+        and active_target_id is not None
+        and candidate_target_id != active_target_id
+    )
+
+
+def should_hold_follow_escape_exclusive(
+    *, target_longitudinal, target_distance, safe_distance
+) -> bool:
+    """Keep deadlock escape ownership while its target is ahead and close."""
+    return bool(
+        is_follow_target_ahead(target_longitudinal)
+        and target_distance is not None
+        and math.isfinite(float(target_distance))
+        and float(target_distance) < float(safe_distance)
+    )
+
+
 def should_start_prepass_recovery_from_safety(
     *,
     recovery_requested: bool,
@@ -216,6 +295,26 @@ def is_follow_retry_within_distance(distance, max_distance: float) -> bool:
         distance is not None
         and math.isfinite(float(distance))
         and 0.0 <= float(distance) < float(max_distance)
+    )
+
+
+def should_release_active_overtake_distance_gate(
+    *, outer_lane_active: bool, target_longitudinal, distance,
+    max_distance: float
+) -> bool:
+    """Release an ordinary outer-lane constraint once its lead exits the gate.
+
+    The behind-target state machine remains responsible after the target is
+    passed.  This gate specifically prevents a still-ahead but already distant
+    target from retaining L0/L2 until that constraint eventually becomes
+    infeasible.
+    """
+    return bool(
+        outer_lane_active
+        and is_follow_target_ahead(target_longitudinal)
+        and distance is not None
+        and math.isfinite(float(distance))
+        and float(distance) >= float(max_distance)
     )
 
 
@@ -395,6 +494,22 @@ def classify_lane_conflicts(
 
 def lane_conflicts_are_clear(conflicts) -> bool:
     return not any(conflicts.get(group) for group in ("front", "side", "rear"))
+
+
+def select_safe_outer_lane(
+    preferred_lane_idx,
+    physical_passage,
+    conflicts_by_lane,
+):
+    """Choose a physically passable, traffic-clear L0/L2 candidate."""
+    preferred = preferred_lane_idx if preferred_lane_idx in (0, 2) else 0
+    for lane_idx in (preferred, 2 if preferred == 0 else 0):
+        if (
+            physical_passage.get(lane_idx, False)
+            and lane_conflicts_are_clear(conflicts_by_lane.get(lane_idx, {}))
+        ):
+            return lane_idx
+    return None
 
 
 def follow_stop_deadlock_conditions_met(

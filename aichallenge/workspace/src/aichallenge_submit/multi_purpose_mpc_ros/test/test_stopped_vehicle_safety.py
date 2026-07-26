@@ -21,10 +21,16 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     prediction_clears_moving_vehicle,
     relative_longitudinal_distance,
     select_latched_overtake_lane,
+    select_safe_outer_lane,
     should_release_latched_overtake_lane,
     should_reevaluate_follow_overtake,
     should_count_mpc_recovery_success,
     should_recover_from_mpc_stall,
+    should_hold_follow_escape_exclusive,
+    should_release_active_overtake_distance_gate,
+    should_reset_overtake_latch_for_target_change,
+    should_reset_motion_latch,
+    should_suppress_overtake_before_grounded_snapshot,
     should_release_prepass_distance_gate,
     should_start_l1_recovery_from_safety,
     should_start_prepass_recovery_from_safety,
@@ -32,10 +38,73 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     update_continuous_condition_since,
     update_fallback_commit_success_since,
     update_follow_escape_probe_success_cycles,
+    update_motion_latch,
+    startup_follow_restart_gap,
+    startup_same_lane_lead_key,
 )
 
 
 class StoppedVehicleSafetyTest(unittest.TestCase):
+    def test_motion_latch_survives_an_ordinary_stop(self):
+        self.assertTrue(update_motion_latch(True, 0.0))
+
+    def test_motion_latch_sets_only_after_vehicle_has_moved(self):
+        self.assertFalse(update_motion_latch(False, 1.0))
+        self.assertTrue(update_motion_latch(False, 1.01))
+
+    def test_motion_latch_reset_is_limited_to_pre_start_states(self):
+        self.assertTrue(should_reset_motion_latch("Grounded"))
+        self.assertTrue(should_reset_motion_latch("Ready"))
+        self.assertFalse(should_reset_motion_latch("Start"))
+        self.assertFalse(should_reset_motion_latch(None))
+
+    def test_overtake_waits_for_grounded_snapshot(self):
+        for state in (None, "Grounded", "Ready"):
+            self.assertTrue(
+                should_suppress_overtake_before_grounded_snapshot(
+                    state, snapshot_completed=False))
+        self.assertFalse(should_suppress_overtake_before_grounded_snapshot(
+            "Grounded", snapshot_completed=True))
+
+    def test_missed_snapshot_does_not_disable_entire_race(self):
+        self.assertFalse(should_suppress_overtake_before_grounded_snapshot(
+            "Start", snapshot_completed=False))
+
+    def test_startup_restart_uses_separate_shorter_gap(self):
+        self.assertEqual(startup_follow_restart_gap(
+            startup_waiting=True,
+            normal_min_gap=6.0,
+            startup_min_gap=4.0,
+        ), 4.0)
+        self.assertEqual(startup_follow_restart_gap(
+            startup_waiting=False,
+            normal_min_gap=6.0,
+            startup_min_gap=4.0,
+        ), 6.0)
+
+    def test_startup_target_prefers_same_lane_forward_vehicle(self):
+        d2_key = startup_same_lane_lead_key(
+            vehicle_id="d2", vehicle_lane_idx=0, ego_lane_idx=2,
+            longitudinal=1.6, distance=3.7)
+        d3_key = startup_same_lane_lead_key(
+            vehicle_id="d3", vehicle_lane_idx=2, ego_lane_idx=2,
+            longitudinal=4.45, distance=4.46)
+        self.assertIsNone(d2_key)
+        self.assertEqual(d3_key, (4.45, 4.46, "d3"))
+
+    def test_startup_target_chooses_nearest_forward_same_lane_vehicle(self):
+        near = startup_same_lane_lead_key(
+            vehicle_id="near", vehicle_lane_idx=2, ego_lane_idx=2,
+            longitudinal=4.0, distance=4.2)
+        far = startup_same_lane_lead_key(
+            vehicle_id="far", vehicle_lane_idx=2, ego_lane_idx=2,
+            longitudinal=7.0, distance=7.1)
+        behind = startup_same_lane_lead_key(
+            vehicle_id="behind", vehicle_lane_idx=2, ego_lane_idx=2,
+            longitudinal=-1.0, distance=1.0)
+        self.assertLess(near, far)
+        self.assertIsNone(behind)
+
     def evaluate(self, **overrides):
         values = {
             "tracked_stopped_lead": True,
@@ -122,6 +191,40 @@ class StoppedVehicleSafetyTest(unittest.TestCase):
         )
         self.assertEqual(cycles, 0)
 
+    def test_new_stopped_target_discards_previous_overtake_latch(self):
+        self.assertTrue(should_reset_overtake_latch_for_target_change(
+            active_target_id="d3",
+            candidate_target_id="d1",
+            candidate_is_relevant=True,
+        ))
+        self.assertFalse(should_reset_overtake_latch_for_target_change(
+            active_target_id="d1",
+            candidate_target_id="d1",
+            candidate_is_relevant=True,
+        ))
+        self.assertFalse(should_reset_overtake_latch_for_target_change(
+            active_target_id="d3",
+            candidate_target_id="d1",
+            candidate_is_relevant=False,
+        ))
+
+    def test_deadlock_escape_holds_until_pass_or_safe_distance(self):
+        self.assertTrue(should_hold_follow_escape_exclusive(
+            target_longitudinal=3.0,
+            target_distance=3.5,
+            safe_distance=8.0,
+        ))
+        self.assertFalse(should_hold_follow_escape_exclusive(
+            target_longitudinal=-0.1,
+            target_distance=1.0,
+            safe_distance=8.0,
+        ))
+        self.assertFalse(should_hold_follow_escape_exclusive(
+            target_longitudinal=8.0,
+            target_distance=8.0,
+            safe_distance=8.0,
+        ))
+
 
 class PrepassSafetyRecoveryTest(unittest.TestCase):
     def test_recovery_success_is_not_counted_during_reverse(self):
@@ -181,6 +284,32 @@ class PrepassSafetyRecoveryTest(unittest.TestCase):
         self.assertTrue(is_follow_retry_within_distance(9.999, 10.0))
         self.assertFalse(is_follow_retry_within_distance(10.0, 10.0))
         self.assertFalse(is_follow_retry_within_distance(10.001, 10.0))
+
+    def test_active_outer_lane_releases_when_ahead_target_exits_gate(self):
+        self.assertFalse(should_release_active_overtake_distance_gate(
+            outer_lane_active=True,
+            target_longitudinal=9.0,
+            distance=9.999,
+            max_distance=10.0,
+        ))
+        self.assertTrue(should_release_active_overtake_distance_gate(
+            outer_lane_active=True,
+            target_longitudinal=10.0,
+            distance=10.0,
+            max_distance=10.0,
+        ))
+        self.assertFalse(should_release_active_overtake_distance_gate(
+            outer_lane_active=True,
+            target_longitudinal=-0.1,
+            distance=12.0,
+            max_distance=10.0,
+        ))
+        self.assertFalse(should_release_active_overtake_distance_gate(
+            outer_lane_active=False,
+            target_longitudinal=12.0,
+            distance=12.0,
+            max_distance=10.0,
+        ))
 
     def test_active_prepass_releases_immediately_at_distance_gate(self):
         self.assertFalse(should_release_prepass_distance_gate(
@@ -455,6 +584,36 @@ class OvertakeGeometryTest(unittest.TestCase):
             rear_distance=5.0,
         )
         self.assertTrue(lane_conflicts_are_clear(conflicts))
+
+    def test_safe_outer_lane_prefers_requested_clear_side(self):
+        self.assertEqual(select_safe_outer_lane(
+            0,
+            {0: True, 2: True},
+            {
+                0: {"front": [], "side": [], "rear": []},
+                2: {"front": [], "side": [], "rear": []},
+            },
+        ), 0)
+
+    def test_safe_outer_lane_uses_other_side_when_preferred_is_blocked(self):
+        self.assertEqual(select_safe_outer_lane(
+            0,
+            {0: True, 2: True},
+            {
+                0: {"front": ["d1"], "side": [], "rear": []},
+                2: {"front": [], "side": [], "rear": []},
+            },
+        ), 2)
+
+    def test_safe_outer_lane_rejects_width_or_traffic_blockage(self):
+        self.assertIsNone(select_safe_outer_lane(
+            2,
+            {0: False, 2: True},
+            {
+                0: {"front": [], "side": [], "rear": []},
+                2: {"front": [], "side": ["d3"], "rear": []},
+            },
+        ))
 
     def test_vehicle_ahead_has_positive_longitudinal_distance(self):
         self.assertGreater(relative_longitudinal_distance(5.0, 0.0, 0.0), 0.0)

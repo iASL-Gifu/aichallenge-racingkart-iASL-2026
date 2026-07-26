@@ -6,7 +6,7 @@ sim_logger:
 
 map:
   # path from pkg share dir
-  yaml_path: "env/final_ver4/occupancy_grid_map.yaml"
+  yaml_path: "env/min_curv/occupancy_grid_map.yaml"
 
 waypoints:
   # path from pkg share dir
@@ -100,7 +100,7 @@ follow_control:
 
 center_lane_rejoin_stability:
   enabled: true
-  constraint_diagnostics_enabled: true # L1 probe失敗時だけ境界幅・障害物・予測区間を詳細出力
+  constraint_diagnostics_enabled: true # L1 probeおよびL0/L2 SafetyRecovery時に境界幅・障害物・予測区間を詳細出力
   constraint_diagnostics_points: 5 # 有効幅が狭い順に出力する予測点数
   max_heading_error_deg: 8.0 # Center軌道に対する方位誤差
   max_lateral_speed: 0.8     # [m/s] odom横速度と方位誤差からの推定値の大きい方
@@ -220,6 +220,7 @@ follow_restart:
   lead_moving_speed: 0.5   # [m/s] 停止していた前方車が動き出したと判定する速度
   ego_stopped_speed: 0.3   # [m/s] 自車を停止中とみなす速度
   min_gap: 6.0             # [m] 再発進ブーストを許可する最低車間
+  start_min_gap: 4.0       # [m] 初期配置で前車が動き出した場合だけ使う早期再発進車間
   speed_margin: 1.5        # [m/s] 前方車速度へ加える再発進時の速度差
   max_speed: 3.0           # [m/s] 再発進ブースト中の上限速度
   acceleration: 2.0        # [m/s^2] 再発進時の最低加速度
@@ -230,7 +231,14 @@ initial_start_boost:
   duration: 5.0            # [s] 車両の動き始めを検出してから初回だけ適用する時間
   turbo_enabled: true      # 動き始めにAWSIMターボを /awsim/cmd の [1.0]→[0.0] で初回だけONにする
   motion_speed_threshold: 0.1 # [m/s] 実速度がこの値に達した周期でターボと最大加速を開始
-  hold_l0_during_boost: true # 最大加速中は追越検出を残したまま赤色車線L0を直進し、L1/L2への寄せを延期
+  hold_l0_during_boost: false # 比較試験: ブースト中もL0に固定せず、Center軌道の全幅制約で走行
+  soft_l0_guidance_enabled: true # 全幅制約のまま、参照横位置だけをL0側へ緩く誘導
+  soft_l0_l1_offset: 0.3 # [m] L0中央からL1側へ寄せる参照位置オフセット
+  soft_l0_ramp_sec: 1.5 # [s] 現在横位置から誘導目標へ移す最低時間
+  soft_l0_max_reference_speed: 0.5 # [m/s] 誘導参照の最大横移動速度
+  soft_l0_curvature_threshold: 0.04 # [1/m] これを超える予測最大曲率に対してL1側への追加誘導を開始
+  soft_l0_curvature_gain: 6.0 # [m^2] (max_kappa-threshold)へ掛ける追加横オフセットゲイン
+  soft_l0_curvature_max_shift: 1.0 # [m] 曲率によるL1側への追加横オフセット上限
   post_boost_hold_min_sec: 1.5 # [s] ブースト終了後も最低この時間はL0を維持
   post_boost_stable_sec: 0.4 # [s] 予測曲率だけが継続して条件を満たしてから通常のL1復帰判定へ進む
   post_boost_max_kappa: 0.12 # [1/m] 全幅走行後、予測区間内の最大絶対曲率がこれ以下ならL1復帰を許可

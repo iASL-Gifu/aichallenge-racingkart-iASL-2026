@@ -26,6 +26,24 @@ OSQP_PRIMAL_INFEASIBLE_STATUSES = {
 }
 
 
+def curvature_lateral_shift(
+    max_abs_kappa,
+    threshold,
+    gain,
+    max_shift,
+) -> float:
+    """Return a bounded L1-side offset requested by upcoming curvature."""
+    values = (max_abs_kappa, threshold, gain, max_shift)
+    if not all(np.isfinite(float(value)) for value in values):
+        return 0.0
+    excess_curvature = max(
+        float(max_abs_kappa) - max(float(threshold), 0.0),
+        0.0,
+    )
+    requested_shift = max(float(gain), 0.0) * excess_curvature
+    return float(np.clip(requested_shift, 0.0, max(float(max_shift), 0.0)))
+
+
 def is_valid_osqp_solution(result) -> bool:
     """Return whether OSQP produced a usable optimal solution."""
     return (
@@ -262,6 +280,10 @@ class MPC:
         self.time_budget_exceeded = False
         self.recovery_requested = False
         self.failure_reason = None
+        self.soft_target_lane_idx = None
+        self.soft_target_start_e_y = 0.0
+        self.soft_target_alpha = 0.0
+        self.soft_target_lateral_offset = 0.0
         # Snapshot of the exact corridor used by the latest solve attempt.
         # These values remain available after an infeasible solve so the
         # controller can diagnose lane-bound and obstacle-induced failures.
@@ -310,7 +332,8 @@ class MPC:
         self.QN = QN
 
     def set_soft_lateral_reference(
-        self, lane_idx=None, start_e_y=0.0, alpha=0.0
+        self, lane_idx=None, start_e_y=0.0, alpha=0.0,
+        lateral_offset=0.0,
     ) -> None:
         """Set an objective-only lane reference without narrowing bounds."""
         self.soft_target_lane_idx = (
@@ -318,6 +341,7 @@ class MPC:
         )
         self.soft_target_start_e_y = float(start_e_y)
         self.soft_target_alpha = float(np.clip(alpha, 0.0, 1.0))
+        self.soft_target_lateral_offset = float(lateral_offset)
 
     def _compute_lane_center(self, wp_id: int, target_lane: int) -> float:
         lanes = self.model.reference_path.get_lane_bounds(wp_id)
@@ -499,6 +523,7 @@ class MPC:
             for n in range(N):
                 lane_center = self._compute_lane_center(
                     self.model.wp_id + n, self.soft_target_lane_idx)
+                lane_center += self.soft_target_lateral_offset
                 xr[n * self.nx] = blend_lateral_reference(
                     self.soft_target_start_e_y,
                     lane_center,
@@ -506,6 +531,7 @@ class MPC:
                 )
             terminal_center = self._compute_lane_center(
                 self.model.wp_id + N, self.soft_target_lane_idx)
+            terminal_center += self.soft_target_lateral_offset
             xr[N * self.nx] = blend_lateral_reference(
                 self.soft_target_start_e_y,
                 terminal_center,

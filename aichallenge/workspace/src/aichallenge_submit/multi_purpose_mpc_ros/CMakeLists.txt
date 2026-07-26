@@ -33,6 +33,7 @@ install(PROGRAMS
   scripts/run_mpc_simulation.bash
   scripts/run_reference_path_visualizer.bash
   scripts/run_reference_velocity_configulator.bash
+  scripts/generate_occupancy_map_from_boundary.py
   scripts/path_constraints_provider.bash
   scripts/mpc_controller
   scripts/mpc_simulation
