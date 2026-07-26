@@ -51,7 +51,7 @@ reference_path:
 trajectory_switch:
   enter_center_wps: 20   # 前方車がこのWaypoint差未満ならCenterへ切り替え
   exit_center_wps: 25    # Center中はこのWaypoint差を超えるまで維持
-  overtake_latch_max_distance: 10.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
+  overtake_latch_max_distance: 15.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
   center_lane_rejoin_behind_wps: 6 # 追い越した車が後方へこの差以上 離れたらCenter軌道のL1へ戻る
   behind_release_wps: 12 # 追い越した車が後方へこの差以上離れるまで維持
   min_hold_sec: 1.0      # 切り替え直後の再切り替え禁止時間
@@ -67,7 +67,7 @@ prepass_lane_fallback:
   recovery_stable_sec: 0.5 # 全幅解除後、MPC正常かつ候補車線基準の車両安定条件がこの時間続いてから代替車線を選択
   recovery_timeout_sec: 5.0 # 全幅回復がこの時間成立しなければラッチ対象を再評価。通過不可/後方危険なら追従、近すぎて通過可能なら後退後に再評価
   follow_retry_sec: 2.0 # [s] 追従へ移行後も、この周期で外側車線の通過幅とV2X競合を再評価する
-  follow_retry_max_distance: 10.0 # [m] 追従から追い越しを再評価する最大距離（この値未満のみ）
+  follow_retry_max_distance: 15.0 # [m] 追従から追い越しを再評価する最大距離（この値未満のみ）
   behind_release_longitudinal: 0.5 # [m] 対象がこの距離より後方にいる状態が継続したらPrepassを解除
   behind_release_confirm_sec: 0.25 # [s] V2X位置揺れで誤解除しないための後方判定継続時間
   max_heading_error_deg: 10.0 # [deg] 候補車線中心軌道に対するPrepass回復時の許容方位誤差

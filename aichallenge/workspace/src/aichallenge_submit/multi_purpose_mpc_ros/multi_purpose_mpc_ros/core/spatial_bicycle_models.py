@@ -262,7 +262,8 @@ class SpatialBicycleModel(ABC):
         # safety_margin = self.width / np.sqrt(2) / 2.0
         # safety_margin = 0.0
 
-        return safety_margin
+        #return safety_margin
+        return 0.0
 
     def get_current_waypoint(self):
         """

@@ -7,6 +7,7 @@ from multi_purpose_mpc_ros.core.map import Map, Obstacle
 from skimage.draw import line_aa
 import matplotlib.pyplot as plt
 from scipy import sparse
+from scipy.signal import savgol_filter
 import osqp
 import os
 import itertools
@@ -23,6 +24,38 @@ OBSTACLE = '#2E4053'
 # becomes the outside margin of L2 and L0 respectively.  It must not be
 # applied to the lane boundaries adjoining L1.
 OUTER_COURSE_MARGIN = 0.3
+CURVATURE_SAVGOL_WINDOW = 7
+CURVATURE_SAVGOL_POLYORDER = 3
+
+
+def smooth_circular_waypoint_curvatures(
+    waypoints,
+    window_length=CURVATURE_SAVGOL_WINDOW,
+    polyorder=CURVATURE_SAVGOL_POLYORDER,
+):
+    """Smooth a complete circular curvature sequence across its seam."""
+    window_length = int(window_length)
+    polyorder = int(polyorder)
+    if (
+        len(waypoints) < window_length
+        or window_length < 3
+        or window_length % 2 == 0
+        or polyorder < 0
+        or polyorder >= window_length
+    ):
+        return False
+
+    raw_curvatures = np.asarray(
+        [waypoint.kappa for waypoint in waypoints], dtype=float)
+    smoothed_curvatures = savgol_filter(
+        raw_curvatures,
+        window_length=window_length,
+        polyorder=polyorder,
+        mode="wrap",
+    )
+    for waypoint, curvature in zip(waypoints, smoothed_curvatures):
+        waypoint.kappa = float(curvature)
+    return True
 
 
 def dist(x1, y1, x2, y2):
@@ -235,6 +268,12 @@ class ReferencePath:
         # List of waypoint objects
         self.waypoints = self._construct_path(wp_x, wp_y)
 
+        # Filter the complete circular sequence at once so the final and first
+        # waypoints are treated as neighbors.  Keep non-circular paths and
+        # paths shorter than the configured window unchanged.
+        if self.circular:
+            smooth_circular_waypoint_curvatures(self.waypoints)
+
         # Set normal angle if provided
         if wp_psi is not None and len(wp_psi) == len(self.waypoints):
             for i in range(len(self.waypoints)):
@@ -398,12 +437,15 @@ class ReferencePath:
             # Get x and y coordinates of current waypoint
             x, y = current_wp[0], current_wp[1]
 
-            # Compute local curvature at waypoint
-            # first waypoint
-            if wp_id == 0:
+            # Compute local curvature at waypoint.  For a circular path the
+            # first waypoint has a valid incoming segment from the final
+            # waypoint, so use it instead of forcing the seam curvature to
+            # zero.
+            if wp_id == 0 and not self.circular:
                 kappa = 0
             else:
-                prev_wp = np.array(waypoint_coordinates[wp_id - 1])
+                prev_wp_id = (wp_id - 1) % len(waypoint_coordinates)
+                prev_wp = np.array(waypoint_coordinates[prev_wp_id])
                 dif_behind = current_wp - prev_wp
                 angle_behind = np.arctan2(dif_behind[1], dif_behind[0])
                 angle_dif = np.mod(psi - angle_behind + math.pi, 2 * math.pi) \

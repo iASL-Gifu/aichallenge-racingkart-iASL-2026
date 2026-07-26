@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # CSV読み込み
-df = pd.read_csv("boundary.csv")
+df = pd.read_csv("env/boundary.csv")
 
 # 描画
 plt.figure(figsize=(10, 10))
