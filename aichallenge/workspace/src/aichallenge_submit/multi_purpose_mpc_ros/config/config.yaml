@@ -28,9 +28,9 @@ reference_path:
 
   # --- 軌道・境界線CSVの切り替え設定 ---
   # 通常走行時（追い越し・追従フラグなし）に使用するレースライン軌道
-  race_csv_path: "env/min_curv/traj_race_cl_mpc.csv"
+  race_csv_path: "env/min_curv2/traj_race_cl_mpc.csv"
   # 通常走行時の境界線CSV（レースライン基準）
-  race_bounds_csv_path: "env/waypoint_bounds.csv"
+  race_bounds_csv_path: "env/min_curv2/waypoint_bounds.csv"
 
   # 追い越し・追従フラグ時に使用する安定化軌道（センターライン）
   center_csv_path: "env/centerline/traj_center313.csv"
@@ -131,7 +131,7 @@ mpc:
   R10: [100000.0,100.0]
   a_min: -1.0 # m/s^2
   a_max: 2.5 # m/s^2
-  delta_max_deg: 52.0 # degrees
+  delta_max_deg: 18.0 # degrees
   steer_rate_max: 3.00 # rad/s max_steering_rate
   control_rate: 40.0 # Hz Ts=1/control_rate
   solve_time_budget_ms: 20.0 # 初回失敗後、安全マージンを緩和する追加再試行だけの時間上限
@@ -158,8 +158,8 @@ mpc:
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  v_max: 35.0   # km/h
-  ay_max: 15.0  # m/s^2, maximum lateral acceleration in curves
+  v_max: 40.0   # km/h
+  ay_max: 18.0  # m/s^2, maximum lateral acceleration in curves
   # kappa_actual = kappa_cmd / (1 + understeer_coeff * v^2)
   # 0.002 gives about 16% curvature loss at 35 km/h.
   understeer_coeff: 0.005  # [s^2/m^2]
@@ -206,9 +206,25 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 0.5          # [m]
-  v_max_safety: 35.0           # [m/s]
+  vehicle_radius: 0.725          # [m]
+  v_max_safety: 40.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
+  parallel_vehicle_half_width: 0.725 # [m] 並走横クリアランス用の相手車両半幅
+  parallel_ego_half_length: 1.0     # [m] 自車の全長2.0mに対する半長
+  parallel_vehicle_half_length: 1.0 # [m] 相手車の全長2.0mに対する半長
+  parallel_critical_clearance: 0.30  # [m] 車両包絡間の実空きがこれ以下なら強減速
+  parallel_warning_clearance: 1.30   # [m] 車両包絡間の実空きがこれ以下なら並走減速
+  parallel_safety_longitudinal_clearance: 0.50 # [m] Safetyを許可する縦包絡間の最大空き
+  parallel_abort_longitudinal_clearance: 0.50  # [m] Abortを許可する縦包絡間の最大空き
+  parallel_safety_lon_behind: 2.0    # [m] Safetyは後方車体の重なりも確認
+  parallel_safety_lon_ahead: 4.5     # [m]
+  parallel_abort_lon_behind: 0.5     # [m] Abortは後方測定揺れだけ許容
+  parallel_abort_lon_ahead: 4.5      # [m]
+  parallel_safety_arc_behind: 2.0    # [m] Center累積弧長によるSafety後方範囲
+  parallel_safety_arc_ahead: 5.0     # [m]
+  parallel_abort_arc_behind: 0.5     # [m] Center累積弧長によるAbort後方範囲
+  parallel_abort_arc_ahead: 5.0      # [m]
+  parallel_abort_sec: 4.0            # [s] 同じ車両との並走が継続する時間
 
 stopped_vehicle_overtake:
   speed_threshold: 0.3     # [m/s] 前走車を停止とみなす速度
@@ -254,6 +270,17 @@ stuck_recovery:
   forward_resume_lead_speed: 0.5 # [m/s] 前方車が動いたとみなす速度
   forward_resume_min_command: 0.3 # [m/s] 後退中断に必要な新鮮な前進MPC速度指令
   reverse_duration: 3.0
+  # 停止前方車が原因のFollowDeadlockだけ、静的地図の後方掃引距離と
+  # GNSS/odom整合を確認し、有効な前進MPCが成立するまで距離制御で後退する。
+  adaptive_reverse_enabled: true
+  adaptive_reverse_max_distance: 6.0 # [m] 一度に許可する後退距離の上限
+  adaptive_reverse_wall_margin: 0.3 # [m] 静的壁まで必ず残す後方余裕
+  adaptive_reverse_footprint_radius: 1.13 # [m] 後退掃引で使う保守的な車体包絡半径
+  adaptive_reverse_min_clear_distance: 0.3 # [m] これ未満しか下がれなければ停止維持
+  adaptive_reverse_localization_max_error: 0.5 # [m] GNSS位置とodom位置の許容差
+  adaptive_reverse_localization_fresh_sec: 0.5 # [s] 両位置情報の最大受信経過時間
+  adaptive_reverse_localization_confirm_sec: 0.25 # [s] 整合条件の連続確認時間
+  adaptive_reverse_forward_success_cycles: 3 # 有効な前進MPCをこの周期数連続確認したら後退終了
   cooldown: 2.0
   reverse_speed: 1.5
   reverse_acceleration: 2.5

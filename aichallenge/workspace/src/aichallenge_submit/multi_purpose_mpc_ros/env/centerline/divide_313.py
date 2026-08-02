@@ -7,7 +7,9 @@ import numpy as np
 input_csv = "boundary.csv"
 output_csv = "centerline_devided.csv"
 
-NUM_POINTS = 313
+NUM_POINTS = 2000
+X_OFFSET = 5.332886
+Y_OFFSET = -75.727413
 #=========================
 # CSV読み込み
 #=========================
@@ -34,6 +36,15 @@ new_df = pd.DataFrame()
 
 for col in df.columns:
     new_df[col] = np.interp(target_s, s, df[col].values)
+
+#=========================
+# 各点に座標オフセットを適用
+#=========================
+for col in ("left_x", "right_x", "center_x"):
+    new_df[col] += X_OFFSET
+
+for col in ("left_y", "right_y", "center_y"):
+    new_df[col] += Y_OFFSET
 
 #=========================
 # 保存

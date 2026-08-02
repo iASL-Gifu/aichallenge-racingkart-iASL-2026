@@ -11,6 +11,107 @@ from collections import deque
 from typing import Deque, Dict, List, Tuple
 
 
+def build_closed_path_arc_lengths(points):
+    """Build cumulative segment-start distances for a closed reference path."""
+    xy = [(float(x), float(y)) for x, y in points]
+    if len(xy) < 2:
+        return xy, [], 0.0
+
+    cumulative = [0.0]
+    for index in range(len(xy)):
+        x0, y0 = xy[index]
+        x1, y1 = xy[(index + 1) % len(xy)]
+        cumulative.append(
+            cumulative[-1] + math.hypot(x1 - x0, y1 - y0))
+    return xy, cumulative, cumulative[-1]
+
+
+def project_to_closed_path_arc(x, y, points, cumulative, total_length):
+    """Project a world position onto a closed polyline and return arc length."""
+    if len(points) < 2 or total_length <= 0.0:
+        return None
+
+    px = float(x)
+    py = float(y)
+    best_distance_sq = float("inf")
+    best_s = None
+    for index in range(len(points)):
+        x0, y0 = points[index]
+        x1, y1 = points[(index + 1) % len(points)]
+        vx = x1 - x0
+        vy = y1 - y0
+        length_sq = vx * vx + vy * vy
+        if length_sq <= 1e-12:
+            continue
+        ratio = ((px - x0) * vx + (py - y0) * vy) / length_sq
+        ratio = min(max(ratio, 0.0), 1.0)
+        projected_x = x0 + ratio * vx
+        projected_y = y0 + ratio * vy
+        distance_sq = (
+            (px - projected_x) ** 2 + (py - projected_y) ** 2)
+        if distance_sq < best_distance_sq:
+            best_distance_sq = distance_sq
+            segment_length = math.sqrt(length_sq)
+            best_s = cumulative[index] + ratio * segment_length
+
+    return None if best_s is None else best_s % total_length
+
+
+def project_to_closed_path_frenet(x, y, points, cumulative, total_length):
+    """Project onto a closed path and return ``(s, signed lateral offset)``.
+
+    Positive lateral offset is to the left of the path direction.  Computing
+    each vehicle at its own closest Center segment avoids mixing longitudinal
+    separation into the lateral distance on curves.
+    """
+    if len(points) < 2 or total_length <= 0.0:
+        return None
+
+    px = float(x)
+    py = float(y)
+    best_distance_sq = float("inf")
+    best_frenet = None
+    for index in range(len(points)):
+        x0, y0 = points[index]
+        x1, y1 = points[(index + 1) % len(points)]
+        vx = x1 - x0
+        vy = y1 - y0
+        length_sq = vx * vx + vy * vy
+        if length_sq <= 1e-12:
+            continue
+        ratio = ((px - x0) * vx + (py - y0) * vy) / length_sq
+        ratio = min(max(ratio, 0.0), 1.0)
+        projected_x = x0 + ratio * vx
+        projected_y = y0 + ratio * vy
+        offset_x = px - projected_x
+        offset_y = py - projected_y
+        distance_sq = offset_x * offset_x + offset_y * offset_y
+        if distance_sq < best_distance_sq:
+            best_distance_sq = distance_sq
+            segment_length = math.sqrt(length_sq)
+            lateral_offset = (
+                offset_x * (-vy / segment_length)
+                + offset_y * (vx / segment_length)
+            )
+            best_frenet = (
+                (cumulative[index] + ratio * segment_length) % total_length,
+                lateral_offset,
+            )
+
+    return best_frenet
+
+
+def signed_closed_path_arc_distance(ego_s, other_s, total_length):
+    """Return other-minus-ego arc distance wrapped to half a lap."""
+    if ego_s is None or other_s is None or total_length <= 0.0:
+        return None
+    return (
+        (float(other_s) - float(ego_s) + total_length / 2.0)
+        % total_length
+        - total_length / 2.0
+    )
+
+
 def update_motion_latch(
     has_moved_once: bool,
     actual_speed: float,
@@ -59,6 +160,45 @@ def startup_same_lane_lead_key(
     ):
         return None
     return (float(longitudinal), float(distance), str(vehicle_id))
+
+
+def reverse_path_has_vehicle_conflict(
+    *,
+    ego_x: float,
+    ego_y: float,
+    ego_heading: float,
+    reverse_distance: float,
+    corridor_half_width: float,
+    reverse_path_lanes,
+    vehicle_x: float,
+    vehicle_y: float,
+    vehicle_lane,
+) -> bool:
+    """Return whether a vehicle occupies the predicted reverse corridor.
+
+    Vehicles assigned to an adjacent lane do not block recovery merely by
+    being inside a broad longitudinal rear window. Unknown lane positions are
+    handled conservatively using the swept-path geometry.
+    """
+    path_lanes = {
+        int(lane) for lane in (reverse_path_lanes or ()) if lane is not None
+    }
+    if (
+        vehicle_lane is not None
+        and path_lanes
+        and int(vehicle_lane) not in path_lanes
+    ):
+        return False
+
+    dx = float(vehicle_x) - float(ego_x)
+    dy = float(vehicle_y) - float(ego_y)
+    heading = float(ego_heading)
+    longitudinal = dx * math.cos(heading) + dy * math.sin(heading)
+    lateral = -dx * math.sin(heading) + dy * math.cos(heading)
+    return bool(
+        -max(float(reverse_distance), 0.0) <= longitudinal < 0.0
+        and abs(lateral) <= max(float(corridor_half_width), 0.0)
+    )
 
 
 def _stamp_to_seconds(stamp) -> float:
@@ -626,21 +766,62 @@ def is_parallel_vehicle(
     *,
     ego_lane_idx,
     other_lane_idx,
-    lateral_distance,
+    lateral_clearance,
+    longitudinal_clearance,
     longitudinal_distance,
-    minimum_lateral_distance,
-    maximum_lateral_distance,
+    maximum_lateral_clearance,
+    maximum_longitudinal_clearance,
+    minimum_longitudinal_distance,
     maximum_longitudinal_distance,
 ):
-    """Classify true side-by-side traffic, excluding same-lane following."""
+    """Classify side-by-side traffic using envelope-to-envelope clearance."""
     return (
         ego_lane_idx is not None
         and other_lane_idx is not None
         and ego_lane_idx != other_lane_idx
-        and minimum_lateral_distance <= lateral_distance
-            <= maximum_lateral_distance
-        and abs(longitudinal_distance) <= maximum_longitudinal_distance
+        # Negative clearance means the configured envelopes overlap and must
+        # remain in the most critical class rather than falling through a
+        # minimum center-distance gate.
+        and lateral_clearance <= maximum_lateral_clearance
+        # A small lateral gap alone is insufficient: vehicles separated along
+        # the Center arc must also have overlapping or nearby length envelopes.
+        and longitudinal_clearance <= maximum_longitudinal_clearance
+        and minimum_longitudinal_distance <= longitudinal_distance
+            <= maximum_longitudinal_distance
     )
+
+
+def lateral_vehicle_clearance(
+    lateral_center_distance,
+    ego_width,
+    other_half_width,
+):
+    """Return signed lateral free space between two vehicle envelopes."""
+    return (
+        abs(float(lateral_center_distance))
+        - 0.5 * max(float(ego_width), 0.0)
+        - max(float(other_half_width), 0.0)
+    )
+
+
+def longitudinal_vehicle_clearance(
+    longitudinal_center_distance,
+    ego_half_length,
+    other_half_length,
+):
+    """Return signed longitudinal free space between vehicle envelopes."""
+    return (
+        abs(float(longitudinal_center_distance))
+        - max(float(ego_half_length), 0.0)
+        - max(float(other_half_length), 0.0)
+    )
+
+
+def select_parallel_abort_lane(ego_lane_idx, other_lane_idx):
+    """Keep an outer lane when yielding to a vehicle occupying L1."""
+    if other_lane_idx == 1 and ego_lane_idx in (0, 2):
+        return int(ego_lane_idx)
+    return 1
 
 
 def select_latched_overtake_lane(

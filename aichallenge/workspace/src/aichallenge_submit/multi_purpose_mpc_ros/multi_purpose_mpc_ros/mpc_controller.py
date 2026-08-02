@@ -49,6 +49,7 @@ from v2x_msgs.msg import V2XVehiclePositionArray
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     V2XVehicleTracker,
     absolute_heading_difference,
+    build_closed_path_arc_lengths,
     classify_prepass_timeout_reasons,
     classify_lane_conflicts,
     circular_forward_progress,
@@ -59,15 +60,21 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     is_follow_retry_within_distance,
     is_prepass_fallback_lane_change,
     lane_conflicts_are_clear,
+    lateral_vehicle_clearance,
+    longitudinal_vehicle_clearance,
     is_parallel_vehicle,
     ordered_outer_lane_candidates,
     ordered_prepass_fallback_candidates,
     prepass_recovery_owns_lane_selection,
     prediction_clears_moving_vehicle,
     predictions_to_obstacles,
+    project_to_closed_path_frenet,
     relative_longitudinal_distance,
+    reverse_path_has_vehicle_conflict,
     select_safe_outer_lane,
     select_latched_overtake_lane,
+    select_parallel_abort_lane,
+    signed_closed_path_arc_distance,
     should_release_latched_overtake_lane,
     should_reevaluate_follow_overtake,
     should_count_mpc_recovery_success,
@@ -91,7 +98,10 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
 
 # Multi_Purpose_MPC
 from multi_purpose_mpc_ros.core.map import Map, Obstacle
-from multi_purpose_mpc_ros.core.reference_path import ReferencePath
+from multi_purpose_mpc_ros.core.reference_path import (
+    ReferencePath,
+    lane_minimum_free_segment_width,
+)
 from multi_purpose_mpc_ros.core.spatial_bicycle_models import BicycleModel
 from multi_purpose_mpc_ros.core.MPC import (
     MPC,
@@ -557,6 +567,15 @@ class MPCController(Node):
         self._mpc_cfg_center, self._mpcN_center = create_mpc(self._carN_center, self._cfg.mpc.N)
         #_, self._mpc10_center = create_mpc(self._car10_center, 9, self._cfg.mpc.R10)
         compute_speed_profile(self._carN_center, self._mpc_cfg_center)
+        center_arc_points = [
+            (waypoint.x, waypoint.y)
+            for waypoint in self._reference_pathN_center.waypoints
+        ]
+        (
+            self._center_arc_points,
+            self._center_arc_cumulative,
+            self._center_arc_total_length,
+        ) = build_closed_path_arc_lengths(center_arc_points)
         #compute_speed_profile(self._car10_center, self._mpc_cfg_center)
 
         # Lane lock on curves configuration
@@ -782,6 +801,7 @@ class MPCController(Node):
         self._follow_escape_forward_active = False
         self._follow_escape_forward_until = None
         self._follow_escape_last_reevaluate_at = None
+        self._follow_escape_target_prediction_blocked = False
         self._prepass_fallback_lane_idx = None
         self._prepass_fallback_blocked = False
         self._prepass_fallback_follow_active = False
@@ -814,6 +834,9 @@ class MPCController(Node):
         self._close_obstacle_reverse_requested = False
         self._parallel_abort_active = False
         self._parallel_abort_vehicle_id = None
+        self._parallel_abort_target_lane_idx = None
+        self._parallel_timer_vehicle_id = None
+        self._parallel_start_time = None
 
         restart_cfg = getattr(self._cfg, "follow_restart", None)
         self._follow_restart_lead_moving_speed = float(getattr(
@@ -910,6 +933,42 @@ class MPCController(Node):
                 warn_callback=self.get_logger().warn,
             )
             self._v2x_vehicle_radius = float(v2x_cfg.vehicle_radius)
+            self._v2x_parallel_vehicle_half_width = max(float(getattr(
+                v2x_cfg, "parallel_vehicle_half_width",
+                self._v2x_vehicle_radius)), 0.0)
+            self._parallel_ego_half_length = max(float(getattr(
+                v2x_cfg, "parallel_ego_half_length", 1.0)), 0.0)
+            self._parallel_vehicle_half_length = max(float(getattr(
+                v2x_cfg, "parallel_vehicle_half_length", 1.0)), 0.0)
+            self._parallel_critical_clearance = max(float(getattr(
+                v2x_cfg, "parallel_critical_clearance", 0.30)), 0.0)
+            self._parallel_warning_clearance = max(float(getattr(
+                v2x_cfg, "parallel_warning_clearance", 1.30)),
+                self._parallel_critical_clearance)
+            self._parallel_safety_longitudinal_clearance = max(float(getattr(
+                v2x_cfg, "parallel_safety_longitudinal_clearance", 0.50)),
+                0.0)
+            self._parallel_abort_longitudinal_clearance = max(float(getattr(
+                v2x_cfg, "parallel_abort_longitudinal_clearance", 0.50)),
+                0.0)
+            self._parallel_safety_lon_behind = max(float(getattr(
+                v2x_cfg, "parallel_safety_lon_behind", 2.0)), 0.0)
+            self._parallel_safety_lon_ahead = max(float(getattr(
+                v2x_cfg, "parallel_safety_lon_ahead", 4.5)), 0.0)
+            self._parallel_abort_lon_behind = max(float(getattr(
+                v2x_cfg, "parallel_abort_lon_behind", 0.5)), 0.0)
+            self._parallel_abort_lon_ahead = max(float(getattr(
+                v2x_cfg, "parallel_abort_lon_ahead", 4.5)), 0.0)
+            self._parallel_safety_arc_behind = max(float(getattr(
+                v2x_cfg, "parallel_safety_arc_behind", 2.0)), 0.0)
+            self._parallel_safety_arc_ahead = max(float(getattr(
+                v2x_cfg, "parallel_safety_arc_ahead", 5.0)), 0.0)
+            self._parallel_abort_arc_behind = max(float(getattr(
+                v2x_cfg, "parallel_abort_arc_behind", 0.5)), 0.0)
+            self._parallel_abort_arc_ahead = max(float(getattr(
+                v2x_cfg, "parallel_abort_arc_ahead", 5.0)), 0.0)
+            self._parallel_abort_sec = max(float(getattr(
+                v2x_cfg, "parallel_abort_sec", 4.0)), 0.0)
             mpc_N = int(self._cfg.mpc.N)  # type: ignore
             t_horizon = mpc_N / float(self._cfg.mpc.control_rate)  # type: ignore
             self._v2x_t_samples = [
@@ -968,6 +1027,26 @@ class MPCController(Node):
         self._stuck_forward_resume_min_command = max(float(get_cfg(
             "forward_resume_min_command", 0.3)), 0.0)
         self._stuck_reverse_duration = float(get_cfg("reverse_duration", 3.0))
+        self._adaptive_reverse_enabled = bool(get_cfg(
+            "adaptive_reverse_enabled", True))
+        self._adaptive_reverse_max_distance = max(float(get_cfg(
+            "adaptive_reverse_max_distance", 6.0)), 0.0)
+        self._adaptive_reverse_wall_margin = max(float(get_cfg(
+            "adaptive_reverse_wall_margin", 0.3)), 0.0)
+        self._adaptive_reverse_footprint_radius = max(float(get_cfg(
+            "adaptive_reverse_footprint_radius",
+            float(self._cfg.bicycle_model.width) / math.sqrt(2.0),
+        )), 0.1)
+        self._adaptive_reverse_min_clear_distance = max(float(get_cfg(
+            "adaptive_reverse_min_clear_distance", 0.3)), 0.0)
+        self._adaptive_reverse_localization_max_error = max(float(get_cfg(
+            "adaptive_reverse_localization_max_error", 0.5)), 0.0)
+        self._adaptive_reverse_localization_fresh_sec = max(float(get_cfg(
+            "adaptive_reverse_localization_fresh_sec", 0.5)), 0.0)
+        self._adaptive_reverse_localization_confirm_sec = max(float(get_cfg(
+            "adaptive_reverse_localization_confirm_sec", 0.25)), 0.0)
+        self._adaptive_reverse_forward_success_cycles_required = max(int(
+            get_cfg("adaptive_reverse_forward_success_cycles", 3)), 1)
         self._stuck_cooldown = float(get_cfg("cooldown", 2.0))
         self._stuck_forward_reverse_speed = abs(float(get_cfg("reverse_speed", 1.0)))
         self._stuck_reverse_speed = -abs(float(get_cfg("reverse_speed", 1.0)))
@@ -1013,6 +1092,16 @@ class MPCController(Node):
         self._stuck_reverse_drive_active = False
         self._stuck_recovery_started_at = None
         self._stuck_reverse_start_target_longitudinal = None
+        self._stuck_reverse_target_distance = None
+        self._stuck_reverse_start_heading = None
+        self._adaptive_reverse_active = False
+        self._adaptive_reverse_static_clearance = None
+        self._adaptive_reverse_forward_success_cycles = 0
+        self._localization_consistent_since = None
+        self._localization_consistent = False
+        self._localization_position_error = math.inf
+        self._last_odom_received_sec = None
+        self._last_gnss_received_sec = None
         self._stuck_pre_reverse_until = None
         self._gear_report = None
         self._control_mode_report = None
@@ -1068,6 +1157,10 @@ class MPCController(Node):
                 f"gear_cmd={self._gear_reverse_command} "
                 f"reverse_reports={sorted(self._gear_reverse_reports)} "
                 f"for {self._stuck_reverse_duration:.1f}s "
+                f"adaptive={self._adaptive_reverse_enabled} "
+                f"adaptive_max={self._adaptive_reverse_max_distance:.2f}m "
+                f"localization_error_max="
+                f"{self._adaptive_reverse_localization_max_error:.2f}m "
                 f"source={__file__}"
             )
 
@@ -1340,6 +1433,13 @@ class MPCController(Node):
             self._close_obstacle_reverse_requested = False
             self._prepass_retry_after_reverse = False
             self._prepass_retry_lane_idx = None
+            self._stuck_reverse_target_distance = None
+            self._stuck_reverse_start_heading = None
+            self._adaptive_reverse_active = False
+            self._adaptive_reverse_static_clearance = None
+            self._adaptive_reverse_forward_success_cycles = 0
+            self._localization_consistent_since = None
+            self._localization_consistent = False
             self._reset_follow_escape()
         if (
             self._initial_start_boost_enabled
@@ -1400,12 +1500,241 @@ class MPCController(Node):
             samples.append((vehicle_id, future_lane_idx, future_longitudinal))
         return samples
 
-    def _reverse_rear_is_clear(self, pose, ego_speed: float = 0.0) -> bool:
-        """Check the complete reverse corridor using current and predicted V2X samples."""
-        return not any(
-            -self._prepass_lane_fallback_rear_distance <= longitudinal < 0.0
-            for _, _, longitudinal in self._relative_lane_vehicle_samples(
-                pose, ego_speed)
+    def _reverse_rear_is_clear(
+        self, pose, ego_speed: float = 0.0, reverse_distance=None
+    ) -> bool:
+        """Check current and predicted V2X occupancy of the reverse path."""
+        reverse_distance = (
+            self._prepass_lane_fallback_rear_distance
+            if reverse_distance is None else max(float(reverse_distance), 0.0)
+        )
+        path_lanes = set()
+        # Recovery reverses straight by default. Sample its swept center line
+        # and retain every lane crossed by that path.
+        for ratio in (0.0, 0.25, 0.5, 0.75, 1.0):
+            distance = reverse_distance * ratio
+            lane_idx = self._lane_index_for_position(
+                pose.x - distance * math.cos(pose.theta),
+                pose.y - distance * math.sin(pose.theta),
+            )
+            if lane_idx is not None:
+                path_lanes.add(lane_idx)
+
+        corridor_half_width = (
+            0.5 * float(self._cfg.bicycle_model.width)
+            + self._v2x_vehicle_radius
+            + 0.20
+        )
+        prediction_sec = self._prepass_lane_fallback_prediction_sec
+        conflicts = []
+        for vehicle_id in self._v2x_tracker.active_vehicle_ids():
+            buf = self._v2x_tracker._samples.get(vehicle_id)
+            if not buf:
+                continue
+            _, vehicle_x, vehicle_y = buf[-1]
+            velocity_x, velocity_y = self._v2x_tracker.velocity(vehicle_id)
+            samples = [(vehicle_x, vehicle_y, "current")]
+            if prediction_sec > 0.0:
+                samples.append((
+                    vehicle_x + velocity_x * prediction_sec,
+                    vehicle_y + velocity_y * prediction_sec,
+                    "predicted",
+                ))
+            for sample_x, sample_y, sample_kind in samples:
+                vehicle_lane = self._lane_index_for_position(sample_x, sample_y)
+                if reverse_path_has_vehicle_conflict(
+                    ego_x=pose.x,
+                    ego_y=pose.y,
+                    ego_heading=pose.theta,
+                    reverse_distance=reverse_distance,
+                    corridor_half_width=corridor_half_width,
+                    reverse_path_lanes=path_lanes,
+                    vehicle_x=sample_x,
+                    vehicle_y=sample_y,
+                    vehicle_lane=vehicle_lane,
+                ):
+                    conflicts.append((vehicle_id, vehicle_lane, sample_kind))
+                    break
+        self._reverse_rear_conflicts = conflicts
+        return not conflicts
+
+    def _reverse_rear_conflict_summary(self) -> str:
+        conflicts = getattr(self, "_reverse_rear_conflicts", [])
+        if not conflicts:
+            return "none"
+        return ",".join(
+            f"{vehicle_id}:lane={lane_idx}:sample={sample_kind}"
+            for vehicle_id, lane_idx, sample_kind in conflicts
+        )
+
+    def _update_localization_consistency(self, now_sec: float) -> None:
+        """Track fresh GNSS/odometry position agreement continuously."""
+        fresh = bool(
+            self._odom is not None
+            and self._gnss_pose is not None
+            and self._last_odom_received_sec is not None
+            and self._last_gnss_received_sec is not None
+            and now_sec - self._last_odom_received_sec
+                <= self._adaptive_reverse_localization_fresh_sec
+            and now_sec - self._last_gnss_received_sec
+                <= self._adaptive_reverse_localization_fresh_sec
+        )
+        if fresh:
+            odom_position = self._odom.pose.pose.position
+            gnss_position = self._gnss_pose.pose.pose.position
+            self._localization_position_error = math.hypot(
+                float(odom_position.x) - float(gnss_position.x),
+                float(odom_position.y) - float(gnss_position.y),
+            )
+        else:
+            self._localization_position_error = math.inf
+        condition = bool(
+            fresh
+            and self._localization_position_error
+                <= self._adaptive_reverse_localization_max_error
+        )
+        self._localization_consistent_since = update_continuous_condition_since(
+            self._localization_consistent_since,
+            now_sec=now_sec,
+            condition=condition,
+        )
+        self._localization_consistent = continuous_condition_confirmed(
+            self._localization_consistent_since,
+            now_sec=now_sec,
+            confirm_sec=self._adaptive_reverse_localization_confirm_sec,
+        )
+
+    def _latched_target_is_primary_v2x_blocker(
+        self, pose, ego_speed: float, target_id
+    ) -> bool:
+        """Require the latched target to be the nearest current lead."""
+        leads = [
+            (float(longitudinal), vehicle_id)
+            for vehicle_id, _, longitudinal
+            in self._relative_lane_vehicle_samples(pose, ego_speed)
+            if 0.0 < float(longitudinal) <= self._follow_engage_distance
+        ]
+        if not leads:
+            return False
+        _, nearest_id = min(leads, key=lambda item: item[0])
+        return nearest_id == target_id
+
+    def _static_reverse_clearance(self, pose, max_distance: float) -> float:
+        return self._map.static_straight_path_clearance(
+            pose.x,
+            pose.y,
+            pose.theta,
+            max_distance,
+            self._adaptive_reverse_footprint_radius,
+        )
+
+    def _static_current_footprint_is_free(self, pose) -> bool:
+        return self._map.static_disk_is_free(
+            pose.x, pose.y, self._adaptive_reverse_footprint_radius)
+
+    def _prepare_follow_deadlock_reverse(
+        self, *, pose, now_sec: float, ego_speed: float, target_id
+    ) -> str:
+        """Plan a wall-bounded reverse for a stopped V2X lead."""
+        self._stuck_reverse_target_distance = None
+        self._adaptive_reverse_active = False
+        self._adaptive_reverse_static_clearance = None
+        self._adaptive_reverse_forward_success_cycles = 0
+        if not self._adaptive_reverse_enabled:
+            return "legacy"
+
+        target = self._latched_follow_target_state(pose, now_sec)
+        physical_passage, _ = self._latched_target_passage(pose)
+        eligible = bool(
+            target is not None
+            and not target.get("expired", False)
+            and target.get("vehicle_id") == target_id
+            and is_follow_target_ahead(target.get("longitudinal"))
+            and target.get("velocity_valid", False)
+            and float(target.get("speed", math.inf))
+                < self._stopped_lead_speed_threshold
+            and any(physical_passage.get(lane, False) for lane in (0, 2))
+            and self._latched_target_is_primary_v2x_blocker(
+                pose, ego_speed, target_id)
+            and self._localization_consistent
+            and self._static_current_footprint_is_free(pose)
+            and self._follow_escape_target_prediction_blocked
+        )
+        if not eligible:
+            return "legacy"
+
+        scan_distance = (
+            self._adaptive_reverse_max_distance
+            + self._adaptive_reverse_wall_margin
+        )
+        static_clearance = self._static_reverse_clearance(pose, scan_distance)
+        self._adaptive_reverse_static_clearance = static_clearance
+        available = max(
+            static_clearance - self._adaptive_reverse_wall_margin, 0.0)
+        if available < self._adaptive_reverse_min_clear_distance:
+            self.get_logger().warn(
+                "[AdaptiveReverseBlocked] stopped lead caused the deadlock "
+                "but the static rear sweep has no safe travel: "
+                f"vehicle_id={target_id}, static_clearance="
+                f"{static_clearance:.2f}m, wall_margin="
+                f"{self._adaptive_reverse_wall_margin:.2f}m, "
+                f"localization_error={self._localization_position_error:.2f}m"
+            )
+            return "blocked"
+
+        target_distance = min(available, self._adaptive_reverse_max_distance)
+        mode = (
+            "adaptive"
+            if available >= self._adaptive_reverse_max_distance
+            else "wall_bounded"
+        )
+        if target_distance < self._adaptive_reverse_min_clear_distance:
+            return "blocked"
+        if not self._reverse_rear_is_clear(
+            pose, ego_speed, reverse_distance=target_distance
+        ):
+            self.get_logger().warn(
+                "[AdaptiveReverseBlocked] static sweep is free but a V2X "
+                "vehicle occupies the planned reverse path: "
+                f"vehicle_id={target_id}, target={target_distance:.2f}m, "
+                f"conflicts={self._reverse_rear_conflict_summary()}"
+            )
+            return "blocked"
+
+        self._stuck_reverse_target_distance = target_distance
+        self._adaptive_reverse_active = True
+        self.get_logger().warn(
+            "[AdaptiveReversePlan] planned distance-controlled reverse: "
+            f"mode={mode}, vehicle_id={target_id}, lead_longitudinal="
+            f"{float(target['longitudinal']):.2f}m, stop_condition="
+            f"forward_mpc_{self._adaptive_reverse_forward_success_cycles_required}_cycles, "
+            f"distance_limit={target_distance:.2f}m, static_clearance="
+            f"{static_clearance:.2f}m, usable={available:.2f}m, "
+            f"localization_error={self._localization_position_error:.2f}m"
+        )
+        return mode
+
+    def _adaptive_reverse_forward_path_is_valid(
+        self, pose, u, ego_speed: float
+    ) -> bool:
+        """Check whether reverse may stop for a fresh executable MPC path."""
+        target_id = self._overtake_target_vehicle_id
+        if target_id is None:
+            return False
+        retry_lane_idx, _, _ = self._select_prepass_retry_lane(
+            pose, ego_speed, self._overtake_lane_idx)
+        fresh_solution = bool(
+            self._mpc.infeasibility_counter == 0
+            and self._mpc.current_prediction is not None
+            and not self._mpc.used_prediction_fallback
+            and not self._mpc.recovery_requested
+            and not self._mpc_safety_recovery_active
+        )
+        return bool(
+            retry_lane_idx is not None
+            and fresh_solution
+            and self._prediction_has_forward_progress(pose, u)
+            and self._prediction_is_clear_of_vehicle(target_id)
         )
 
     def _follow_deadlock_position(self, pose):
@@ -1428,6 +1757,7 @@ class MPCController(Node):
         self._follow_escape_forward_active = False
         self._follow_escape_forward_until = None
         self._follow_escape_last_reevaluate_at = None
+        self._follow_escape_target_prediction_blocked = False
         if was_active and reason:
             self.get_logger().info(
                 f"[FollowDeadlockEscape] released: reason={reason}"
@@ -1583,6 +1913,7 @@ class MPCController(Node):
         lead_speed: float,
         forward_command: float,
         emergency_brake_active: bool,
+        emergency_brake_vehicle_id=None,
     ) -> None:
         """Detect and resolve a stopped-follow deadlock without blind motion."""
         if not self._follow_deadlock_escape_enabled:
@@ -1681,7 +2012,21 @@ class MPCController(Node):
                 # Reconsider every lane when traffic changes. Between checks,
                 # keep zero speed rather than selecting a stale candidate.
                 self._follow_escape_attempted_lanes.clear()
-                rear_clear = self._reverse_rear_is_clear(pose, ego_speed)
+                reverse_mode = self._prepare_follow_deadlock_reverse(
+                    pose=pose,
+                    now_sec=now_sec,
+                    ego_speed=ego_speed,
+                    target_id=self._follow_escape_target_id,
+                )
+                reverse_distance = self._stuck_reverse_target_distance
+                rear_clear = (
+                    reverse_mode != "blocked"
+                    and self._reverse_rear_is_clear(
+                        pose,
+                        ego_speed,
+                        reverse_distance=reverse_distance,
+                    )
+                )
                 if rear_clear:
                     self._prepass_retry_after_reverse = True
                     self._prepass_retry_lane_idx = None
@@ -1695,7 +2040,9 @@ class MPCController(Node):
                     self.get_logger().warn(
                         "[FollowDeadlockReverseRequest] no safe forward lane; "
                         "rear corridor is clear, requesting reverse: "
-                        f"vehicle_id={self._follow_escape_target_id}"
+                        f"vehicle_id={self._follow_escape_target_id}, "
+                        f"mode={reverse_mode}, target_distance="
+                        f"{reverse_distance if reverse_distance is not None else 'timed'}"
                     )
                 else:
                     self._close_obstacle_reverse_requested = False
@@ -1755,6 +2102,13 @@ class MPCController(Node):
             probe_elapsed = now_sec - self._follow_escape_probe_started_at
             if probe_elapsed >= self._follow_escape_probe_timeout_sec:
                 failed_lane = self._follow_escape_probe_lane_idx
+                if (
+                    emergency_brake_active
+                    and emergency_brake_vehicle_id
+                        == self._follow_escape_target_id
+                    and not prediction_clear
+                ):
+                    self._follow_escape_target_prediction_blocked = True
                 self._follow_escape_attempted_lanes.add(failed_lane)
                 self._follow_escape_probe_lane_idx = None
                 self._follow_escape_probe_started_at = None
@@ -2367,8 +2721,13 @@ class MPCController(Node):
             invalid_count = int(np.count_nonzero(
                 ~np.isfinite(widths) | (widths <= 0.0)))
             vehicle_width = float(self._cfg.bicycle_model.width)
+            required_width = lane_minimum_free_segment_width(
+                lane_idx,
+                vehicle_width,
+                self._reference_path.inner_lane_width,
+            )
             below_vehicle_count = int(np.count_nonzero(
-                np.isfinite(widths) & (widths < vehicle_width)))
+                np.isfinite(widths) & (widths < required_width)))
             center_excluded_count = int(np.count_nonzero(
                 np.isfinite(center_margins) & (center_margins < 0.0)))
 
@@ -2412,14 +2771,14 @@ class MPCController(Node):
             if invalid_count:
                 likely_cause = "invalid_or_collapsed_bounds"
             elif below_vehicle_count:
-                likely_cause = "effective_width_below_vehicle_width"
+                likely_cause = "effective_width_below_required_width"
             elif center_excluded_count:
                 likely_cause = (
                     f"{lane_tag.lower()}_center_excluded_from_free_segment")
             elif max_narrowing > 0.20:
                 likely_cause = (
                     "obstacle_narrowing"
-                    if nearest_obstacle_clearance < vehicle_width
+                    if nearest_obstacle_clearance < required_width
                     else "static_map_or_boundary_narrowing"
                 )
             else:
@@ -2435,8 +2794,9 @@ class MPCController(Node):
                 f"horizon={count}, base_width_min={np.nanmin(base_widths):.3f}m, "
                 f"effective_width_min={min_row['width']:.3f}m@"
                 f"i{min_row['index']}/wp{min_row['wp']}, "
-                f"invalid={invalid_count}, below_vehicle_width="
-                f"{below_vehicle_count}/{count}, center_excluded="
+                f"invalid={invalid_count}, below_required_width="
+                f"{below_vehicle_count}/{count}, required_width="
+                f"{required_width:.3f}m, center_excluded="
                 f"{center_excluded_count}/{count}, max_narrowing="
                 f"{max_narrowing:.3f}m, nearest_obstacle_clearance="
                 f"{nearest_obstacle_clearance:.3f}m, likely_cause={likely_cause}"
@@ -3002,7 +3362,8 @@ class MPCController(Node):
             and not self._reverse_rear_is_clear(pose, actual_speed)
         ):
             self._switch_prepass_to_follow(
-                "rear corridor became occupied while waiting to start reverse"
+                "rear corridor became occupied while waiting to start reverse: "
+                f"conflicts={self._reverse_rear_conflict_summary()}"
             )
             self._stuck_since = None
             return False
@@ -3012,6 +3373,93 @@ class MPCController(Node):
                 self._stuck_pre_drive_until is not None
                 or self._stuck_wait_for_drive
             )
+            if (
+                self._adaptive_reverse_active
+                and not in_drive_transition
+                and self._stuck_recovery_started_at is not None
+                and self._prepass_reverse_start_xy is not None
+            ):
+                start_heading = (
+                    self._stuck_reverse_start_heading
+                    if self._stuck_reverse_start_heading is not None
+                    else pose.theta
+                )
+                delta_x = pose.x - self._prepass_reverse_start_xy[0]
+                delta_y = pose.y - self._prepass_reverse_start_xy[1]
+                self._prepass_reverse_distance = max(
+                    0.0,
+                    -delta_x * math.cos(start_heading)
+                    - delta_y * math.sin(start_heading),
+                )
+                target_distance = float(
+                    self._stuck_reverse_target_distance or 0.0)
+                remaining = max(
+                    target_distance - self._prepass_reverse_distance, 0.0)
+                forward_path_valid = (
+                    self._adaptive_reverse_forward_path_is_valid(
+                        pose, u, actual_speed)
+                )
+                self._adaptive_reverse_forward_success_cycles = (
+                    self._adaptive_reverse_forward_success_cycles + 1
+                    if forward_path_valid else 0
+                )
+                localization_lost = not self._localization_consistent
+                static_remaining = self._static_reverse_clearance(
+                    pose, remaining + self._adaptive_reverse_wall_margin)
+                wall_became_unsafe = (
+                    remaining > 0.05
+                    and static_remaining - self._adaptive_reverse_wall_margin
+                        + 0.05 < remaining
+                )
+                if self._adaptive_reverse_forward_success_cycles >= (
+                    self._adaptive_reverse_forward_success_cycles_required
+                ):
+                    u[0] = 0.0
+                    u[1] = 0.0
+                    self.get_logger().info(
+                        "[AdaptiveReverseForwardReady] fresh collision-free "
+                        "forward MPC path confirmed; ending reverse before "
+                        "the distance limit: "
+                        f"travelled={self._prepass_reverse_distance:.2f}m/"
+                        f"{target_distance:.2f}m, success_cycles="
+                        f"{self._adaptive_reverse_forward_success_cycles}"
+                    )
+                    self._begin_stuck_drive_transition(
+                        now_sec, "valid forward MPC path confirmed")
+                    in_drive_transition = True
+                elif localization_lost or wall_became_unsafe:
+                    u[0] = 0.0
+                    u[1] = 0.0
+                    reason = (
+                        "localization_lost"
+                        if localization_lost else "static_path_blocked"
+                    )
+                    self.get_logger().warn(
+                        "[AdaptiveReverseAbort] stopping distance-controlled "
+                        "reverse and returning to DRIVE: "
+                        f"reason={reason}, travelled="
+                        f"{self._prepass_reverse_distance:.2f}m/"
+                        f"{target_distance:.2f}m, remaining={remaining:.2f}m, "
+                        f"static_remaining={static_remaining:.2f}m, "
+                        f"localization_error={self._localization_position_error:.2f}m"
+                    )
+                    self._begin_stuck_drive_transition(
+                        now_sec, "adaptive reverse safety condition failed")
+                    in_drive_transition = True
+                elif self._prepass_reverse_distance >= max(
+                    target_distance - 0.05, 0.0
+                ):
+                    u[0] = 0.0
+                    u[1] = 0.0
+                    self.get_logger().info(
+                        "[AdaptiveReverseDistanceLimit] no forward MPC was "
+                        "confirmed before the safe distance limit: "
+                        f"travelled={self._prepass_reverse_distance:.2f}m, "
+                        f"limit={target_distance:.2f}m"
+                    )
+                    self._begin_stuck_drive_transition(
+                        now_sec, "adaptive reverse target reached")
+                    in_drive_transition = True
             if not in_drive_transition:
                 forward_resume_ready, forward_resume_reason = (
                     self._reverse_forward_resume_ready(
@@ -3033,17 +3481,31 @@ class MPCController(Node):
             if (
                 self._prepass_retry_after_reverse
                 and not in_drive_transition
-                and not self._reverse_rear_is_clear(pose, actual_speed)
+                and not self._reverse_rear_is_clear(
+                    pose,
+                    actual_speed,
+                    reverse_distance=(
+                        max(
+                            float(self._stuck_reverse_target_distance)
+                            - self._prepass_reverse_distance,
+                            0.0,
+                        )
+                        if self._stuck_reverse_target_distance is not None
+                        else None
+                    ),
+                )
             ):
                 u[0] = 0.0
                 u[1] = 0.0
                 self._switch_prepass_to_follow(
                     "rear corridor became occupied before/during reverse; "
-                    "aborting reverse and following the latched target"
+                    "aborting reverse and following the latched target: "
+                    f"conflicts={self._reverse_rear_conflict_summary()}"
                 )
                 self._begin_stuck_drive_transition(
                     now_sec,
-                    "rear corridor became occupied before/during reverse",
+                    "rear corridor became occupied before/during reverse: "
+                    f"conflicts={self._reverse_rear_conflict_summary()}",
                 )
 
             # 1. タイムアウト判定
@@ -3138,10 +3600,25 @@ class MPCController(Node):
                         and self._stuck_recovery_started_at is None
                     ):
                         self._stuck_recovery_started_at = now_sec
-                        self._stuck_recovery_until = now_sec + self._stuck_reverse_duration
+                        self._prepass_reverse_start_xy = (pose.x, pose.y)
+                        self._stuck_reverse_start_heading = pose.theta
+                        if self._stuck_reverse_target_distance is not None:
+                            nominal_travel_sec = (
+                                self._stuck_reverse_target_distance
+                                / max(self._stuck_forward_reverse_speed, 0.1)
+                            )
+                            reverse_timeout = max(
+                                self._stuck_reverse_duration,
+                                nominal_travel_sec + 2.0,
+                            )
+                        else:
+                            reverse_timeout = self._stuck_reverse_duration
+                        self._stuck_recovery_until = now_sec + reverse_timeout
                         self.get_logger().info(
                             "[StuckRecovery] AWSIM gear is REVERSE; starting reverse drive "
-                            f"for {self._stuck_reverse_duration:.1f}s."
+                            f"with timeout={reverse_timeout:.1f}s, "
+                            f"target_distance="
+                            f"{self._stuck_reverse_target_distance if self._stuck_reverse_target_distance is not None else 'timed'}."
                         )
 
                     self._request_awsim_control_mode_for_recovery()
@@ -3185,9 +3662,16 @@ class MPCController(Node):
                         if self._prepass_retry_after_reverse:
                             if self._prepass_reverse_start_xy is None:
                                 self._prepass_reverse_start_xy = (pose.x, pose.y)
-                            self._prepass_reverse_distance = math.hypot(
-                                pose.x - self._prepass_reverse_start_xy[0],
-                                pose.y - self._prepass_reverse_start_xy[1],
+                            if self._stuck_reverse_start_heading is None:
+                                self._stuck_reverse_start_heading = pose.theta
+                            delta_x = pose.x - self._prepass_reverse_start_xy[0]
+                            delta_y = pose.y - self._prepass_reverse_start_xy[1]
+                            self._prepass_reverse_distance = max(
+                                0.0,
+                                -delta_x * math.cos(
+                                    self._stuck_reverse_start_heading)
+                                - delta_y * math.sin(
+                                    self._stuck_reverse_start_heading),
                             )
                             if self._prepass_reverse_distance >= max(
                                 0.1, self._stuck_gnss_distance_threshold
@@ -3203,6 +3687,11 @@ class MPCController(Node):
             self._stuck_cooldown_until = now_sec + self._stuck_cooldown
             self._stuck_since = None
             self._stuck_reverse_start_target_longitudinal = None
+            self._stuck_reverse_target_distance = None
+            self._stuck_reverse_start_heading = None
+            self._adaptive_reverse_active = False
+            self._adaptive_reverse_static_clearance = None
+            self._adaptive_reverse_forward_success_cycles = 0
             self._gnss_history = []
             self._last_stuck_gear_command = None
             self._stuck_last_drive_request_at = None
@@ -3378,6 +3867,12 @@ class MPCController(Node):
                         f"speed={abs(actual_speed):.2f}m/s; "
                         f"mpc_infeasible={self._mpc.infeasibility_counter}."
                     )
+                if not self._prepass_retry_after_reverse:
+                    self._stuck_reverse_target_distance = None
+                    self._stuck_reverse_start_heading = None
+                    self._adaptive_reverse_active = False
+                    self._adaptive_reverse_static_clearance = None
+                    self._adaptive_reverse_forward_success_cycles = 0
                 self._stuck_recovery_until = now_sec + self._stuck_max_shift_wait
                 self._stuck_reverse_drive_after = now_sec + self._stuck_gear_shift_delay
                 self._stuck_pre_reverse_until = (
@@ -3418,9 +3913,35 @@ class MPCController(Node):
 
     def _odom_callback(self, msg: Odometry) -> None:
         self._odom = msg
+        self._last_odom_received_sec = (
+            float(self.get_clock().now().nanoseconds) / 1e9)
 
     def _gnss_callback(self, msg: PoseWithCovarianceStamped) -> None:
         self._gnss_pose = msg
+        self._last_gnss_received_sec = (
+            float(self.get_clock().now().nanoseconds) / 1e9)
+
+    def _center_frenet(self, x: float, y: float):
+        """Return Center arc position and signed lateral offset."""
+        return project_to_closed_path_frenet(
+            x,
+            y,
+            self._center_arc_points,
+            self._center_arc_cumulative,
+            self._center_arc_total_length,
+        )
+
+    def _center_lane_index_for_offset(
+        self, x: float, y: float, lateral_offset: float
+    ):
+        """Classify a Center-Frenet offset using Center lane boundaries."""
+        wp_id = self._carN_center.get_closest_waypoint(x, y)
+        for lane_idx, (ub_lane, lb_lane) in enumerate(
+            self._reference_pathN_center.get_lane_bounds(wp_id)
+        ):
+            if lb_lane <= lateral_offset <= ub_lane:
+                return lane_idx
+        return None
 
     def _control_mode_request_callback(self, msg):
         if msg.data and not self._enable_control:
@@ -4784,12 +5305,6 @@ class MPCController(Node):
         opponent_velocity_valid = False
         min_wp_diff = 99999
 
-        # --- Parallel Running Detection (並走検出) ---
-        parallel_lat_dist = 99999.0   # 最も近い並走車との横距離
-        parallel_lon_dist = 99999.0   # その車との縦距離 (Euclidean)
-        if not hasattr(self, '_parallel_start_time'):
-            self._parallel_start_time = None
-
         if self.USE_OBSTACLE_AVOIDANCE and hasattr(self, '_v2x_tracker'):
             startup_same_lane_candidate = None
             startup_follow_priority_active = not self._has_moved_once
@@ -5091,6 +5606,9 @@ class MPCController(Node):
                 )
                 self._parallel_abort_active = False
                 self._parallel_abort_vehicle_id = None
+                self._parallel_abort_target_lane_idx = None
+                self._parallel_timer_vehicle_id = None
+                self._parallel_start_time = None
 
         prepass_selection_exclusive = (
             recovery_active
@@ -5266,7 +5784,9 @@ class MPCController(Node):
             # This state exclusively owns lateral selection until the parallel
             # vehicle has moved safely ahead. Do not let an outer-lane latch,
             # prepass fallback, or L1 rejoin overwrite it.
-            new_target_lane_idx = 1
+            new_target_lane_idx = self._parallel_abort_target_lane_idx
+            if new_target_lane_idx not in (0, 1, 2):
+                new_target_lane_idx = 1
             self._overtake_target_vehicle_id = None
             self._overtake_lane_idx = None
             self._outer_lane_released_vehicle_id = None
@@ -5342,6 +5862,7 @@ class MPCController(Node):
             )
 
         current_time_sec = float(now.nanoseconds) / 1e9
+        self._update_localization_consistency(current_time_sec)
         prepass_distance_gate_released_this_cycle = False
 
         if (
@@ -6010,9 +6531,12 @@ class MPCController(Node):
             new_target_lane_idx = self._prepass_fallback_commit_lane_idx
 
         if self._parallel_abort_active and not prepass_selection_exclusive:
-            # Final exclusive override: no other release/rejoin branch may
-            # reassert L0/L2 while yielding to the parallel vehicle.
-            new_target_lane_idx = 1
+            # Final exclusive override: use the lane selected when Abort was
+            # entered.  In particular, do not force L1 while the other vehicle
+            # itself occupies L1.
+            new_target_lane_idx = self._parallel_abort_target_lane_idx
+            if new_target_lane_idx not in (0, 1, 2):
+                new_target_lane_idx = 1
 
         if initial_start_lateral_hold_active and not self._parallel_abort_active:
             # During boost/minimum hold stay in L0. Afterwards remove the lane
@@ -6561,6 +7085,8 @@ class MPCController(Node):
             ref_vel_kmph = self._mpc_cfg.v_max
 
         emergency_brake_active = False
+        emergency_brake_vehicle_id = None
+        emergency_brake_vehicle_distance = math.inf
         follow_restart_active = False
         follow_restart_target = 0.0
         follow_target_expired = False
@@ -6827,6 +7353,9 @@ class MPCController(Node):
                                 v_ref_emg = max(min_emergency_speed, v_ref_emg)
                                 ref_vel_kmph = min(ref_vel_kmph, v_ref_emg)
                                 emergency_brake_active = True
+                                if dist < emergency_brake_vehicle_distance:
+                                    emergency_brake_vehicle_distance = dist
+                                    emergency_brake_vehicle_id = vid
                                 self.get_logger().warn(
                                     f"[EmergencyBrake] vehicle_id={vid} "
                                     f"forward obstacle at {dist:.2f}m "
@@ -6858,6 +7387,7 @@ class MPCController(Node):
                         acc_lead_speed if follow_control_active else 99999.0),
                     forward_command=max(float(u[0]), 0.0),
                     emergency_brake_active=emergency_brake_active,
+                    emergency_brake_vehicle_id=emergency_brake_vehicle_id,
                 )
 
             # --- Post-Overtake Cooldown: 追い越し後クールダウン中の後方車両監視 ---
@@ -6920,18 +7450,21 @@ class MPCController(Node):
                 self._post_overtake_vehicle_id = None
 
             # --- Parallel Running Safety Control (並走接近制御) ---
-            # 並走（横距離が小さく縦距離も小さい）の場合、速度を落として衝突を回避する
-            # 並走が続く場合は追い越しを中断して中央車線に戻す
-            LAT_PARALLEL_MIN = 2.0   # [m] 同一車線の前後車を並走扱いしない下限
-            LAT_CRIT_MAX = 2.4       # [m] 別車線でこの横距離までは強制減速
-            LAT_WARN_MAX = 3.5       # [m] 隣接車線として扱う横距離上限
-            LON_PARALLEL_MAX = 4.5   # [m] この縦距離以内を「並走」と判定
-            PARALLEL_ABORT_SEC = 4.0 # [s] 並走がこの時間以上続いたら追い越し中断
-
-            parallel_vehicle_id = None
-            ego_parallel_lane_idx = self._lane_index_for_position(
-                pose.x, pose.y)
-            if hasattr(self, '_v2x_tracker'):
+            # Safety uses a wider rear window and always remains active.
+            # Abort uses a narrower window and may be suppressed independently.
+            parallel_safety_candidate = None
+            parallel_abort_candidate = None
+            ego_center_frenet = self._center_frenet(pose.x, pose.y)
+            ego_parallel_lane_idx = (
+                None if ego_center_frenet is None
+                else self._center_lane_index_for_offset(
+                    pose.x, pose.y, ego_center_frenet[1])
+            )
+            if (
+                hasattr(self, '_v2x_tracker')
+                and ego_center_frenet is not None
+            ):
+                ego_center_s, ego_center_lateral = ego_center_frenet
                 for vid in self._v2x_tracker.active_vehicle_ids():
                     buf = self._v2x_tracker._samples.get(vid)
                     if buf:
@@ -6942,110 +7475,253 @@ class MPCController(Node):
                             dx * math.cos(pose.theta)
                             + dy * math.sin(pose.theta)
                         )
-                        # 進行方向の前後距離が近い場合だけ横距離を計算
-                        if abs(longitudinal_d) <= LON_PARALLEL_MAX:
-                            opp_wp_id = self._car.get_closest_waypoint(opp_x, opp_y)
-                            opp_wp = self._reference_path.get_waypoint(opp_wp_id)
-                            if opp_wp.normal_angle is not None:
-                                nx = -math.cos(opp_wp.normal_angle)
-                                ny = -math.sin(opp_wp.normal_angle)
-                            else:
-                                a = opp_wp.psi + math.pi / 2.0
-                                nx = math.cos(a)
-                                ny = math.sin(a)
-                            lat_d = abs(dx * nx + dy * ny)
-                            other_lane_idx = self._lane_index_for_position(
-                                opp_x, opp_y)
-                            if (
-                                is_parallel_vehicle(
-                                    ego_lane_idx=ego_parallel_lane_idx,
-                                    other_lane_idx=other_lane_idx,
-                                    lateral_distance=lat_d,
-                                    longitudinal_distance=longitudinal_d,
-                                    minimum_lateral_distance=LAT_PARALLEL_MIN,
-                                    maximum_lateral_distance=LAT_WARN_MAX,
-                                    maximum_longitudinal_distance=(
-                                        LON_PARALLEL_MAX),
+                        # Both Safety and Abort reject samples outside these
+                        # signed windows, so avoid a full Center-polyline
+                        # projection for obviously irrelevant vehicles.
+                        if (
+                            longitudinal_d
+                                < -max(
+                                    self._parallel_safety_lon_behind,
+                                    self._parallel_abort_lon_behind,
                                 )
-                                and lat_d < parallel_lat_dist
-                            ):
-                                parallel_lat_dist = lat_d
-                                parallel_lon_dist = abs(longitudinal_d)
-                                parallel_vehicle_id = vid
+                            or longitudinal_d > max(
+                                self._parallel_safety_lon_ahead,
+                                self._parallel_abort_lon_ahead,
+                            )
+                        ):
+                            continue
+                        opp_center_frenet = self._center_frenet(opp_x, opp_y)
+                        if opp_center_frenet is None:
+                            continue
+                        opp_center_s, opp_center_lateral = opp_center_frenet
+                        parallel_arc_delta = signed_closed_path_arc_distance(
+                            ego_center_s,
+                            opp_center_s,
+                            self._center_arc_total_length,
+                        )
+                        if parallel_arc_delta is None:
+                            continue
+                        lateral_center_distance = abs(
+                            opp_center_lateral - ego_center_lateral)
+                        lateral_clearance = lateral_vehicle_clearance(
+                            lateral_center_distance,
+                            float(self._cfg.bicycle_model.width),
+                            self._v2x_parallel_vehicle_half_width,
+                        )
+                        longitudinal_clearance = (
+                            longitudinal_vehicle_clearance(
+                                parallel_arc_delta,
+                                self._parallel_ego_half_length,
+                                self._parallel_vehicle_half_length,
+                            )
+                        )
+                        other_lane_idx = self._center_lane_index_for_offset(
+                            opp_x, opp_y, opp_center_lateral)
+                        arc_distance = parallel_arc_delta
+                        candidate = {
+                            "vehicle_id": vid,
+                            "lane_idx": other_lane_idx,
+                            "lateral_center": lateral_center_distance,
+                            "clearance": lateral_clearance,
+                            "longitudinal_clearance": (
+                                longitudinal_clearance),
+                            "longitudinal": longitudinal_d,
+                            "arc": arc_distance,
+                        }
 
-            is_parallel = parallel_vehicle_id is not None
-            forced_target_is_parallel = (
-                forced_overtake_active
-                and parallel_vehicle_id == self._forced_overtake_vehicle_id
+                        safety_arc_ok = (
+                            parallel_arc_delta is None
+                            or -self._parallel_safety_arc_behind
+                                <= parallel_arc_delta
+                                <= self._parallel_safety_arc_ahead
+                        )
+                        if (
+                            safety_arc_ok
+                            and is_parallel_vehicle(
+                                ego_lane_idx=ego_parallel_lane_idx,
+                                other_lane_idx=other_lane_idx,
+                                lateral_clearance=lateral_clearance,
+                                longitudinal_clearance=(
+                                    longitudinal_clearance),
+                                longitudinal_distance=longitudinal_d,
+                                maximum_lateral_clearance=(
+                                    self._parallel_warning_clearance),
+                                maximum_longitudinal_clearance=(
+                                    self._parallel_safety_longitudinal_clearance
+                                ),
+                                minimum_longitudinal_distance=(
+                                    -self._parallel_safety_lon_behind),
+                                maximum_longitudinal_distance=(
+                                    self._parallel_safety_lon_ahead),
+                            )
+                            and (
+                                parallel_safety_candidate is None
+                                or lateral_clearance
+                                    < parallel_safety_candidate["clearance"]
+                            )
+                        ):
+                            parallel_safety_candidate = candidate
+
+                        abort_arc_ok = (
+                            parallel_arc_delta is None
+                            or -self._parallel_abort_arc_behind
+                                <= parallel_arc_delta
+                                <= self._parallel_abort_arc_ahead
+                        )
+                        if (
+                            vid != self._forced_overtake_vehicle_id
+                            and abort_arc_ok
+                            and is_parallel_vehicle(
+                                ego_lane_idx=ego_parallel_lane_idx,
+                                other_lane_idx=other_lane_idx,
+                                lateral_clearance=lateral_clearance,
+                                longitudinal_clearance=(
+                                    longitudinal_clearance),
+                                longitudinal_distance=longitudinal_d,
+                                maximum_lateral_clearance=(
+                                    self._parallel_warning_clearance),
+                                maximum_longitudinal_clearance=(
+                                    self._parallel_abort_longitudinal_clearance
+                                ),
+                                minimum_longitudinal_distance=(
+                                    -self._parallel_abort_lon_behind),
+                                maximum_longitudinal_distance=(
+                                    self._parallel_abort_lon_ahead),
+                            )
+                            and (
+                                parallel_abort_candidate is None
+                                or lateral_clearance
+                                    < parallel_abort_candidate["clearance"]
+                            )
+                        ):
+                            parallel_abort_candidate = candidate
+
+            parallel_abort_suppressed = (
+                self._stuck_recovery_until is not None
+                or self._post_reverse_full_width_recovery_active
+                or self._mpc_safety_recovery_active
+                or self._prepass_fallback_recovery_active
+                or forced_overtake_active
             )
 
-            if is_parallel and not forced_target_is_parallel:
+            # Slowdown is independent from Abort suppression, including while
+            # forcibly overtaking a stopped vehicle.
+            if parallel_safety_candidate is not None:
+                safety = parallel_safety_candidate
+                clearance = safety["clearance"]
+                if clearance <= self._parallel_critical_clearance:
+                    ratio = float(np.clip(
+                        max(clearance, 0.0)
+                        / max(self._parallel_critical_clearance, 1e-6),
+                        0.0, 1.0))
+                    v_ref_parallel = ref_vel_kmph * (0.4 + 0.3 * ratio)
+                    ref_vel_kmph = min(ref_vel_kmph, v_ref_parallel)
+                    self.get_logger().warn(
+                        f"[ParallelSafety] CRITICAL: vehicle_id={safety['vehicle_id']} "
+                        f"lane=L{safety['lane_idx']} "
+                        f"lat={safety['lateral_center']:.2f}m, "
+                        f"clearance={clearance:+.2f}m, "
+                        f"lon_clearance="
+                        f"{safety['longitudinal_clearance']:+.2f}m, "
+                        f"lon={safety['longitudinal']:+.2f}m, "
+                        f"arc={safety['arc']:+.2f}m, "
+                        f"speed limited to {ref_vel_kmph:.2f}m/s",
+                        throttle_duration_sec=1.0
+                    )
+                else:
+                    ratio = (
+                        (clearance - self._parallel_critical_clearance)
+                        / max(
+                            self._parallel_warning_clearance
+                            - self._parallel_critical_clearance,
+                            1e-6,
+                        )
+                    )
+                    v_ref_parallel = ref_vel_kmph * (
+                        0.7 + 0.3 * float(np.clip(ratio, 0.0, 1.0)))
+                    ref_vel_kmph = min(ref_vel_kmph, v_ref_parallel)
+                    self.get_logger().info(
+                        f"[ParallelSafety] WARNING: vehicle_id={safety['vehicle_id']} "
+                        f"lane=L{safety['lane_idx']} "
+                        f"lat={safety['lateral_center']:.2f}m, "
+                        f"clearance={clearance:+.2f}m, "
+                        f"lon_clearance="
+                        f"{safety['longitudinal_clearance']:+.2f}m, "
+                        f"lon={safety['longitudinal']:+.2f}m, "
+                        f"arc={safety['arc']:+.2f}m, "
+                        f"speed limited to {ref_vel_kmph:.2f}m/s",
+                        throttle_duration_sec=1.0
+                    )
+
+            abort_vehicle_id = (
+                None if parallel_abort_candidate is None
+                else parallel_abort_candidate["vehicle_id"]
+            )
+            if abort_vehicle_id is None:
+                self._parallel_timer_vehicle_id = None
+                self._parallel_start_time = None
+                parallel_duration = 0.0
+            elif abort_vehicle_id != self._parallel_timer_vehicle_id:
+                if self._parallel_timer_vehicle_id is not None:
+                    self.get_logger().info(
+                        "[ParallelAbortTimer] target changed; resetting timer: "
+                        f"old={self._parallel_timer_vehicle_id}, "
+                        f"new={abort_vehicle_id}"
+                    )
+                self._parallel_timer_vehicle_id = abort_vehicle_id
+                self._parallel_start_time = current_time_sec
+                parallel_duration = 0.0
+            elif parallel_abort_suppressed:
+                # Recovery owns motion; no Abort duration is accumulated.
+                self._parallel_start_time = current_time_sec
+                parallel_duration = 0.0
+            else:
                 if self._parallel_start_time is None:
                     self._parallel_start_time = current_time_sec
                 parallel_duration = current_time_sec - self._parallel_start_time
 
-                # 臨界ゾーン: 強制減速
-                if parallel_lat_dist <= LAT_CRIT_MAX:
-                    # 横距離が近いほど強く減速（目標速度を直接スケール）
-                    ratio = (
-                        (parallel_lat_dist - LAT_PARALLEL_MIN)
-                        / max(LAT_CRIT_MAX - LAT_PARALLEL_MIN, 1e-6)
-                    )
-                    v_ref_parallel = ref_vel_kmph * (0.4 + 0.3 * ratio)
-                    ref_vel_kmph = min(ref_vel_kmph, v_ref_parallel)
-                    self.get_logger().warn(
-                        f"[ParallelSafety] CRITICAL: vehicle_id={parallel_vehicle_id} "
-                        f"lat={parallel_lat_dist:.2f}m, "
-                        f"lon={parallel_lon_dist:.2f}m, "
-                        f"speed limited to {ref_vel_kmph:.2f}m/s",
-                        throttle_duration_sec=1.0
-                    )
-                # 警戒ゾーン: 緩やかに減速
-                elif parallel_lat_dist <= LAT_WARN_MAX:
-                    ratio = (
-                        (parallel_lat_dist - LAT_CRIT_MAX)
-                        / max(LAT_WARN_MAX - LAT_CRIT_MAX, 1e-6)
-                    )
-                    v_ref_parallel = ref_vel_kmph * (0.7 + 0.3 * ratio)
-                    ref_vel_kmph = min(ref_vel_kmph, v_ref_parallel)
-                    self.get_logger().info(
-                        f"[ParallelSafety] WARNING: vehicle_id={parallel_vehicle_id} "
-                        f"lat={parallel_lat_dist:.2f}m, "
-                        f"lon={parallel_lon_dist:.2f}m, "
-                        f"speed limited to {ref_vel_kmph:.2f}m/s (duration={parallel_duration:.1f}s)",
-                        throttle_duration_sec=1.0
-                    )
-
-                # 並走中断: 長時間並走が続いたら中央車線に戻して相手に先行させる
-                if (
-                    parallel_duration > PARALLEL_ABORT_SEC
-                    and self._target_lane_idx in (0, 2)
-                ):
-                    self.get_logger().warn(
-                        f"[ParallelAbort] entering exclusive L1 yield: "
-                        f"vehicle_id={parallel_vehicle_id} "
-                        f"lat={parallel_lat_dist:.2f}m, "
-                        f"lon={parallel_lon_dist:.2f}m, "
-                        f"after {parallel_duration:.1f}s parallel running. "
-                        "Stopping before applying L1 on the next cycle.",
-                        throttle_duration_sec=1.0
-                    )
-                    self._parallel_abort_active = True
-                    self._parallel_abort_vehicle_id = parallel_vehicle_id
-                    self._overtake_target_vehicle_id = None
-                    self._overtake_lane_idx = None
-                    self._forced_overtake_vehicle_id = None
-                    self._outer_lane_released_vehicle_id = None
-                    self._prepass_fallback_lane_idx = None
-                    self._prepass_fallback_blocked = False
-                    self._prepass_fallback_recovery_active = False
-                    self._prepass_fallback_commit_pending = False
-                    self._prepass_fallback_commit_lane_idx = None
-                    self._prepass_retry_after_reverse = False
-                    ref_vel_kmph = 0.0
-                    self._parallel_start_time = None
-            else:
+            if (
+                parallel_abort_candidate is not None
+                and parallel_duration > self._parallel_abort_sec
+                and self._target_lane_idx in (0, 2)
+                and not parallel_abort_suppressed
+                and not self._parallel_abort_active
+            ):
+                abort = parallel_abort_candidate
+                abort_target_lane_idx = select_parallel_abort_lane(
+                    self._target_lane_idx, abort["lane_idx"])
+                self.get_logger().warn(
+                    "[ParallelAbort] entering exclusive yield: "
+                    f"vehicle_id={abort['vehicle_id']} "
+                    f"opponent_lane=L{abort['lane_idx']} "
+                    f"target_lane=L{abort_target_lane_idx} "
+                    f"lat={abort['lateral_center']:.2f}m, "
+                    f"clearance={abort['clearance']:+.2f}m, "
+                    f"lon_clearance="
+                    f"{abort['longitudinal_clearance']:+.2f}m, "
+                    f"lon={abort['longitudinal']:+.2f}m, "
+                    f"arc={abort['arc']:+.2f}m, "
+                    f"after {parallel_duration:.1f}s parallel running. "
+                    "Stopping before applying the selected lane on the "
+                    "next cycle.",
+                    throttle_duration_sec=1.0
+                )
+                self._parallel_abort_active = True
+                self._parallel_abort_vehicle_id = abort["vehicle_id"]
+                self._parallel_abort_target_lane_idx = abort_target_lane_idx
+                self._overtake_target_vehicle_id = None
+                self._overtake_lane_idx = None
+                self._forced_overtake_vehicle_id = None
+                self._outer_lane_released_vehicle_id = None
+                self._prepass_fallback_lane_idx = None
+                self._prepass_fallback_blocked = False
+                self._prepass_fallback_recovery_active = False
+                self._prepass_fallback_commit_pending = False
+                self._prepass_fallback_commit_lane_idx = None
+                self._prepass_retry_after_reverse = False
+                ref_vel_kmph = 0.0
                 self._parallel_start_time = None
+                self._parallel_timer_vehicle_id = None
 
             if forced_overtake_active:
                 ref_vel_kmph = min(

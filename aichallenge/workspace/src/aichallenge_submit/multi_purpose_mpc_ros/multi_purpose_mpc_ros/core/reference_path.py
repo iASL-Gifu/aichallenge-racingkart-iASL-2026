@@ -161,6 +161,23 @@ def lane_constraint_margins(target_lane, safety_margin):
         return 0.0, 0.0
     return margin, margin
 
+
+def lane_minimum_free_segment_width(
+    target_lane, model_width, l1_center_width=0.5
+):
+    """Return the minimum obstacle-free width required for a lane.
+
+    L0/L2 and full-width driving retain the configured vehicle envelope. L1
+    constrains the vehicle center around the center line, so requiring the
+    complete 1.6 m envelope here would reject otherwise usable corridors.
+    """
+    if target_lane == 1:
+        return min(
+            max(float(model_width), 0.0),
+            max(float(l1_center_width), 0.1),
+        )
+    return max(float(model_width), 0.0)
+
 ############
 # Waypoint #
 ############
@@ -1255,7 +1272,9 @@ class ReferencePath:
 
         # min_width = model_width
         # min_width = 2.0 * safety_margin
-        min_width = model_width
+        target_lane = getattr(self, 'target_lane_idx', None)
+        min_width = lane_minimum_free_segment_width(
+            target_lane, model_width, self.inner_lane_width)
         # min_segment_length = model_width / 4.0
         min_segment_length = 0.1
 

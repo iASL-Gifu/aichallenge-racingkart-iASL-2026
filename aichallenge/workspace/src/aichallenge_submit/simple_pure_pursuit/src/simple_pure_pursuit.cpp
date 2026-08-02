@@ -68,8 +68,10 @@ void SimplePurePursuit::onTimer()
   TrajectoryPoint closet_traj_point = trajectory_->points.at(closet_traj_point_idx);
 
   // calc longitudinal speed and acceleration
-  double target_longitudinal_vel =
-    use_external_target_vel_ ? external_target_vel_ : closet_traj_point.longitudinal_velocity_mps;
+  double target_longitudinal_vel = closet_traj_point.longitudinal_velocity_mps;
+  if (use_external_target_vel_) {
+    target_longitudinal_vel = std::min(target_longitudinal_vel, static_cast<double>(external_target_vel_));
+  }
   double current_longitudinal_vel = odometry_->twist.twist.linear.x;
 
   cmd.longitudinal.speed = target_longitudinal_vel;
@@ -84,15 +86,18 @@ void SimplePurePursuit::onTimer()
                   wheel_base_ / 2.0 * std::cos(odometry_->pose.pose.orientation.z);
   double rear_y = odometry_->pose.pose.position.y -
                   wheel_base_ / 2.0 * std::sin(odometry_->pose.pose.orientation.z);
-  //// search lookahead point
-  auto lookahead_point_itr = std::find_if(
-    trajectory_->points.begin() + closet_traj_point_idx, trajectory_->points.end(),
-    [&](const TrajectoryPoint & point) {
-      return std::hypot(point.pose.position.x - rear_x, point.pose.position.y - rear_y) >=
-             lookahead_distance;
-    });
-  double lookahead_point_x = lookahead_point_itr->pose.position.x;
-  double lookahead_point_y = lookahead_point_itr->pose.position.y;
+  //// search lookahead point (closed loop)
+  size_t lookahead_point_idx = closet_traj_point_idx;
+  for (size_t i = 0; i < trajectory_->points.size(); ++i) {
+    size_t idx = (closet_traj_point_idx + i) % trajectory_->points.size();
+    const auto & point = trajectory_->points.at(idx);
+    if (std::hypot(point.pose.position.x - rear_x, point.pose.position.y - rear_y) >= lookahead_distance) {
+      lookahead_point_idx = idx;
+      break;
+    }
+  }
+  double lookahead_point_x = trajectory_->points.at(lookahead_point_idx).pose.position.x;
+  double lookahead_point_y = trajectory_->points.at(lookahead_point_idx).pose.position.y;
 
   geometry_msgs::msg::PointStamped lookahead_point_msg;
   lookahead_point_msg.header.stamp = get_clock()->now();

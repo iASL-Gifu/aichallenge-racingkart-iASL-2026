@@ -4,6 +4,7 @@ import unittest
 
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     absolute_heading_difference,
+    build_closed_path_arc_lengths,
     classify_prepass_timeout_reasons,
     classify_lane_conflicts,
     circular_forward_progress,
@@ -14,13 +15,19 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     is_follow_retry_within_distance,
     is_prepass_fallback_lane_change,
     lane_conflicts_are_clear,
+    lateral_vehicle_clearance,
+    longitudinal_vehicle_clearance,
     is_parallel_vehicle,
     ordered_outer_lane_candidates,
     ordered_prepass_fallback_candidates,
     prepass_recovery_owns_lane_selection,
     prediction_clears_moving_vehicle,
+    project_to_closed_path_arc,
+    project_to_closed_path_frenet,
     relative_longitudinal_distance,
+    reverse_path_has_vehicle_conflict,
     select_latched_overtake_lane,
+    select_parallel_abort_lane,
     select_safe_outer_lane,
     should_release_latched_overtake_lane,
     should_reevaluate_follow_overtake,
@@ -34,6 +41,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     should_release_prepass_distance_gate,
     should_start_l1_recovery_from_safety,
     should_start_prepass_recovery_from_safety,
+    signed_closed_path_arc_distance,
     should_exit_l1_probe_backoff,
     update_continuous_condition_since,
     update_fallback_commit_success_since,
@@ -45,6 +53,30 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
 
 
 class StoppedVehicleSafetyTest(unittest.TestCase):
+    def test_reverse_corridor_ignores_adjacent_lane_vehicle(self):
+        self.assertFalse(reverse_path_has_vehicle_conflict(
+            ego_x=0.0, ego_y=0.0, ego_heading=0.0,
+            reverse_distance=5.0, corridor_half_width=1.5,
+            reverse_path_lanes={0}, vehicle_x=-2.0, vehicle_y=1.0,
+            vehicle_lane=1,
+        ))
+
+    def test_reverse_corridor_blocks_same_lane_vehicle_on_swept_path(self):
+        self.assertTrue(reverse_path_has_vehicle_conflict(
+            ego_x=0.0, ego_y=0.0, ego_heading=0.0,
+            reverse_distance=5.0, corridor_half_width=1.5,
+            reverse_path_lanes={0}, vehicle_x=-2.0, vehicle_y=0.3,
+            vehicle_lane=0,
+        ))
+
+    def test_reverse_corridor_checks_lateral_offset_for_unknown_lane(self):
+        self.assertFalse(reverse_path_has_vehicle_conflict(
+            ego_x=0.0, ego_y=0.0, ego_heading=0.0,
+            reverse_distance=5.0, corridor_half_width=1.5,
+            reverse_path_lanes={0}, vehicle_x=-2.0, vehicle_y=2.0,
+            vehicle_lane=None,
+        ))
+
     def test_motion_latch_survives_an_ordinary_stop(self):
         self.assertTrue(update_motion_latch(True, 0.0))
 
@@ -506,10 +538,12 @@ class OvertakeGeometryTest(unittest.TestCase):
         values = {
             "ego_lane_idx": 0,
             "other_lane_idx": 1,
-            "lateral_distance": 2.2,
+            "lateral_clearance": 0.5,
+            "longitudinal_clearance": -1.0,
             "longitudinal_distance": 1.0,
-            "minimum_lateral_distance": 2.0,
-            "maximum_lateral_distance": 3.5,
+            "maximum_lateral_clearance": 1.3,
+            "maximum_longitudinal_clearance": 0.5,
+            "minimum_longitudinal_distance": -0.5,
             "maximum_longitudinal_distance": 4.5,
         }
         values.update(overrides)
@@ -518,15 +552,103 @@ class OvertakeGeometryTest(unittest.TestCase):
     def test_parallel_requires_different_lanes(self):
         self.assertFalse(self.parallel(other_lane_idx=0))
 
-    def test_parallel_requires_at_least_two_metres_lateral_gap(self):
-        self.assertFalse(self.parallel(lateral_distance=1.99))
-        self.assertTrue(self.parallel(lateral_distance=2.0))
+    def test_parallel_has_no_minimum_lateral_clearance(self):
+        self.assertTrue(self.parallel(lateral_clearance=-0.2))
+        self.assertTrue(self.parallel(lateral_clearance=0.0))
+        self.assertTrue(self.parallel(lateral_clearance=1.3))
+        self.assertFalse(self.parallel(lateral_clearance=1.301))
+
+    def test_parallel_uses_vehicle_envelope_clearance(self):
+        self.assertAlmostEqual(
+            lateral_vehicle_clearance(1.525, 1.6, 0.725), 0.0)
+        self.assertAlmostEqual(
+            lateral_vehicle_clearance(1.4, 1.6, 0.725), -0.125)
+        self.assertAlmostEqual(
+            lateral_vehicle_clearance(2.0, 1.6, 0.725), 0.475)
+        self.assertAlmostEqual(
+            longitudinal_vehicle_clearance(2.0, 1.0, 1.0), 0.0)
+        self.assertAlmostEqual(
+            longitudinal_vehicle_clearance(4.35, 1.0, 1.0), 2.35)
+
+    def test_parallel_rejects_longitudinally_separated_envelopes(self):
+        self.assertTrue(self.parallel(longitudinal_clearance=0.5))
+        self.assertFalse(self.parallel(longitudinal_clearance=0.501))
+        # The false-positive observed in the D2 log: 2 m-long vehicles whose
+        # centers are 4.35 m apart retain 2.35 m of longitudinal free space.
+        self.assertFalse(self.parallel(
+            longitudinal_distance=4.35,
+            longitudinal_clearance=longitudinal_vehicle_clearance(
+                4.35, 1.0, 1.0),
+        ))
+
+    def test_center_frenet_lateral_offsets_are_projected_independently(self):
+        points, cumulative, total = build_closed_path_arc_lengths([
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+        ])
+        ego = project_to_closed_path_frenet(
+            5.0, 1.0, points, cumulative, total)
+        other = project_to_closed_path_frenet(
+            5.0, 2.5, points, cumulative, total)
+        self.assertIsNotNone(ego)
+        self.assertIsNotNone(other)
+        self.assertAlmostEqual(ego[1], 1.0)
+        self.assertAlmostEqual(other[1], 2.5)
+        self.assertAlmostEqual(abs(other[1] - ego[1]), 1.5)
+
+    def test_parallel_abort_keeps_outer_lane_when_opponent_is_l1(self):
+        self.assertEqual(select_parallel_abort_lane(0, 1), 0)
+        self.assertEqual(select_parallel_abort_lane(2, 1), 2)
+        self.assertEqual(select_parallel_abort_lane(0, 2), 1)
 
     def test_parallel_requires_small_longitudinal_gap(self):
+        self.assertFalse(self.parallel(longitudinal_distance=-0.51))
+        self.assertTrue(self.parallel(longitudinal_distance=-0.5))
+        self.assertTrue(self.parallel(longitudinal_distance=4.5))
         self.assertFalse(self.parallel(longitudinal_distance=4.51))
+
+    def test_parallel_uses_signed_longitudinal_distance(self):
+        self.assertFalse(self.parallel(longitudinal_distance=-4.0))
+        self.assertTrue(self.parallel(longitudinal_distance=4.0))
 
     def test_parallel_rejects_unknown_lane(self):
         self.assertFalse(self.parallel(ego_lane_idx=None))
+
+    def test_center_arc_filter_wraps_across_path_boundary(self):
+        points, cumulative, total = build_closed_path_arc_lengths([
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+        ])
+        ego_s = project_to_closed_path_arc(
+            0.0, 0.2, points, cumulative, total)
+        ahead_s = project_to_closed_path_arc(
+            0.2, 0.0, points, cumulative, total)
+        self.assertAlmostEqual(
+            signed_closed_path_arc_distance(ego_s, ahead_s, total),
+            0.4,
+            places=6,
+        )
+
+    def test_center_arc_filter_preserves_signed_rear_distance(self):
+        points, cumulative, total = build_closed_path_arc_lengths([
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+        ])
+        ego_s = project_to_closed_path_arc(
+            1.0, 0.0, points, cumulative, total)
+        rear_s = project_to_closed_path_arc(
+            0.4, 0.0, points, cumulative, total)
+        self.assertAlmostEqual(
+            signed_closed_path_arc_distance(ego_s, rear_s, total),
+            -0.6,
+            places=6,
+        )
 
     def test_prediction_must_clear_moving_target_at_every_step(self):
         self.assertFalse(prediction_clears_moving_vehicle(

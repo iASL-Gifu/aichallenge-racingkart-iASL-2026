@@ -22,8 +22,8 @@ from scipy.spatial import cKDTree
 
 _dir = os.path.dirname(os.path.abspath(__file__))
 TRACK_CSV = os.path.join(_dir, "boundary_true.csv")
-WP_CSV    = os.path.join(_dir, "../env/centerline/traj_center313.csv")
-OUT_CSV   = os.path.join(_dir, "../env/centerline/waypoint_bounds_center.csv")
+WP_CSV    = os.path.join(_dir, "../env/min_curv2/traj_race_cl_mpc.csv")
+OUT_CSV   = os.path.join(_dir, "../env/min_curv2/waypoint_bounds.csv")
 
 count = 0
 
@@ -37,7 +37,7 @@ Y_OFFSET = -75.727413
 print(f"Loading boundary.csv: {TRACK_CSV}")
 track = np.loadtxt(TRACK_CSV, delimiter=",", skiprows=1)
 
-# track.csv にオフセットを加算して waypoint の raw 座標系に合わせる
+# boundary_true.csv にオフセットを加算して waypoint の座標系に合わせる
 #x  = track[:, 4] #+ X_OFFSET
 #y  = track[:, 5] #+ Y_OFFSET
 #t_wr = track[:, 8]   # right half-width
@@ -51,15 +51,15 @@ track = np.loadtxt(TRACK_CSV, delimiter=",", skiprows=1)
 #lnx = -dy / norm_d
 #lny =  dx / norm_d
 
-# 絶対座標の左右壁
+# waypoint と同じ座標系に補正した左右壁
 left_wall=np.column_stack([
-track[:,0]+ X_OFFSET,
-track[:,1]+ Y_OFFSET
+track[:,0] + X_OFFSET,
+track[:,1] + Y_OFFSET
 ])
 
 right_wall=np.column_stack([
-track[:,2]+ X_OFFSET,
-track[:,3]+ Y_OFFSET
+track[:,2] + X_OFFSET,
+track[:,3] + Y_OFFSET
 ])
 
 print(f"Track points : {len(left_wall)}")
@@ -76,9 +76,9 @@ print("wp_data.shape =", wp_data.shape)
 
 print(open(WP_CSV).read().splitlines()[-3:])
 # 列: s_m, x_m, y_m, psi_rad, kappa_radpm, vx_mps, ax_mps3
-# waypoints の raw 座標をそのまま使用（オフセットなし）
-wp_x   = wp_data[:, 1]#+X_OFFSET
-wp_y   = wp_data[:, 2]#+Y_OFFSET
+# min_curv2 の waypoint CSV はすでに境界と同じ座標系に変換済み
+wp_x   = wp_data[:, 1]
+wp_y   = wp_data[:, 2]
 wp_psi = wp_data[:,3]
 
 import matplotlib.pyplot as plt
