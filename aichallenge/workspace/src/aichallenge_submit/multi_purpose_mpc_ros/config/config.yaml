@@ -58,10 +58,15 @@ trajectory_switch:
   lane_change_cooldown_sec: 2.0 # L0/L1/L2の目標変更後、次の車線変更を禁止する時間
   exit_confirm_sec: 0.5  # Race復帰条件の継続確認時間
   race_rejoin_max_heading_deg: 10.0 # Race/Centerの方位差がこれ以下の地点でRaceへ復帰
+  race_rejoin_probe_start_heading_deg: 12.0 # [deg] この方位差以内でRace shadow probeを開始
+  race_rejoin_probe_release_heading_deg: 15.0 # [deg] probe成功後もこの方位差までは成功状態を保持
   race_rejoin_direct_max_position_gap: 0.75 # [m] これ以下ならL1を介さずRace MPCを直接probe
   race_rejoin_probe_success_cycles: 3 # Race MPCがこの回数連続で正確に解けた場合だけRaceへ切り替える
   race_handoff_ramp_sec: 1.5 # [s] 位置差が大きい場合にRace参照へ移す最低時間
   race_handoff_max_reference_speed: 0.7 # [m/s] 全幅制約中のRace参照への最大横移動速度
+  race_handoff_max_position_gap: 3.0 # [m] これを超えるRace横目標は対応誤りとして既存L1復帰へ戻す
+  race_handoff_max_target_step: 0.75 # [m/wp] 予測区間内でこれを超えて飛ぶRace横目標を使用しない
+  race_handoff_guard_extra_lookahead_wps: 10 # MPC予測26点に加え、Guardだけが先行検査するWaypoint数
   race_rejoin_probe_timeout_sec: 1.0 # [s] Race probe不成立時は既存のL1復帰へ戻す
   race_rejoin_retry_backoff_sec: 2.0 # [s] Race probe失敗後の即時再試行を抑止
   outer_lane_release_infeasible_cycles: 5 # 追越し後、対象が後方にいる状態でこの回数連続失敗したらL0/L2固定を解除
