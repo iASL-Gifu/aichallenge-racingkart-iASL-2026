@@ -21,6 +21,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     ordered_outer_lane_candidates,
     ordered_prepass_fallback_candidates,
     prepass_recovery_owns_lane_selection,
+    post_reverse_progress_confirmed,
     prediction_clears_moving_vehicle,
     project_to_closed_path_arc,
     project_to_closed_path_frenet,
@@ -32,6 +33,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     should_release_latched_overtake_lane,
     should_reevaluate_follow_overtake,
     should_count_mpc_recovery_success,
+    should_allow_post_reverse_deadlock_retry,
     should_recover_from_mpc_stall,
     should_hold_follow_escape_exclusive,
     should_release_active_overtake_distance_gate,
@@ -43,6 +45,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     should_start_prepass_recovery_from_safety,
     signed_closed_path_arc_distance,
     should_exit_l1_probe_backoff,
+    update_post_reverse_creep_success_cycles,
     update_continuous_condition_since,
     update_fallback_commit_success_since,
     update_follow_escape_probe_success_cycles,
@@ -53,6 +56,31 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
 
 
 class StoppedVehicleSafetyTest(unittest.TestCase):
+    def test_post_reverse_deadlock_retry_requires_blocked_stopped_lead(self):
+        base = {
+            "post_reverse_recovery_active": True,
+            "explicit_reverse_requested": True,
+            "vehicle_is_stuck": True,
+            "target_is_ahead": True,
+            "target_is_stopped": True,
+            "forward_progress_confirmed": False,
+            "forward_command": 0.0,
+            "min_forward_command": 0.3,
+            "prediction_clears_target": False,
+        }
+        self.assertTrue(should_allow_post_reverse_deadlock_retry(**base))
+        for key, value in (
+            ("explicit_reverse_requested", False),
+            ("target_is_ahead", False),
+            ("target_is_stopped", False),
+            ("forward_progress_confirmed", True),
+            ("forward_command", 0.3),
+            ("prediction_clears_target", True),
+        ):
+            case = dict(base)
+            case[key] = value
+            self.assertFalse(
+                should_allow_post_reverse_deadlock_retry(**case))
     def test_reverse_corridor_ignores_adjacent_lane_vehicle(self):
         self.assertFalse(reverse_path_has_vehicle_conflict(
             ego_x=0.0, ego_y=0.0, ego_heading=0.0,
@@ -259,6 +287,67 @@ class StoppedVehicleSafetyTest(unittest.TestCase):
 
 
 class PrepassSafetyRecoveryTest(unittest.TestCase):
+    def test_post_reverse_recovery_rejects_inaccurate_solution(self):
+        self.assertFalse(should_count_mpc_recovery_success(
+            stuck_recovery_active=False,
+            gear_is_drive=True,
+            infeasibility_counter=0,
+            has_current_prediction=True,
+            used_prediction_fallback=False,
+            solution_accurate=False,
+            require_accurate_solution=True,
+        ))
+
+    def test_ordinary_recovery_may_still_accept_inaccurate_solution(self):
+        self.assertTrue(should_count_mpc_recovery_success(
+            stuck_recovery_active=False,
+            gear_is_drive=True,
+            infeasibility_counter=0,
+            has_current_prediction=True,
+            used_prediction_fallback=False,
+            solution_accurate=False,
+            require_accurate_solution=False,
+        ))
+
+    def test_post_reverse_progress_accepts_waypoint_or_gnss_motion(self):
+        self.assertTrue(post_reverse_progress_confirmed(
+            waypoint_progress=1,
+            min_waypoint_progress=1,
+            gnss_forward_progress=0.0,
+            min_gnss_forward_progress=0.3,
+        ))
+        self.assertTrue(post_reverse_progress_confirmed(
+            waypoint_progress=0,
+            min_waypoint_progress=1,
+            gnss_forward_progress=0.31,
+            min_gnss_forward_progress=0.3,
+        ))
+        self.assertFalse(post_reverse_progress_confirmed(
+            waypoint_progress=0,
+            min_waypoint_progress=1,
+            gnss_forward_progress=0.29,
+            min_gnss_forward_progress=0.3,
+        ))
+
+    def test_post_reverse_creep_requires_all_safety_conditions(self):
+        cycles = update_post_reverse_creep_success_cycles(
+            2,
+            full_width_applied=True,
+            feasible_accurate_solution=True,
+            executable_forward_prediction=True,
+            prediction_clear=True,
+            emergency_brake_active=False,
+        )
+        self.assertEqual(cycles, 3)
+        self.assertEqual(update_post_reverse_creep_success_cycles(
+            cycles,
+            full_width_applied=True,
+            feasible_accurate_solution=False,
+            executable_forward_prediction=True,
+            prediction_clear=True,
+            emergency_brake_active=False,
+        ), 0)
+
     def test_recovery_success_is_not_counted_during_reverse(self):
         self.assertFalse(should_count_mpc_recovery_success(
             stuck_recovery_active=True,

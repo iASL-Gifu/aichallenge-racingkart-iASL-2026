@@ -207,6 +207,7 @@ mpc:
 
 v2x_obstacle_avoidance:
   vehicle_radius: 0.725          # [m]
+  sample_freshness_sec: 0.5      # [s] active車両の衝突判定に使えるV2X受信鮮度
   v_max_safety: 40.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
   parallel_vehicle_half_width: 0.725 # [m] 並走横クリアランス用の相手車両半幅
@@ -264,6 +265,11 @@ stuck_recovery:
   enabled: true
   speed_threshold: 0.15
   mpc_stall_speed_threshold: 0.4 # [m/s] MPC安全回復中、この速度以下かつGNSS不動なら後退
+  post_reverse_recovery_min_wp_progress: 1 # 後退後、全幅回復解除前に要求する前進Waypoint数
+  post_reverse_recovery_min_gnss_progress: 0.3 # [m] Waypoint進行の代わりに認めるGNSS前進量
+  post_reverse_recovery_guard_sec: 2.0 # [s] 前進確認後も全幅を維持して再失敗を監視
+  post_reverse_creep_success_cycles: 3 # 低速前進を許可する正確・安全なMPCの連続周期数
+  post_reverse_creep_speed: 0.5 # [m/s] 実前進確認用の全幅回復速度
   forward_cmd_threshold: 0.8
   stuck_time_threshold: 2.0
   forward_resume_gap: 4.0 # [m] 後退中、ラッチ前方車がこの距離以上前進し、かつ動いていればDRIVEへ戻す

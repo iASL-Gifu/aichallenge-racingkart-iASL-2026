@@ -280,6 +280,10 @@ class MPC:
         self.time_budget_exceeded = False
         self.recovery_requested = False
         self.failure_reason = None
+        # Ordinary control may accept OSQP_SOLVED_INACCURATE, but recovery
+        # after reverse requires an exact OSQP_SOLVED result.
+        self.last_solution_status = None
+        self.last_solution_accurate = False
         self.soft_target_lane_idx = None
         self.soft_target_start_e_y = 0.0
         self.soft_target_alpha = 0.0
@@ -653,6 +657,8 @@ class MPC:
         self.time_budget_exceeded = False
         self.recovery_requested = False
         self.failure_reason = None
+        self.last_solution_status = None
+        self.last_solution_accurate = False
 
         #最近傍Waypointを取得
         self.model.get_current_waypoint()
@@ -716,6 +722,10 @@ class MPC:
                 raise ValueError(
                     f"OSQP failed with status '{dec.info.status}'")
 
+            self.last_solution_status = str(dec.info.status)
+            solution_is_accurate = bool(
+                dec.info.status_val == osqp.constant('OSQP_SOLVED'))
+
             control_signals = np.array(dec.x[-N*nu:])
 
             # ステア角の計算と保存
@@ -747,6 +757,7 @@ class MPC:
             # Commit the candidate only after solver and geometry validation.
             self.current_control = control_signals
             self.current_prediction = candidate_prediction
+            self.last_solution_accurate = solution_is_accurate
 
             u = np.array([v, delta])
             max_delta = np.max(np.abs(control_signals[1:len(control_signals)//3*2:2]))
