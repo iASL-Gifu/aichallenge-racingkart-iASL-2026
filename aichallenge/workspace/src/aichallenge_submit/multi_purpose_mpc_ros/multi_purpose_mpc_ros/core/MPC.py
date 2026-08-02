@@ -203,6 +203,7 @@ class MPC:
         self.soft_target_lane_idx = None
         self.soft_target_start_e_y = 0.0
         self.soft_target_alpha = 0.0
+        self.soft_lateral_targets = None
 
         # setupが済んでいるかどうか
         self.osqp_initialized = False
@@ -288,6 +289,7 @@ class MPC:
         self.soft_target_start_e_y = 0.0
         self.soft_target_alpha = 0.0
         self.soft_target_lateral_offset = 0.0
+        self.soft_lateral_targets = None
         # Snapshot of the exact corridor used by the latest solve attempt.
         # These values remain available after an infeasible solve so the
         # controller can diagnose lane-bound and obstacle-induced failures.
@@ -337,7 +339,7 @@ class MPC:
 
     def set_soft_lateral_reference(
         self, lane_idx=None, start_e_y=0.0, alpha=0.0,
-        lateral_offset=0.0,
+        lateral_offset=0.0, lateral_targets=None,
     ) -> None:
         """Set an objective-only lane reference without narrowing bounds."""
         self.soft_target_lane_idx = (
@@ -346,6 +348,15 @@ class MPC:
         self.soft_target_start_e_y = float(start_e_y)
         self.soft_target_alpha = float(np.clip(alpha, 0.0, 1.0))
         self.soft_target_lateral_offset = float(lateral_offset)
+        explicit_targets = (
+            None if lateral_targets is None
+            else np.asarray(lateral_targets, dtype=float).reshape(-1).copy()
+        )
+        self.soft_lateral_targets = (
+            explicit_targets
+            if explicit_targets is not None and explicit_targets.size > 0
+            else None
+        )
 
     def _compute_lane_center(self, wp_id: int, target_lane: int) -> float:
         lanes = self.model.reference_path.get_lane_bounds(wp_id)
@@ -520,22 +531,33 @@ class MPC:
             for n in range(N):
                 lane_centers.append(self._compute_lane_center(self.model.wp_id + n, target_lane))
             xr[0:N*self.nx:self.nx] = lane_centers
-        elif self.soft_target_lane_idx is not None:
+        elif (
+            self.soft_target_lane_idx is not None
+            or self.soft_lateral_targets is not None
+        ):
             # Only xr changes here. lb/ub above remain the full-width corridor,
             # and P/Q stay fixed, so obstacles may still move the solution away
             # from L1 when required.
             for n in range(N):
-                lane_center = self._compute_lane_center(
-                    self.model.wp_id + n, self.soft_target_lane_idx)
-                lane_center += self.soft_target_lateral_offset
+                if self.soft_lateral_targets is not None:
+                    target_index = min(n, len(self.soft_lateral_targets) - 1)
+                    lane_center = self.soft_lateral_targets[target_index]
+                else:
+                    lane_center = self._compute_lane_center(
+                        self.model.wp_id + n, self.soft_target_lane_idx)
+                    lane_center += self.soft_target_lateral_offset
                 xr[n * self.nx] = blend_lateral_reference(
                     self.soft_target_start_e_y,
                     lane_center,
                     self.soft_target_alpha,
                 )
-            terminal_center = self._compute_lane_center(
-                self.model.wp_id + N, self.soft_target_lane_idx)
-            terminal_center += self.soft_target_lateral_offset
+            if self.soft_lateral_targets is not None:
+                terminal_index = min(N, len(self.soft_lateral_targets) - 1)
+                terminal_center = self.soft_lateral_targets[terminal_index]
+            else:
+                terminal_center = self._compute_lane_center(
+                    self.model.wp_id + N, self.soft_target_lane_idx)
+                terminal_center += self.soft_target_lateral_offset
             xr[N * self.nx] = blend_lateral_reference(
                 self.soft_target_start_e_y,
                 terminal_center,

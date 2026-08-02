@@ -579,6 +579,9 @@ class MPCController(Node):
             self._center_arc_cumulative,
             self._center_arc_total_length,
         ) = build_closed_path_arc_lengths(center_arc_points)
+        self._race_targets_in_center_frame = (
+            self._build_race_targets_in_center_frame()
+        )
         #compute_speed_profile(self._car10_center, self._mpc_cfg_center)
 
         # Lane lock on curves configuration
@@ -660,6 +663,18 @@ class MPCController(Node):
             getattr(switch_cfg, "exit_confirm_sec", 0.5))
         self._race_rejoin_max_heading = math.radians(float(
             getattr(switch_cfg, "race_rejoin_max_heading_deg", 10.0)))
+        self._race_rejoin_direct_max_position_gap = max(float(getattr(
+            switch_cfg, "race_rejoin_direct_max_position_gap", 0.75)), 0.0)
+        self._race_rejoin_probe_required_success_cycles = max(int(getattr(
+            switch_cfg, "race_rejoin_probe_success_cycles", 3)), 1)
+        self._race_handoff_ramp_sec = max(float(getattr(
+            switch_cfg, "race_handoff_ramp_sec", 1.5)), 0.0)
+        self._race_handoff_max_reference_speed = max(float(getattr(
+            switch_cfg, "race_handoff_max_reference_speed", 0.7)), 0.0)
+        self._race_rejoin_probe_timeout_sec = max(float(getattr(
+            switch_cfg, "race_rejoin_probe_timeout_sec", 1.0)), 0.0)
+        self._race_rejoin_retry_backoff_sec = max(float(getattr(
+            switch_cfg, "race_rejoin_retry_backoff_sec", 2.0)), 0.0)
         self._trajectory_last_switch_time = None
         self._trajectory_clear_since = None
         self._trajectory_switch_reason = "initial"
@@ -674,6 +689,16 @@ class MPCController(Node):
         self._l1_probe_context = None
         self._l1_probe_success_cycles = 0
         self._l1_probe_constraint_applied = False
+        self._race_rejoin_handoff_active = False
+        self._race_rejoin_handoff_soft = False
+        self._race_rejoin_handoff_started_at = None
+        self._race_rejoin_handoff_start_e_y = None
+        self._race_rejoin_handoff_effective_ramp_sec = None
+        self._race_rejoin_handoff_guidance_ready = False
+        self._race_rejoin_probe_success_cycles = 0
+        self._race_rejoin_probe_confirmed = False
+        self._race_rejoin_probe_started_at = None
+        self._race_rejoin_retry_not_before = None
         self._l1_safety_recovery_active = False
         self._l1_safety_recovery_stable_since = None
         self._l1_safety_recovery_context = None
@@ -2405,6 +2430,260 @@ class MPCController(Node):
             + (y - wp.y) * math.sin(normal_angle)
         )
         return abs(lateral_offset - 0.5 * (upper + lower))
+
+    def _build_race_targets_in_center_frame(self):
+        """Map the Race path onto Center Frenet coordinates once at startup.
+
+        The two CSVs may contain different waypoint counts.  Normalized closed
+        arc length gives a lightweight, monotonic correspondence without
+        importing the much larger 0802 Race/Center mapping state machine.
+        """
+        race_points = [
+            (waypoint.x, waypoint.y)
+            for waypoint in self._reference_pathN_race.waypoints
+        ]
+        race_xy, race_cumulative, race_total = build_closed_path_arc_lengths(
+            race_points)
+        if (
+            len(race_xy) < 2
+            or len(self._center_arc_points) < 2
+            or race_total <= 0.0
+            or self._center_arc_total_length <= 0.0
+        ):
+            return None
+
+        race_s = np.asarray(race_cumulative, dtype=float)
+        race_x = np.asarray(
+            [point[0] for point in race_xy] + [race_xy[0][0]], dtype=float)
+        race_y = np.asarray(
+            [point[1] for point in race_xy] + [race_xy[0][1]], dtype=float)
+        targets = []
+        for index, center_waypoint in enumerate(
+            self._reference_pathN_center.waypoints
+        ):
+            normalized_s = (
+                float(self._center_arc_cumulative[index])
+                / float(self._center_arc_total_length)
+            )
+            mapped_race_s = normalized_s * float(race_total)
+            race_x_at_s = float(np.interp(mapped_race_s, race_s, race_x))
+            race_y_at_s = float(np.interp(mapped_race_s, race_s, race_y))
+            normal_angle = center_waypoint.psi + math.pi / 2.0
+            targets.append(
+                (race_x_at_s - center_waypoint.x) * math.cos(normal_angle)
+                + (race_y_at_s - center_waypoint.y) * math.sin(normal_angle)
+            )
+        return np.asarray(targets, dtype=float)
+
+    def _reset_race_rejoin_handoff(self) -> None:
+        """Cancel only the pending Center-to-Race transition state."""
+        self._race_rejoin_handoff_active = False
+        self._race_rejoin_handoff_soft = False
+        self._race_rejoin_handoff_started_at = None
+        self._race_rejoin_handoff_start_e_y = None
+        self._race_rejoin_handoff_effective_ramp_sec = None
+        self._race_rejoin_handoff_guidance_ready = False
+        self._race_rejoin_probe_success_cycles = 0
+        self._race_rejoin_probe_confirmed = False
+        self._race_rejoin_probe_started_at = None
+        self._mpcN_center.set_soft_lateral_reference()
+
+    def _start_race_rejoin_handoff(
+        self, *, position_gap: float, now_sec: float
+    ) -> None:
+        """Start a direct Race probe or full-width objective-only handoff."""
+        if self._race_rejoin_handoff_active:
+            return
+        if (
+            self._race_rejoin_retry_not_before is not None
+            and now_sec < self._race_rejoin_retry_not_before
+        ):
+            return
+
+        # Race handoff replaces normal L1 rejoin only.  Fallback L1 probes,
+        # Prepass, reverse and SafetyRecovery are excluded by the caller.
+        self._cancel_normal_l1_rejoin_for_prepass()
+        self._l1_soft_rejoin_started_at = None
+        self._l1_soft_rejoin_start_e_y = None
+        self._l1_soft_rejoin_effective_ramp_sec = None
+        self._l1_soft_rejoin_full_strength_logged = False
+        self._target_lane_idx = None
+        self._race_rejoin_handoff_active = True
+        self._race_rejoin_handoff_soft = (
+            position_gap > self._race_rejoin_direct_max_position_gap)
+        self._race_rejoin_handoff_started_at = None
+        self._race_rejoin_handoff_start_e_y = None
+        self._race_rejoin_handoff_effective_ramp_sec = None
+        self._race_rejoin_handoff_guidance_ready = (
+            not self._race_rejoin_handoff_soft)
+        self._race_rejoin_probe_success_cycles = 0
+        self._race_rejoin_probe_confirmed = False
+        self._race_rejoin_probe_started_at = None
+        self._mpcN_race.osqp_initialized = False
+        self._mpcN_race.current_prediction = None
+        self._mpcN_race.used_prediction_fallback = False
+        self._mpcN_race.infeasibility_counter = 0
+        self._mpcN_race.previous_steering = self._mpcN_center.previous_steering
+        self._mpcN_race.current_control = np.array(
+            self._mpcN_center.current_control, copy=True)
+        mode = "soft_handoff" if self._race_rejoin_handoff_soft else "direct"
+        self.get_logger().info(
+            f"[RaceRejoin] starting {mode} Race transition with full-width "
+            f"Center constraints: position_gap={position_gap:.2f}m/"
+            f"{self._race_rejoin_direct_max_position_gap:.2f}m, "
+            f"probe_cycles={self._race_rejoin_probe_required_success_cycles}"
+        )
+
+    def _race_handoff_lateral_targets(self):
+        if self._race_targets_in_center_frame is None:
+            return None
+        center_wp = self._carN_center.wp_id
+        count = len(self._race_targets_in_center_frame)
+        return np.asarray([
+            self._race_targets_in_center_frame[(center_wp + step) % count]
+            for step in range(self._mpcN_center.N + 1)
+        ], dtype=float)
+
+    def _update_race_handoff_reference(
+        self, *, enabled: bool, now_sec: float
+    ) -> None:
+        """Guide the full-width Center MPC objective toward the Race path."""
+        if not enabled:
+            return
+        targets = self._race_handoff_lateral_targets()
+        if targets is None or targets.size == 0:
+            self._race_rejoin_handoff_guidance_ready = False
+            return
+        if self._race_rejoin_handoff_started_at is None:
+            self._race_rejoin_handoff_started_at = float(now_sec)
+            self._race_rejoin_handoff_start_e_y = float(
+                self._carN_center.spatial_state.e_y)
+            furthest_target = max(
+                targets,
+                key=lambda target: abs(
+                    target - self._race_rejoin_handoff_start_e_y),
+            )
+            self._race_rejoin_handoff_effective_ramp_sec = (
+                lateral_reference_ramp_duration(
+                    self._race_rejoin_handoff_start_e_y,
+                    float(furthest_target),
+                    self._race_handoff_ramp_sec,
+                    self._race_handoff_max_reference_speed,
+                )
+            )
+            self.get_logger().info(
+                "[RaceHandoff] starting objective-only Race guidance: "
+                f"start_e_y={self._race_rejoin_handoff_start_e_y:.2f}m, "
+                f"target_e_y={targets[0]:.2f}m, "
+                f"ramp_sec={self._race_rejoin_handoff_effective_ramp_sec:.2f}, "
+                f"max_reference_speed="
+                f"{self._race_handoff_max_reference_speed:.2f}m/s"
+            )
+
+        elapsed = max(
+            float(now_sec) - self._race_rejoin_handoff_started_at, 0.0)
+        alpha = (
+            1.0
+            if self._race_rejoin_handoff_effective_ramp_sec <= 0.0
+            else min(
+                elapsed / self._race_rejoin_handoff_effective_ramp_sec, 1.0)
+        )
+        self._mpcN_center.set_soft_lateral_reference(
+            start_e_y=self._race_rejoin_handoff_start_e_y,
+            alpha=alpha,
+            lateral_targets=targets,
+        )
+        if alpha >= 1.0 and not self._race_rejoin_handoff_guidance_ready:
+            self._race_rejoin_handoff_guidance_ready = True
+            self.get_logger().info(
+                "[RaceHandoff] guidance reached full strength; starting "
+                "Race MPC feasibility probe."
+            )
+
+    def _run_race_rejoin_probe(
+        self, predicted_pose, *, recovery_active: bool, now_sec: float
+    ) -> None:
+        """Shadow-solve Race MPC without publishing its command."""
+        if (
+            not self._race_rejoin_handoff_active
+            or not self._race_rejoin_handoff_guidance_ready
+            or self._race_rejoin_probe_confirmed
+            or self._reference_path is not self._reference_pathN_center
+            or recovery_active
+            or self._mpc_safety_recovery_active
+            or self._post_reverse_full_width_recovery_active
+        ):
+            return
+        if self._race_rejoin_probe_started_at is None:
+            self._race_rejoin_probe_started_at = float(now_sec)
+        elif (
+            self._race_rejoin_probe_timeout_sec > 0.0
+            and now_sec - self._race_rejoin_probe_started_at
+                >= self._race_rejoin_probe_timeout_sec
+            and not self._race_rejoin_probe_confirmed
+        ):
+            self.get_logger().warn(
+                "[RaceRejoinProbe] Race MPC did not become feasible before "
+                "timeout; returning ownership to the existing L1 rejoin: "
+                f"elapsed={now_sec - self._race_rejoin_probe_started_at:.2f}s"
+            )
+            self._reset_race_rejoin_handoff()
+            self._race_rejoin_retry_not_before = (
+                now_sec + self._race_rejoin_retry_backoff_sec)
+            return
+
+        # Once the bounded probe window has started, an inaccurate or stale
+        # live Center solution must not pause its timeout indefinitely.
+        if (
+            self._mpcN_center.infeasibility_counter != 0
+            or self._mpcN_center.current_prediction is None
+            or self._mpcN_center.used_prediction_fallback
+            or not self._mpcN_center.last_solution_accurate
+        ):
+            self._race_rejoin_probe_success_cycles = 0
+            return
+
+        self._reference_pathN_race.target_lane_idx = None
+        self._reference_pathN_race.is_overtaking = False
+        self._reference_pathN_race.reset_dynamic_constraints()
+        self._mpcN_race.set_soft_lateral_reference()
+        self._carN_race.update_states(
+            predicted_pose.x, predicted_pose.y, predicted_pose.theta)
+        self._mpcN_race.update_wp_id_offset(0)
+        self._mpcN_race.previous_steering = self._mpcN_center.previous_steering
+        self._mpcN_race.get_control()
+        success = (
+            not self._mpcN_race.recovery_requested
+            and self._mpcN_race.infeasibility_counter == 0
+            and self._mpcN_race.current_prediction is not None
+            and not self._mpcN_race.used_prediction_fallback
+            and not self._mpcN_race.time_budget_exceeded
+            and self._mpcN_race.last_solution_accurate
+        )
+        if success:
+            self._race_rejoin_probe_success_cycles += 1
+        else:
+            self._race_rejoin_probe_success_cycles = 0
+            self._race_rejoin_probe_confirmed = False
+        if (
+            self._race_rejoin_probe_success_cycles
+            >= self._race_rejoin_probe_required_success_cycles
+        ):
+            if not self._race_rejoin_probe_confirmed:
+                self.get_logger().info(
+                    "[RaceRejoinProbe] Race MPC confirmed feasible: "
+                    f"success_cycles={self._race_rejoin_probe_success_cycles}"
+                )
+            self._race_rejoin_probe_confirmed = True
+        elif not success:
+            self.get_logger().info(
+                "[RaceRejoinProbe] Race MPC not yet feasible; keeping "
+                "Center/full-width control: "
+                f"infeasible={self._mpcN_race.infeasibility_counter}, "
+                f"time_budget_exceeded="
+                f"{self._mpcN_race.time_budget_exceeded}",
+                throttle_duration_sec=1.0,
+            )
 
     def _update_l1_soft_rejoin_reference(
         self, *, enabled: bool, now_sec: float
@@ -4962,6 +5241,8 @@ class MPCController(Node):
             self._trajectory_clear_since = None
             self._center_lane_rejoin_stable_since = None
             self._trajectory_switch_reason = "initial_start_exclusive_hold"
+            if self._race_rejoin_handoff_active:
+                self._reset_race_rejoin_handoff()
         elif recovery_active:
             self._trajectory_clear_since = None
             self._center_lane_rejoin_stable_since = None
@@ -4973,6 +5254,8 @@ class MPCController(Node):
             self._l1_probe_success_cycles = 0
             self._l1_probe_constraint_applied = False
             self._trajectory_switch_reason = "stuck_recovery_hold"
+            if self._race_rejoin_handoff_active:
+                self._reset_race_rejoin_handoff()
         elif opponent_ahead_detected:
             center_lane_rejoin_clear = (
                 closest_opp_ahead > self._trajectory_exit_center_wps
@@ -4982,6 +5265,61 @@ class MPCController(Node):
                 closest_opp_ahead > self._trajectory_exit_center_wps
                 and closest_opp_behind > self._trajectory_behind_release_wps
             )
+            race_handoff_safety_blocked = (
+                self._mpc_safety_recovery_active
+                or self._post_reverse_full_width_recovery_active
+                or self._l1_safety_recovery_active
+                or self._l1_safety_reprobe_pending
+                or self._prepass_fallback_recovery_active
+                or self._prepass_fallback_commit_pending
+                or self._follow_escape_active
+                or self._parallel_abort_active
+                or (
+                    self._l1_probe_active
+                    and self._l1_probe_context == "fallback"
+                )
+            )
+            if (
+                self._race_rejoin_handoff_active
+                and (not opponent_is_clear or race_handoff_safety_blocked)
+            ):
+                self.get_logger().info(
+                    "[RaceRejoin] cancelling pending transition because "
+                    "opponent or safety ownership changed."
+                )
+                self._reset_race_rejoin_handoff()
+                self._race_rejoin_retry_not_before = (
+                    now_sec + self._race_rejoin_retry_backoff_sec)
+
+            race_target_now = None
+            if self._race_targets_in_center_frame is not None:
+                race_target_now = float(
+                    self._race_targets_in_center_frame[
+                        center_wp_temp
+                        % len(self._race_targets_in_center_frame)
+                    ]
+                )
+            race_position_gap = (
+                abs(
+                    float(self._carN_center.spatial_state.e_y)
+                    - race_target_now
+                )
+                if race_target_now is not None else float("inf")
+            )
+            race_rejoin_entry_ready = (
+                opponent_is_clear
+                and not forced_overtake_pending
+                and race_rejoin_heading_ok
+                and not race_handoff_safety_blocked
+            )
+            if race_rejoin_entry_ready:
+                # Normal L1 rejoin/probe/backoff is deliberately pre-emptible
+                # here.  _start_race_rejoin_handoff() clears only that normal
+                # state; safety/fallback L1 ownership remains excluded above.
+                self._start_race_rejoin_handoff(
+                    position_gap=race_position_gap,
+                    now_sec=now_sec,
+                )
             if self._l1_rejoin_backoff_active:
                 self._l1_rejoin_backoff_full_width_success_since = (
                     update_continuous_condition_since(
@@ -5106,6 +5444,7 @@ class MPCController(Node):
                 can_start_center_rejoin = (
                     center_lane_rejoin_clear
                     and not forced_overtake_pending
+                    and not self._race_rejoin_handoff_active
                     and not initial_start_lateral_hold_active
                     and not self._prepass_fallback_recovery_active
                     and not self._prepass_fallback_commit_pending
@@ -5165,22 +5504,24 @@ class MPCController(Node):
                             throttle_duration_sec=1.0,
                         )
 
-            constraint_transition_until = getattr(
-                self, '_constraint_transition_until', 0.0)
-            center_lane_rejoin_ready = (
-                self._center_lane_rejoin_active
-                and not self._l1_safety_reprobe_pending
-                and (
-                    self._target_lane_idx == 1
-                    or self._center_lane_rejoin_constraint_released
-                )
-                and now_sec >= constraint_transition_until
-            )
+            if (
+                self._race_rejoin_handoff_active
+                and self._race_rejoin_probe_confirmed
+                and not race_rejoin_heading_ok
+            ):
+                # A confirmed shadow solution is valid only around the
+                # alignment at which it was obtained.  Require three fresh
+                # successes if heading alignment is lost before commit.
+                self._race_rejoin_probe_success_cycles = 0
+                self._race_rejoin_probe_confirmed = False
+                self._race_rejoin_probe_started_at = None
+
             race_rejoin_ready = (
                 opponent_is_clear
                 and not forced_overtake_pending
-                and center_lane_rejoin_ready
                 and race_rejoin_heading_ok
+                and self._race_rejoin_handoff_active
+                and self._race_rejoin_probe_confirmed
             )
             if race_rejoin_ready:
                 if self._trajectory_clear_since is None:
@@ -5208,6 +5549,8 @@ class MPCController(Node):
                         throttle_duration_sec=1.0,
                     )
         else:
+            if self._race_rejoin_handoff_active:
+                self._reset_race_rejoin_handoff()
             self._reset_l1_rejoin_backoff()
             self._center_lane_rejoin_active = False
             self._center_lane_rejoin_constraint_released = False
@@ -5303,6 +5646,8 @@ class MPCController(Node):
         # これにより、旧軌道向けに warm-start された状態が新軌道の制約と食い違って
         # infeasible になるリスクを防ぐ。
         if trajectory_switched:
+            self._reset_race_rejoin_handoff()
+            self._race_rejoin_retry_not_before = None
             self._trajectory_last_switch_time = now_sec
             label = "Race→Center" if opponent_ahead_detected else "Center→Race"
             center_wp_at_switch = center_wp_temp
@@ -5824,6 +6169,7 @@ class MPCController(Node):
                 )
             )
         )
+        exclusive_race_handoff = self._race_rejoin_handoff_active
         # L1 rejoin normally owns lateral selection so an old passing-side
         # latch cannot immediately reappear. A newly detected nearby vehicle is
         # different: when an outer lane is physically passable and clear of
@@ -5899,6 +6245,12 @@ class MPCController(Node):
             # forward probe commits or the existing reverse sequence starts.
             overtake_latch_started = False
             new_target_lane_idx = self._follow_escape_probe_lane_idx
+        elif exclusive_race_handoff:
+            # Race handoff owns only the lateral objective.  Keep the active
+            # Center corridor full width and do not let ordinary lane selection
+            # recreate L0/L1/L2 while the Race shadow probe is running.
+            overtake_latch_started = False
+            new_target_lane_idx = None
         elif exclusive_l1_rejoin:
             # L1 rejoin exclusively owns lateral selection. Calling the outer
             # lane selector here would recreate an L0/L2 latch every cycle,
@@ -7003,9 +7355,28 @@ class MPCController(Node):
             and not self._parallel_abort_active
             and not initial_start_lateral_hold_active
             and not initial_start_boost_active
+            and not self._race_rejoin_handoff_active
         )
         self._update_l1_soft_rejoin_reference(
             enabled=soft_rejoin_enabled,
+            now_sec=current_time_sec,
+        )
+        race_handoff_soft_enabled = (
+            self._race_rejoin_handoff_active
+            and self._race_rejoin_handoff_soft
+            and self._reference_path is self._reference_pathN_center
+            and self._reference_path.target_lane_idx is None
+            and not self._reference_path.is_overtaking
+            and not self._mpc_safety_recovery_active
+            and not self._post_reverse_full_width_recovery_active
+            and not recovery_active
+            and not self._prepass_fallback_recovery_active
+            and not self._prepass_fallback_commit_pending
+            and not self._follow_escape_active
+            and not self._parallel_abort_active
+        )
+        self._update_race_handoff_reference(
+            enabled=race_handoff_soft_enabled,
             now_sec=current_time_sec,
         )
         initial_start_soft_l0_enabled = (
@@ -7035,6 +7406,15 @@ class MPCController(Node):
         # MPCの実行
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
+
+        # The Race solve is a shadow feasibility check only.  It runs after
+        # the live Center solve, never publishes a command, and is active only
+        # during the short Center-to-Race handoff window.
+        self._run_race_rejoin_probe(
+            predicted_pose,
+            recovery_active=recovery_active,
+            now_sec=current_time_sec,
+        )
 
         if self._mpc.used_prediction_fallback:
             self._mpc_prediction_fallback_cycles += 1
