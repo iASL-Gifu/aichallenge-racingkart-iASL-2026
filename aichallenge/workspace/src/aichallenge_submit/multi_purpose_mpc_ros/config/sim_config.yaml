@@ -67,6 +67,11 @@ stuck_recovery:
   post_reverse_recovery_guard_sec: 2.0
   post_reverse_creep_success_cycles: 3
   post_reverse_creep_speed: 0.5
+  post_reverse_creep_wait_timeout_sec: 3.0
+  post_reverse_creep_response_timeout_sec: 2.0
+  post_reverse_creep_response_command_threshold: 0.3
+  post_reverse_creep_response_min_gnss_distance: 0.1
+  post_reverse_max_retry_attempts: 1
   forward_cmd_threshold: 0.8
   stuck_time_threshold: 2.0
   forward_resume_gap: 4.0
@@ -92,6 +97,10 @@ stuck_recovery:
   drive_control_mode_request_value: true
   gear_shift_delay: 1.0
   max_shift_wait: 8.0
+  drive_confirmation_total_timeout_sec: 12.0
+  drive_confirmation_max_requests: 20
+  require_control_mode_confirmation: true
+  control_mode_freshness_sec: 1.0
   drive_request_resend_sec: 0.5 # [s] DRIVE未確認時のギア要求再送周期。確認まで速度ゼロを維持
   reverse_request_resend_sec: 0.5 # [s] REVERSE未確認時のギア要求再送周期。確認まで速度ゼロを維持
   use_actuation_cmd: false

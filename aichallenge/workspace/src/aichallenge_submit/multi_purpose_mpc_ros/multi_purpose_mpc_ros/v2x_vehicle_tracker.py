@@ -728,15 +728,46 @@ def should_recover_from_mpc_stall(
     infeasibility_counter,
     has_fresh_valid_prediction,
 ):
-    """Allow reverse only while MPC still has no fresh feasible solution."""
+    """Allow reverse while GNSS proves that an invalid MPC is not moving.
+
+    Wheel/odometry speed can remain high while a kart is pressed against a
+    wall.  The already time-qualified GNSS immobility is the physical motion
+    authority here, so do not let a high reported speed suppress recovery.
+    """
     return (
         safety_recovery_active
-        and abs(actual_speed) <= stall_speed_threshold
         and gnss_is_stuck
         and (
             infeasibility_counter > 0
             or not has_fresh_valid_prediction
         )
+    )
+
+
+def post_reverse_creep_response_failed(
+    *,
+    command_speed,
+    minimum_command_speed,
+    command_elapsed,
+    response_timeout,
+    gnss_distance,
+    minimum_gnss_distance,
+):
+    """Detect a commanded post-reverse creep with no physical response."""
+    return bool(
+        float(command_speed) >= max(float(minimum_command_speed), 0.0)
+        and float(command_elapsed) >= max(float(response_timeout), 0.0)
+        and float(gnss_distance) < max(float(minimum_gnss_distance), 0.0)
+    )
+
+
+def drive_confirmation_exhausted(
+    *, elapsed, timeout, request_count, max_requests
+):
+    """Bound the DRIVE/control-mode confirmation sequence."""
+    return bool(
+        float(elapsed) >= max(float(timeout), 0.0)
+        or int(request_count) >= max(int(max_requests), 1)
     )
 
 
@@ -749,6 +780,8 @@ def should_count_mpc_recovery_success(
     used_prediction_fallback,
     solution_accurate=True,
     require_accurate_solution=False,
+    control_mode_autonomous=True,
+    require_autonomous_control=False,
 ):
     """Count full-width recovery only after reverse/shift has fully ended."""
     return (
@@ -758,6 +791,7 @@ def should_count_mpc_recovery_success(
         and has_current_prediction
         and not used_prediction_fallback
         and (solution_accurate or not require_accurate_solution)
+        and (control_mode_autonomous or not require_autonomous_control)
     )
 
 

@@ -9,6 +9,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     classify_lane_conflicts,
     circular_forward_progress,
     continuous_condition_confirmed,
+    drive_confirmation_exhausted,
     evaluate_stopped_lead_overtake,
     follow_stop_deadlock_conditions_met,
     is_follow_target_ahead,
@@ -22,6 +23,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     ordered_prepass_fallback_candidates,
     prepass_recovery_owns_lane_selection,
     post_reverse_progress_confirmed,
+    post_reverse_creep_response_failed,
     prediction_clears_moving_vehicle,
     project_to_closed_path_arc,
     project_to_closed_path_frenet,
@@ -392,6 +394,61 @@ class PrepassSafetyRecoveryTest(unittest.TestCase):
             infeasibility_counter=4,
             has_fresh_valid_prediction=False,
         ))
+
+    def test_gnss_stall_allows_recovery_despite_high_odometry_speed(self):
+        self.assertTrue(should_recover_from_mpc_stall(
+            safety_recovery_active=True,
+            actual_speed=2.0,
+            stall_speed_threshold=0.4,
+            gnss_is_stuck=True,
+            infeasibility_counter=4,
+            has_fresh_valid_prediction=False,
+        ))
+
+    def test_post_reverse_creep_requires_physical_gnss_response(self):
+        self.assertTrue(post_reverse_creep_response_failed(
+            command_speed=0.5,
+            minimum_command_speed=0.3,
+            command_elapsed=2.0,
+            response_timeout=2.0,
+            gnss_distance=0.09,
+            minimum_gnss_distance=0.1,
+        ))
+        self.assertFalse(post_reverse_creep_response_failed(
+            command_speed=0.5,
+            minimum_command_speed=0.3,
+            command_elapsed=2.0,
+            response_timeout=2.0,
+            gnss_distance=0.1,
+            minimum_gnss_distance=0.1,
+        ))
+
+    def test_drive_confirmation_has_time_and_request_limits(self):
+        self.assertTrue(drive_confirmation_exhausted(
+            elapsed=12.0, timeout=12.0,
+            request_count=3, max_requests=20))
+        self.assertTrue(drive_confirmation_exhausted(
+            elapsed=2.0, timeout=12.0,
+            request_count=20, max_requests=20))
+        self.assertFalse(drive_confirmation_exhausted(
+            elapsed=2.0, timeout=12.0,
+            request_count=3, max_requests=20))
+
+    def test_post_reverse_recovery_requires_autonomous_mode_when_enabled(self):
+        base = dict(
+            stuck_recovery_active=False,
+            gear_is_drive=True,
+            infeasibility_counter=0,
+            has_current_prediction=True,
+            used_prediction_fallback=False,
+            solution_accurate=True,
+            require_accurate_solution=True,
+            require_autonomous_control=True,
+        )
+        self.assertFalse(should_count_mpc_recovery_success(
+            **base, control_mode_autonomous=False))
+        self.assertTrue(should_count_mpc_recovery_success(
+            **base, control_mode_autonomous=True))
 
     def test_follow_overtake_is_reevaluated_every_two_seconds(self):
         self.assertFalse(should_reevaluate_follow_overtake(
