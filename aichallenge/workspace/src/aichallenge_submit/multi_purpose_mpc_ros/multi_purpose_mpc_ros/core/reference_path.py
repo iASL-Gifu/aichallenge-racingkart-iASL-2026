@@ -23,7 +23,7 @@ OBSTACLE = '#2E4053'
 # Since ub is the left course edge and lb is the right course edge, this
 # becomes the outside margin of L2 and L0 respectively.  It must not be
 # applied to the lane boundaries adjoining L1.
-OUTER_COURSE_MARGIN = 0.75
+OUTER_COURSE_MARGIN = 0.8
 CURVATURE_SAVGOL_WINDOW = 7
 CURVATURE_SAVGOL_POLYORDER = 3
 

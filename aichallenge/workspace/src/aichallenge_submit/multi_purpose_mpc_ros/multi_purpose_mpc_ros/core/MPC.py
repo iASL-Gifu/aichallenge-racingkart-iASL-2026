@@ -221,6 +221,19 @@ class MPC:
             steering_rate_matrix[i, self.nx_N + self.nu*i + 1] = -1
             steering_rate_matrix[i, self.nx_N + self.nu*(i+1) + 1] = 1
         self.steering_rate_matrix = steering_rate_matrix.tocsc()
+        # The ordinary rate rows above constrain only adjacent predicted
+        # inputs.  Keep a structurally fixed row for the transition from the
+        # steering angle that is currently being applied to the first MPC
+        # input.  It is disabled for normal MPCs and enabled for the outer-lane
+        # shadow probe, so the shadow prediction is generated from a command
+        # the live controller can actually reach in one control period.
+        initial_steering_rate_matrix = sparse.lil_matrix(
+            (1, self.nx_N + self.nu_N)
+        )
+        initial_steering_rate_matrix[0, self.nx_N + 1] = 1.0
+        self.initial_steering_rate_matrix = (
+            initial_steering_rate_matrix.tocsc()
+        )
         #sparse.eyeの固定`
         self.basic_constraint_matrix = sparse.eye(
             self.nx_N + self.nu_N,
@@ -228,6 +241,7 @@ class MPC:
         )
         self.A_inequality = sparse.vstack([
             self.basic_constraint_matrix,
+            self.initial_steering_rate_matrix,
             self.steering_rate_matrix
         ], format='csc')        
         
@@ -269,6 +283,7 @@ class MPC:
         # 追加: ステアリングレート制限関連のパラメータ
         self.max_steering_rate = max_steering_rate
         self.previous_steering = 0.0  # 前回のステア角
+        self.enforce_initial_steering_rate_constraint = False
 
         # 追加: ay_maxによる速度制限の方式切り替え
         self.use_max_kappa_pred = use_max_kappa_pred
@@ -327,6 +342,10 @@ class MPC:
 
     def update_wp_id_offset(self, wp_id_offset: int):
         self.wp_id_offset = wp_id_offset
+
+    def set_initial_steering_rate_constraint(self, enabled: bool) -> None:
+        """Constrain the first predicted steer to one reachable control step."""
+        self.enforce_initial_steering_rate_constraint = bool(enabled)
 
     def update_Q(self, Q: np.ndarray):
         self.Q = Q
@@ -594,14 +613,35 @@ class MPC:
 
         # ステアリングレート制約の境界
         max_delta_change = self.max_steering_rate * self.model.Ts
+        if self.enforce_initial_steering_rate_constraint:
+            # The optimizer's second input is curvature.  Convert the
+            # reachable steering-angle interval back to curvature before
+            # applying it to the first input variable.
+            delta_lower = self.previous_steering - max_delta_change
+            delta_upper = self.previous_steering + max_delta_change
+            kappa_lower = np.tan(delta_lower) / self.model.length
+            kappa_upper = np.tan(delta_upper) / self.model.length
+            lineq_initial_rate = np.array([
+                np.clip(kappa_lower, umin[1], umax[1])
+            ])
+            uineq_initial_rate = np.array([
+                np.clip(kappa_upper, umin[1], umax[1])
+            ])
+        else:
+            lineq_initial_rate = np.array([-np.inf])
+            uineq_initial_rate = np.array([np.inf])
         lineq_rate = -max_delta_change * np.ones(self.n_rate_constraints)
         uineq_rate = max_delta_change * np.ones(self.n_rate_constraints)
 
         t_constraints2 = time.perf_counter()
 
         # 全ての境界を結合
-        l = np.hstack([leq, lineq_basic, lineq_rate])
-        u = np.hstack([ueq, uineq_basic, uineq_rate])
+        l = np.hstack([
+            leq, lineq_basic, lineq_initial_rate, lineq_rate
+        ])
+        u = np.hstack([
+            ueq, uineq_basic, uineq_initial_rate, uineq_rate
+        ])
 
         # コスト行列
         P = self.P_base

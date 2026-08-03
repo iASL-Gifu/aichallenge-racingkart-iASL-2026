@@ -72,6 +72,12 @@ trajectory_switch:
   race_rejoin_retry_backoff_sec: 2.0 # [s] Race probe失敗後の即時再試行を抑止
   outer_lane_release_infeasible_cycles: 5 # 追越し後、対象が後方にいる状態でこの回数連続失敗したらL0/L2固定を解除
   outer_lane_release_behind_m: 0.5 # 追越し後、対象が進行方向への射影でこの距離以上後方なら解除を許可
+  outer_shadow_success_cycles: 3 # L0/L2ハード制約shadowがこの回数連続成功してから実MPCへ適用
+  outer_shadow_retry_interval_cycles: 3 # 失敗中のshadow再試行間隔（制御周期）
+  outer_shadow_timeout_sec: 2.0 # [s] 確定できなければ失敗車線としてPrepassへ渡す
+  outer_shadow_max_steer_rate_ratio: 1.05 # QP内制約後の操舵速度診断閾値（Commit条件には使用しない）
+  outer_failure_backoff_sec: 1.0 # [s] 失敗した外側車線を再選択しない時間
+  outer_failure_backoff_wps: 8 # 時間前でもこのWaypoint数を進めば再評価を許可
 
 prepass_lane_fallback:
   enabled: true
@@ -99,7 +105,7 @@ follow_control:
   lateral_distance: 1.2  # [m] 同一車線とみなす横方向距離
   spacing_kp: 1.2        # [1/s] target=front_speed+Kp*(distance-desired_distance)
   overtake_commit_success_cycles: 3 # 外側車線MPCと対象非重複予測の連続成功回数
-  overtake_commit_prediction_miss_cycles: 2 # Commit後、この周期数までの一時的な予測欠落ではCommit状態を保持（速度上乗せは停止）
+  overtake_commit_prediction_miss_sec: 0.20 # [s] Commit後の一時的な予測欠落を保持（期間中は速度上乗せを停止）
   overtake_speed_margin: 1.5 # [m/s] 追越し確定後に前方車速度へ加える速度差
   deadlock_escape_enabled: true # 追従対象と自車が停止した際に安全な前進probe/後退で脱出
   deadlock_ego_speed_threshold: 0.15 # [m/s]
@@ -241,6 +247,13 @@ v2x_obstacle_avoidance:
   parallel_abort_arc_behind: 0.5     # [m] Center累積弧長によるAbort後方範囲
   parallel_abort_arc_ahead: 5.0      # [m]
   parallel_abort_sec: 4.0            # [s] 同じ車両との並走が継続する時間
+  emergency_distance: 6.0            # [m] Center弧長上で近接速度制限を開始する前方距離
+  emergency_target_distance: 5.5     # [m] 近接速度制御の目標車間
+  emergency_spacing_kp: 1.5          # [1/s] 近接距離誤差による速度補正
+  emergency_lateral_clearance: 0.30  # [m] 車両包絡間の横空きがこれ以下なら速度制限
+  emergency_hard_clearance: 0.10     # [m] Commit解除候補となる車両包絡間の空き
+  emergency_hard_confirm_sec: 0.25   # [s] 同一追越し対象の危険が継続してからCommit解除
+  emergency_min_forward_dot: -0.20   # 自車方位への内積がこれ未満の明確な後方車はEmergencyBrakeから除外
 
 stopped_vehicle_overtake:
   speed_threshold: 0.3     # [m/s] 前走車を停止とみなす速度
