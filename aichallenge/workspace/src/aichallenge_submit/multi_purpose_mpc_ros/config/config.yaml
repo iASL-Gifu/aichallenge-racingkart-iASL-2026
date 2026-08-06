@@ -73,9 +73,10 @@ trajectory_switch:
   outer_lane_release_infeasible_cycles: 5 # 追越し後、対象が後方にいる状態でこの回数連続失敗したらL0/L2固定を解除
   outer_lane_release_behind_m: 0.5 # 追越し後、対象が進行方向への射影でこの距離以上後方なら解除を許可
   outer_shadow_success_cycles: 3 # L0/L2ハード制約shadowがこの回数連続成功してから実MPCへ適用
-  outer_shadow_retry_interval_cycles: 3 # 失敗中のshadow再試行間隔（制御周期）
+  outer_shadow_retry_interval_cycles: 6 # 失敗中のshadow再試行間隔（制御周期）
   outer_shadow_timeout_sec: 2.0 # [s] 確定できなければ失敗車線としてPrepassへ渡す
   outer_shadow_max_steer_rate_ratio: 1.05 # QP内制約後の操舵速度診断閾値（Commit条件には使用しない）
+  shadow_live_max_period_ratio: 0.75 # live MPCが制御周期のこの割合以内で終わった周期だけshadowを解く
   outer_failure_backoff_sec: 1.0 # [s] 失敗した外側車線を再選択しない時間
   outer_failure_backoff_wps: 8 # 時間前でもこのWaypoint数を進めば再評価を許可
 
@@ -119,6 +120,18 @@ follow_control:
   escape_creep_speed: 1.0 # [m/s] probe成功後の低速前進速度
   escape_forward_sec: 1.0 # [s] 低速前進後に追従状態を再評価
 
+# Wang et al. (2019) fuzzy adaptive MPC weights. The sparse QP structure is
+# built once; each control cycle updates only numeric P values through OSQP Px.
+fuzzy_weight:
+  enabled: false
+  lateral_error_full_scale: 1.5       # [m] NB/PBとなる横偏差
+  heading_error_full_scale_deg: 15.0  # [deg] NB/PBとなる方位偏差
+  q_lateral_min_ratio: 0.30           # Q[e_y]をゼロにしない安全下限
+  q_heading_min_ratio: 0.40           # Q[e_psi]をゼロにしない安全下限
+  steer_delta_min_ratio: 0.25         # 操舵変化量コストの下限
+  steer_delta_max_weight: 1000.0      # 曲率入力差分(kappa[k]-kappa[k-1])の最大重み
+  smoothing_sec: 0.15                 # 重み比の一次遅れ時定数
+
 center_lane_rejoin_stability:
   enabled: true
   constraint_diagnostics_enabled: true # L1 probeおよびL0/L2 SafetyRecovery時に境界幅・障害物・予測区間を詳細出力
@@ -153,10 +166,12 @@ mpc:
   a_min: -1.0 # m/s^2
   a_max: 2.5 # m/s^2
   delta_max_deg: 18.0 # degrees
-  steer_rate_max: 3.00 # rad/s max_steering_rate
+  steer_rate_max: 0.80 # rad/s max_steering_rate
   control_rate: 40.0 # Hz Ts=1/control_rate
   solve_time_budget_ms: 20.0 # 初回失敗後、安全マージンを緩和する追加再試行だけの時間上限
   max_prediction_fallback_cycles: 3 # 古い予測・制御列を再利用できる最大連続失敗周期
+  prediction_outer_boundary_guard: 0.10 # [m] 物理外周境界の内側へ追加する軽量な予測ガード
+  prediction_lateral_tolerance: 0.02 # [m] 解の採用時に許容する境界違反（OSQP数値誤差用）
   safety_recovery_speed: 1.0 # [m/s] 古い予測破棄後の全幅MPC回復中の上限速度
   safety_recovery_success_sec: 0.5 # [s] 全幅MPCが連続成功してから通常車線選択へ戻す時間
   #steering_tire_angle_gain_var: 1.639
@@ -179,7 +194,7 @@ mpc:
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  v_max: 40.0   # km/h
+  v_max: 20.0   # km/h
   ay_max: 18.0  # m/s^2, maximum lateral acceleration in curves
   # kappa_actual = kappa_cmd / (1 + understeer_coeff * v^2)
   # 0.002 gives about 16% curvature loss at 35 km/h.
@@ -232,7 +247,7 @@ v2x_obstacle_avoidance:
   v_max_safety: 40.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
   parallel_vehicle_half_width: 0.725 # [m] 並走横クリアランス用の相手車両半幅
-  parallel_ego_half_length: 1.0     # [m] 自車の全長2.0mに対する半長
+  parallel_ego_half_length: 1.2     # [m] 自車の全長2.0mに対する半長
   parallel_vehicle_half_length: 1.0 # [m] 相手車の全長2.0mに対する半長
   parallel_critical_clearance: 0.30  # [m] 車両包絡間の実空きがこれ以下なら強減速
   parallel_warning_clearance: 1.30   # [m] 車両包絡間の実空きがこれ以下なら並走減速
@@ -256,7 +271,7 @@ v2x_obstacle_avoidance:
   emergency_min_forward_dot: -0.20   # 自車方位への内積がこれ未満の明確な後方車はEmergencyBrakeから除外
 
 stopped_vehicle_overtake:
-  speed_threshold: 0.3     # [m/s] 前走車を停止とみなす速度
+  speed_threshold: 0.5     # [m/s] 前走車を停止とみなす速度
   max_speed: 10.0          # [m/s] 強制追い越し中の上限速度
   reverse_distance: 3.0    # [m] 安全な追い越しが解けない場合に後退を待つ車間
   infeasible_cycles: 4     # 後退待機へ入るMPC infeasible連続回数
@@ -311,6 +326,8 @@ stuck_recovery:
   post_reverse_pose_recovery_max_steer_deg: 20.0 # [deg] 姿勢回復前進の最大操舵角
   post_reverse_pose_recovery_prediction_sec: 1.0 # [s] 固定操舵候補の静的地図/V2X検査時間
   post_reverse_pose_recovery_footprint_radius: 1.13 # [m] 既存の後退掃引と同じ保守的な車体包絡半径
+  post_reverse_accurate_pose_creep_enabled: true # 正確な全幅MPCが連続した場合、姿勢修正用の低速前進候補を追加
+  post_reverse_accurate_pose_creep_footprint_radius: 0.80 # [m] 姿勢修正前進だけに使う実車半幅0.725m＋小マージン
   forward_cmd_threshold: 0.8
   stuck_time_threshold: 2.0
   forward_resume_gap: 4.0 # [m] 後退中、ラッチ前方車がこの距離以上前進し、かつ動いていればDRIVEへ戻す

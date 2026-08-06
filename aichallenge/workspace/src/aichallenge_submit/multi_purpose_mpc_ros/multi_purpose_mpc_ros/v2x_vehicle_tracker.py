@@ -744,6 +744,26 @@ def should_recover_from_mpc_stall(
     )
 
 
+def should_start_reverse_recovery(
+    *,
+    post_reverse_recovery_active,
+    post_reverse_retry_requested,
+    normal_reverse_requested,
+):
+    """Arbitrate reverse ownership after a completed reverse manoeuvre.
+
+    DRIVE confirmation, full-width recovery, forward-creep confirmation and
+    bounded traffic reassessment form one exclusive post-reverse state
+    machine.  While it owns the vehicle, ordinary positive-command,
+    close-obstacle and MPC-stall detectors must not start another reverse.
+    Only the saved-target retry path may explicitly hand ownership back to
+    StuckRecovery.
+    """
+    if post_reverse_recovery_active:
+        return bool(post_reverse_retry_requested)
+    return bool(normal_reverse_requested)
+
+
 def post_reverse_creep_response_failed(
     *,
     command_speed,

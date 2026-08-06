@@ -1,0 +1,1 @@
+ament_cmake_symlink_install_targets("TARGET_FILES" "/home/takenoyama/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/build/simple_pure_pursuit/simple_pure_pursuit" "TARGETS" "simple_pure_pursuit" "DESTINATION" "lib/simple_pure_pursuit")

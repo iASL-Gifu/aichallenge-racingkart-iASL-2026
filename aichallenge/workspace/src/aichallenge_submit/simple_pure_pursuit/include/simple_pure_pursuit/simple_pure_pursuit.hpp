@@ -5,6 +5,7 @@
 #include <autoware_auto_planning_msgs/msg/trajectory.hpp>
 #include <autoware_auto_planning_msgs/msg/trajectory_point.hpp>
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -18,6 +19,7 @@ using autoware_auto_planning_msgs::msg::Trajectory;
 using autoware_auto_planning_msgs::msg::TrajectoryPoint;
 using geometry_msgs::msg::Pose;
 using geometry_msgs::msg::PointStamped;
+using geometry_msgs::msg::PoseWithCovarianceStamped;
 using geometry_msgs::msg::Twist;
 using nav_msgs::msg::Odometry;
 
@@ -27,6 +29,7 @@ class SimplePurePursuit : public rclcpp::Node {
   
   // subscribers
   rclcpp::Subscription<Odometry>::SharedPtr sub_kinematics_;
+  rclcpp::Subscription<PoseWithCovarianceStamped>::SharedPtr sub_gnss_pose_;
   rclcpp::Subscription<Trajectory>::SharedPtr sub_trajectory_;
   
   // publishers
@@ -40,6 +43,7 @@ class SimplePurePursuit : public rclcpp::Node {
   // updated by subscribers
   Trajectory::SharedPtr trajectory_;
   Odometry::SharedPtr odometry_;
+  PoseWithCovarianceStamped::SharedPtr gnss_pose_;
 
 
 
@@ -51,6 +55,8 @@ class SimplePurePursuit : public rclcpp::Node {
   const bool use_external_target_vel_;
   const double external_target_vel_;
   const double steering_tire_angle_gain_;
+  const double gnss_timeout_sec_;
+  const double max_gnss_position_covariance_;
 
 
  private:

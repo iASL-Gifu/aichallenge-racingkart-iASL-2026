@@ -1,0 +1,5 @@
+source;share/simple_pure_pursuit/local_setup.bash
+source;share/simple_pure_pursuit/local_setup.dsv
+source;share/simple_pure_pursuit/local_setup.ps1
+source;share/simple_pure_pursuit/local_setup.sh
+source;share/simple_pure_pursuit/local_setup.zsh

@@ -12,6 +12,7 @@ from datetime import datetime
 from multi_purpose_mpc_ros.core.spatial_bicycle_models import (
     understeer_curvature_gain,
 )
+from multi_purpose_mpc_ros.fuzzy_weight_adapter import FuzzyWeightAdapter
 
 # Colors
 PREDICTION = '#BA4A00'
@@ -68,7 +69,7 @@ def is_plausible_mpc_prediction(
     current_position,
     lower_bounds,
     upper_bounds,
-    lateral_tolerance=0.5,
+    lateral_tolerance=0.02,
     max_start_distance=8.0,
     max_step_distance=5.0,
 ) -> bool:
@@ -96,6 +97,31 @@ def is_plausible_mpc_prediction(
         max_start_distance=max_start_distance,
         max_step_distance=max_step_distance,
     )
+
+
+def apply_outer_boundary_guard(
+    lower_bounds,
+    upper_bounds,
+    target_lane,
+    guard_margin,
+):
+    """Keep the MPC corridor away from the two physical course edges.
+
+    L0 touches the lower/right course edge and L2 touches the upper/left
+    edge. Full-width/Race driving touches both. L1 has only internal lane
+    edges, so it does not receive this additional wall guard.
+    """
+    lower = np.asarray(lower_bounds, dtype=float).copy()
+    upper = np.asarray(upper_bounds, dtype=float).copy()
+    guard = max(float(guard_margin), 0.0)
+    if target_lane is None:
+        lower += guard
+        upper -= guard
+    elif target_lane == 0:
+        lower += guard
+    elif target_lane == 2:
+        upper -= guard
+    return lower, upper
 
 
 def is_plausible_world_prediction(
@@ -252,12 +278,21 @@ class MPC:
             -sparse.eye(self.nx),
             format='csc'
         )
-        #Pも固定
-        self.P_base = sparse.block_diag([
-            sparse.kron(sparse.eye(self.N), self.Q),
-            self.QN,
-            sparse.kron(sparse.eye(self.N), self.R)
-        ], format='csc')
+        # Cost-matrix sparsity is fixed once. Fuzzy adaptation updates only
+        # this matrix's numeric CSC data through OSQP Px updates.
+        self._base_Q_diag = np.asarray(self.Q.diagonal(), dtype=float).copy()
+        self._base_R_diag = np.asarray(self.R.diagonal(), dtype=float).copy()
+        self._base_QN_diag = np.asarray(self.QN.diagonal(), dtype=float).copy()
+        self._active_Q_diag = self._base_Q_diag.copy()
+        self._fuzzy_weight_adapter = None
+        self._fuzzy_steer_delta_max_weight = 0.0
+        self._active_steer_delta_weight = 0.0
+        self._cost_constant_data = None
+        self._cost_q_lateral_data = None
+        self._cost_q_heading_data = None
+        self._cost_steer_delta_data = None
+        self._cost_values_dirty = False
+        self._rebuild_cost_matrix_structure()
 
         # A, B行列のスパース構造を完全に固定するためのインデックス事前計算
         row_A, col_A = [], []
@@ -292,6 +327,11 @@ class MPC:
         self.infeasibility_counter = 0
         self.solve_time_budget_ms = 20.0
         self.max_prediction_fallback_cycles = 3
+        # OUTER_COURSE_MARGIN is already included in the static bounds. This
+        # small extra guard prevents accepted predictions from riding exactly
+        # on that boundary, while the tolerance only absorbs solver noise.
+        self.prediction_outer_boundary_guard = 0.10
+        self.prediction_lateral_tolerance = 0.02
         self.used_prediction_fallback = False
         self.time_budget_exceeded = False
         self.recovery_requested = False
@@ -300,6 +340,8 @@ class MPC:
         # after reverse requires an exact OSQP_SOLVED result.
         self.last_solution_status = None
         self.last_solution_accurate = False
+        self.last_compute_time_ms = 0.0
+        self.last_build_time_ms = 0.0
         self.soft_target_lane_idx = None
         self.soft_target_start_e_y = 0.0
         self.soft_target_alpha = 0.0
@@ -311,6 +353,7 @@ class MPC:
         self._constraint_wp_ids = np.array([], dtype=int)
         self._constraint_target_lane = None
         self._constraint_safety_margin = 0.0
+        self._path_constraints_valid = True
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
         self.optimizer = osqp.OSQP()
@@ -349,12 +392,168 @@ class MPC:
 
     def update_Q(self, Q: np.ndarray):
         self.Q = Q
+        self._base_Q_diag = np.asarray(Q.diagonal(), dtype=float).copy()
+        self._rebuild_cost_matrix_structure()
+        self.osqp_initialized = False
 
     def update_R(self, R: np.ndarray):
         self.R = R
+        self._base_R_diag = np.asarray(R.diagonal(), dtype=float).copy()
+        self._rebuild_cost_matrix_structure()
+        self.osqp_initialized = False
 
     def update_QN(self, QN: np.ndarray):
         self.QN = QN
+        self._base_QN_diag = np.asarray(QN.diagonal(), dtype=float).copy()
+        self._rebuild_cost_matrix_structure()
+        self.osqp_initialized = False
+
+    @staticmethod
+    def _component_data_on_pattern(component, pattern):
+        """Align a sparse component with a fixed CSC matrix data order."""
+        aligned = np.zeros_like(pattern.data, dtype=float)
+        positions = {}
+        for col in range(pattern.shape[1]):
+            for data_index in range(pattern.indptr[col], pattern.indptr[col + 1]):
+                positions[(int(pattern.indices[data_index]), col)] = data_index
+        component = sparse.triu(component, format='coo')
+        for row, col, value in zip(component.row, component.col, component.data):
+            data_index = positions.get((int(row), int(col)))
+            if data_index is not None:
+                aligned[data_index] = float(value)
+        return aligned
+
+    def _rebuild_cost_matrix_structure(self) -> None:
+        """Build the fixed P sparsity and cache its four numeric components."""
+        variable_count = self.nx_N + self.nu_N
+        constant_diag = np.concatenate([
+            np.tile(
+                np.asarray([0.0, 0.0, self._base_Q_diag[2]]),
+                self.N,
+            ),
+            self._base_QN_diag,
+            np.tile(self._base_R_diag, self.N),
+        ])
+        constant = sparse.diags(
+            constant_diag, shape=(variable_count, variable_count), format='csc')
+
+        q_lateral = sparse.lil_matrix((variable_count, variable_count))
+        q_heading = sparse.lil_matrix((variable_count, variable_count))
+        for step in range(self.N):
+            q_lateral[step * self.nx, step * self.nx] = self._base_Q_diag[0]
+            q_heading[
+                step * self.nx + 1, step * self.nx + 1
+            ] = self._base_Q_diag[1]
+        q_lateral = q_lateral.tocsc()
+        q_heading = q_heading.tocsc()
+
+        # 0.5*w*(kappa[0]-kappa_previous)^2 plus the adjacent increments.
+        # The previous-curvature linear term is added to q in _init_problem.
+        steer_delta = sparse.lil_matrix((variable_count, variable_count))
+        steering_indices = [
+            self.nx_N + step * self.nu + 1 for step in range(self.N)
+        ]
+        if steering_indices:
+            steer_delta[steering_indices[0], steering_indices[0]] += 1.0
+        for previous, current in zip(steering_indices[:-1], steering_indices[1:]):
+            steer_delta[previous, previous] += 1.0
+            steer_delta[current, current] += 1.0
+            steer_delta[previous, current] -= 1.0
+            steer_delta[current, previous] -= 1.0
+        steer_delta = steer_delta.tocsc()
+
+        include_delta = (
+            self._fuzzy_weight_adapter is not None
+            and self._fuzzy_steer_delta_max_weight > 0.0
+        )
+        pattern_matrix = constant + q_lateral + q_heading
+        if include_delta:
+            # A positive coefficient is guaranteed by the configured floor,
+            # so these off-diagonal entries remain in OSQP's fixed structure.
+            pattern_matrix = (
+                pattern_matrix
+                + self._fuzzy_steer_delta_max_weight * steer_delta
+            )
+        self.P_base = sparse.triu(pattern_matrix, format='csc')
+        self.P_base.sort_indices()
+
+        self._cost_constant_data = self._component_data_on_pattern(
+            constant, self.P_base)
+        self._cost_q_lateral_data = self._component_data_on_pattern(
+            q_lateral, self.P_base)
+        self._cost_q_heading_data = self._component_data_on_pattern(
+            q_heading, self.P_base)
+        self._cost_steer_delta_data = self._component_data_on_pattern(
+            steer_delta, self.P_base)
+        self._active_Q_diag = self._base_Q_diag.copy()
+        self._active_steer_delta_weight = (
+            self._fuzzy_steer_delta_max_weight if include_delta else 0.0)
+        self._apply_cost_matrix_values(1.0, 1.0, 1.0)
+
+    def _apply_cost_matrix_values(
+        self, q_lateral_ratio, q_heading_ratio, steer_delta_ratio
+    ) -> None:
+        q_lateral_ratio = float(q_lateral_ratio)
+        q_heading_ratio = float(q_heading_ratio)
+        steer_delta_ratio = float(steer_delta_ratio)
+        self._active_Q_diag = self._base_Q_diag.copy()
+        self._active_Q_diag[0] *= q_lateral_ratio
+        self._active_Q_diag[1] *= q_heading_ratio
+        self._active_steer_delta_weight = (
+            self._fuzzy_steer_delta_max_weight * steer_delta_ratio
+            if self._fuzzy_weight_adapter is not None else 0.0
+        )
+        self.P_base.data[:] = (
+            self._cost_constant_data
+            + q_lateral_ratio * self._cost_q_lateral_data
+            + q_heading_ratio * self._cost_q_heading_data
+            + self._active_steer_delta_weight * self._cost_steer_delta_data
+        )
+        self._cost_values_dirty = True
+
+    def configure_fuzzy_weights(
+        self,
+        *,
+        enabled,
+        lateral_error_full_scale,
+        heading_error_full_scale_rad,
+        q_lateral_min_ratio,
+        q_heading_min_ratio,
+        steer_delta_min_ratio,
+        steer_delta_max_weight,
+        smoothing_sec,
+    ) -> None:
+        """Configure lightweight fuzzy weights before the first OSQP setup."""
+        if not enabled:
+            self._fuzzy_weight_adapter = None
+            self._fuzzy_steer_delta_max_weight = 0.0
+        else:
+            self._fuzzy_weight_adapter = FuzzyWeightAdapter(
+                lateral_error_full_scale=lateral_error_full_scale,
+                heading_error_full_scale_rad=heading_error_full_scale_rad,
+                q_lateral_min_ratio=q_lateral_min_ratio,
+                q_heading_min_ratio=q_heading_min_ratio,
+                steer_delta_min_ratio=steer_delta_min_ratio,
+                smoothing_sec=smoothing_sec,
+                control_period_sec=self.model.Ts,
+            )
+            self._fuzzy_steer_delta_max_weight = max(
+                float(steer_delta_max_weight), 0.0)
+        self._rebuild_cost_matrix_structure()
+        self.osqp_initialized = False
+
+    def _update_fuzzy_cost(self) -> None:
+        if self._fuzzy_weight_adapter is None:
+            return
+        ratios = self._fuzzy_weight_adapter.update(
+            self.model.spatial_state.e_y,
+            self.model.spatial_state.e_psi,
+        )
+        self._apply_cost_matrix_values(
+            ratios.q_lateral,
+            ratios.q_heading,
+            ratios.steer_delta,
+        )
 
     def set_soft_lateral_reference(
         self, lane_idx=None, start_e_y=0.0, alpha=0.0,
@@ -515,11 +714,14 @@ class MPC:
                 self.model.wp_id + 1,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
                 N, self.model.length, self.model.width, safety_margin)
+            self._path_constraints_valid = bool(
+                self.model.reference_path.last_constraints_valid)
         else:
             ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
             lb = self.model.reference_path.path_constraints[1][ref_wp_id]
             self.model.reference_path.border_cells.current_wp_id = ref_wp_id
+            self._path_constraints_valid = True
 
             # Update safety margin if provided as argument and different from current value
             if self.model.safety_margin != safety_margin:
@@ -528,8 +730,66 @@ class MPC:
                 lb += safety_margin_diff
 
                 infeasible_index = ub < lb
-                ub[infeasible_index] = 0.0
-                lb[infeasible_index] = 0.0
+                if np.any(infeasible_index):
+                    self._path_constraints_valid = False
+                    invalid_wp_ids = getattr(
+                        self.model.reference_path,
+                        'invalid_constraint_wp_ids',
+                        None,
+                    )
+                    if invalid_wp_ids is not None:
+                        for index in np.flatnonzero(infeasible_index):
+                            invalid_wp_id = int(
+                                (ref_wp_id + int(index))
+                                % self.model.reference_path.n_waypoints)
+                            if invalid_wp_id not in invalid_wp_ids:
+                                invalid_wp_ids.append(invalid_wp_id)
+
+        lb, ub = apply_outer_boundary_guard(
+            lb,
+            ub,
+            self._constraint_target_lane,
+            self.prediction_outer_boundary_guard,
+        )
+
+        # Validate the final bounds, including the extra physical-edge guard,
+        # before passing them to OSQP.  update_bounds() raises an uncaught
+        # ValueError when even one lower bound exceeds its upper bound.  Treat
+        # non-finite, mismatched, or inverted bounds as an ordinary infeasible
+        # MPC cycle so the controller can enter SafetyRecovery instead.
+        lb = np.asarray(lb, dtype=float)
+        ub = np.asarray(ub, dtype=float)
+        bounds_shape_valid = (
+            lb.shape == ub.shape
+            and lb.ndim == 1
+            and lb.size == N
+        )
+        if bounds_shape_valid:
+            invalid_bounds = (
+                ~np.isfinite(lb)
+                | ~np.isfinite(ub)
+                | (lb > ub)
+            )
+        else:
+            invalid_bounds = np.ones(max(lb.size, ub.size, 1), dtype=bool)
+
+        if np.any(invalid_bounds):
+            self._path_constraints_valid = False
+            invalid_indices = np.flatnonzero(invalid_bounds)
+            invalid_wp_ids = [
+                int((self.model.wp_id + 1 + int(index))
+                    % self.model.reference_path.n_waypoints)
+                for index in invalid_indices[:5]
+            ]
+            reference_invalid_wp_ids = getattr(
+                self.model.reference_path, 'invalid_constraint_wp_ids', None)
+            if reference_invalid_wp_ids is not None:
+                for invalid_wp_id in invalid_wp_ids:
+                    if invalid_wp_id not in reference_invalid_wp_ids:
+                        reference_invalid_wp_ids.append(invalid_wp_id)
+            raise ValueError(
+                "Invalid MPC path constraint bounds after outer boundary "
+                f"guard at waypoints {invalid_wp_ids}")
 
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
@@ -647,10 +907,15 @@ class MPC:
         P = self.P_base
 
         q = np.hstack([
-            -np.tile(np.diag(self.Q.toarray()), N) * xr[:-self.nx],
+            -np.tile(self._active_Q_diag, N) * xr[:-self.nx],
             -self.QN.dot(xr[-self.nx:]),
-            -np.tile(np.diag(self.R.toarray()), N) * ur
+            -np.tile(self._base_R_diag, N) * ur
         ])
+        if self._active_steer_delta_weight > 0.0:
+            previous_kappa = (
+                np.tan(self.previous_steering) / self.model.length)
+            q[self.nx_N + 1] -= (
+                self._active_steer_delta_weight * previous_kappa)
 
         t_vector = time.perf_counter()
 
@@ -662,6 +927,7 @@ class MPC:
             self.A0 = A_full.copy()
             self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=False, verbose=False)
             self.osqp_initialized = True
+            self._cost_values_dirty = False
 
             
         else:
@@ -675,7 +941,19 @@ class MPC:
         
             #self.optimizer.update(q=q, l=l, u=u)
           
-            self.optimizer.update(q=q, l=l, u=u, Ax=A_full.data)
+            update_arguments = {
+                "q": q,
+                "l": l,
+                "u": u,
+                "Ax": A_full.data,
+            }
+            if (
+                self._fuzzy_weight_adapter is not None
+                and self._cost_values_dirty
+            ):
+                update_arguments["Px"] = P.data
+            self.optimizer.update(**update_arguments)
+            self._cost_values_dirty = False
 
         t_update = time.perf_counter()
         self.startup +=(t_pref-t_start)
@@ -731,24 +1009,36 @@ class MPC:
         self.model.spatial_state = self.model.t2s(
             reference_state=self.model.temporal_state,
             reference_waypoint=self.model.current_waypoint)
+        self._update_fuzzy_cost()
 
         t0 = time.perf_counter()
 
-        base_wp_id = self.model.wp_id
-        self._init_problem(N, self.model.safety_margin)
-
-        t1 = time.perf_counter()
-        t2 = t1
-
         # Preserve last prediction as fallback when the solver temporarily fails
         prediction_backup = self.current_prediction
+        base_wp_id = self.model.wp_id
+        t1 = t0
+        t2 = t1
 
         try:
+            self._init_problem(N, self.model.safety_margin)
+            t1 = time.perf_counter()
+            t2 = t1
+
+            if not self._path_constraints_valid:
+                invalid_wp_ids = getattr(
+                    self.model.reference_path,
+                    'invalid_constraint_wp_ids',
+                    [],
+                )
+                raise ValueError(
+                    "No obstacle-free path corridor wide enough for vehicle "
+                    f"at waypoints {invalid_wp_ids[:5]}")
 
             dec = self.optimizer.solve()
-            if self.debug_counter % 20 == 0:
-                print(dec.info.status,flush=True)
             t2 = time.perf_counter()
+
+            if self.debug_counter % 20 == 0:
+                print(dec.info.status, flush=True)
 
             if is_primal_infeasible(dec):
                 # Limit only the additional relaxed retries. The initial
@@ -771,7 +1061,9 @@ class MPC:
 
                     if is_valid_osqp_solution(dec):
                         if self.last_solved_wp_id != self.model.wp_id:
-                            print(f"Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
+                            print(
+                                f"Relaxed safety margin by {relaxed_safety_margin} "
+                                f"({5-i}/5) to solve the problem")
                         break
                     if not is_primal_infeasible(dec):
                         break
@@ -800,6 +1092,7 @@ class MPC:
                 (self.model.temporal_state.x, self.model.temporal_state.y),
                 self._prediction_lower_bounds,
                 self._prediction_upper_bounds,
+                lateral_tolerance=self.prediction_lateral_tolerance,
             ):
                 raise ValueError("OSQP returned an implausible prediction")
 
@@ -825,7 +1118,10 @@ class MPC:
             max_delta = np.max(np.abs(control_signals[1:len(control_signals)//3*2:2]))
 
             if self.infeasibility_counter > (N - 1):
-                print(f'Problem solved after {self.infeasibility_counter} infeasible iterations')
+                print(
+                    f'Problem solved after {self.infeasibility_counter} '
+                    'infeasible iterations')
+
             self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
 
@@ -851,7 +1147,7 @@ class MPC:
             fallback_allowed = can_reuse_prediction_fallback(
                 failure_cycle,
                 self.max_prediction_fallback_cycles,
-                fallback_prediction_valid,
+                fallback_prediction_valid and self._path_constraints_valid,
                 fallback_control_valid,
             )
 
@@ -872,12 +1168,18 @@ class MPC:
 
             self.infeasibility_counter += 1
 
-        if self.infeasibility_counter > (N - 1) and self.infeasibility_counter % 100 == 0:
+        if (
+            self.infeasibility_counter > (N - 1)
+            and self.infeasibility_counter % 100 == 0
+        ):
             now = datetime.now().strftime("%H:%M:%S.%f")
             print('No control signal computed!')
             print(now)
 
         self.debug_counter += 1
+        self.last_build_time_ms = max((t1 - t0) * 1000.0, 0.0)
+        self.last_compute_time_ms = max(
+            (time.perf_counter() - t0) * 1000.0, 0.0)
 
         '''
         if self.debug_counter % 20 == 0:    

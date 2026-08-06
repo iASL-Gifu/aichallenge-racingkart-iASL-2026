@@ -37,6 +37,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     should_count_mpc_recovery_success,
     should_allow_post_reverse_deadlock_retry,
     should_recover_from_mpc_stall,
+    should_start_reverse_recovery,
     should_hold_follow_escape_exclusive,
     should_release_active_overtake_distance_gate,
     should_reset_overtake_latch_for_target_change,
@@ -58,6 +59,27 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
 
 
 class StoppedVehicleSafetyTest(unittest.TestCase):
+    def test_post_reverse_recovery_masks_every_normal_reverse_trigger(self):
+        self.assertFalse(should_start_reverse_recovery(
+            post_reverse_recovery_active=True,
+            post_reverse_retry_requested=False,
+            normal_reverse_requested=True,
+        ))
+
+    def test_post_reverse_recovery_allows_only_its_bounded_retry(self):
+        self.assertTrue(should_start_reverse_recovery(
+            post_reverse_recovery_active=True,
+            post_reverse_retry_requested=True,
+            normal_reverse_requested=False,
+        ))
+
+    def test_normal_reverse_triggers_resume_after_exclusive_release(self):
+        self.assertTrue(should_start_reverse_recovery(
+            post_reverse_recovery_active=False,
+            post_reverse_retry_requested=False,
+            normal_reverse_requested=True,
+        ))
+
     def test_post_reverse_deadlock_retry_requires_blocked_stopped_lead(self):
         base = {
             "post_reverse_recovery_active": True,

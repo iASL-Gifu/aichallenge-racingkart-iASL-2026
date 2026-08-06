@@ -84,6 +84,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     should_count_mpc_recovery_success,
     should_allow_post_reverse_deadlock_retry,
     should_recover_from_mpc_stall,
+    should_start_reverse_recovery,
     should_hold_follow_escape_exclusive,
     should_release_active_overtake_distance_gate,
     should_reset_overtake_latch_for_target_change,
@@ -133,7 +134,7 @@ def array_to_ackermann_control_command(stamp, u: np.ndarray, acc: float) -> Acke
     msg.stamp = stamp
     msg.lateral.stamp = stamp
     msg.lateral.steering_tire_angle = u[1]
-    msg.lateral.steering_tire_rotation_rate = 2.0
+    msg.lateral.steering_tire_rotation_rate = 0.6
     msg.longitudinal.stamp = stamp
     msg.longitudinal.speed = u[0]
     msg.longitudinal.acceleration = acc
@@ -516,10 +517,34 @@ class MPCController(Node):
                 mpc_cfg.use_max_kappa_pred,
                 mpc_cfg.understeer_coeff)
 
+            fuzzy_cfg = getattr(self._cfg, "fuzzy_weight", None)
+            fuzzy_enabled = bool(getattr(fuzzy_cfg, "enabled", False))
+            mpc.configure_fuzzy_weights(
+                enabled=fuzzy_enabled,
+                lateral_error_full_scale=float(getattr(
+                    fuzzy_cfg, "lateral_error_full_scale", 1.5)),
+                heading_error_full_scale_rad=np.deg2rad(float(getattr(
+                    fuzzy_cfg, "heading_error_full_scale_deg", 15.0))),
+                q_lateral_min_ratio=float(getattr(
+                    fuzzy_cfg, "q_lateral_min_ratio", 0.30)),
+                q_heading_min_ratio=float(getattr(
+                    fuzzy_cfg, "q_heading_min_ratio", 0.40)),
+                steer_delta_min_ratio=float(getattr(
+                    fuzzy_cfg, "steer_delta_min_ratio", 0.25)),
+                steer_delta_max_weight=float(getattr(
+                    fuzzy_cfg, "steer_delta_max_weight", mpc_R[1])),
+                smoothing_sec=float(getattr(
+                    fuzzy_cfg, "smoothing_sec", 0.15)),
+            )
+
             mpc.solve_time_budget_ms = max(float(getattr(
                 cfg_mpc, "solve_time_budget_ms", 20.0)), 0.0)
             mpc.max_prediction_fallback_cycles = max(int(getattr(
                 cfg_mpc, "max_prediction_fallback_cycles", 3)), 0)
+            mpc.prediction_outer_boundary_guard = max(float(getattr(
+                cfg_mpc, "prediction_outer_boundary_guard", 0.10)), 0.0)
+            mpc.prediction_lateral_tolerance = max(float(getattr(
+                cfg_mpc, "prediction_lateral_tolerance", 0.02)), 0.0)
 
 
             return mpc_cfg, mpc
@@ -812,9 +837,13 @@ class MPCController(Node):
         self._outer_shadow_success_cycles_required = max(int(getattr(
             switch_cfg, "outer_shadow_success_cycles", 3)), 1)
         self._outer_shadow_retry_interval_cycles = max(int(getattr(
-            switch_cfg, "outer_shadow_retry_interval_cycles", 3)), 1)
+            switch_cfg, "outer_shadow_retry_interval_cycles", 6)), 1)
         self._outer_shadow_timeout_sec = max(float(getattr(
             switch_cfg, "outer_shadow_timeout_sec", 2.0)), 0.0)
+        self._shadow_live_max_period_ratio = float(np.clip(getattr(
+            switch_cfg, "shadow_live_max_period_ratio", 0.75),
+            0.0, 1.0))
+        self._shadow_budget_deferred_since = None
         self._outer_shadow_max_steer_rate_ratio = float(np.clip(getattr(
             switch_cfg, "outer_shadow_max_steer_rate_ratio", 1.05),
             0.0, 10.0))
@@ -1201,6 +1230,13 @@ class MPCController(Node):
             "post_reverse_pose_recovery_prediction_sec", 1.0)), 0.1)
         self._post_reverse_pose_recovery_footprint_radius = max(float(get_cfg(
             "post_reverse_pose_recovery_footprint_radius", 1.13)), 0.0)
+        self._post_reverse_accurate_pose_creep_enabled = bool(get_cfg(
+            "post_reverse_accurate_pose_creep_enabled", True))
+        self._post_reverse_accurate_pose_creep_footprint_radius = max(
+            float(get_cfg(
+                "post_reverse_accurate_pose_creep_footprint_radius", 0.80)),
+            0.0,
+        )
         self._stuck_forward_cmd_threshold = float(get_cfg("forward_cmd_threshold", 0.8))
         self._stuck_time_threshold = float(get_cfg("stuck_time_threshold", 2.0))
         self._stuck_gnss_distance_threshold = float(get_cfg("gnss_distance_threshold", 0.3))
@@ -2230,7 +2266,11 @@ class MPCController(Node):
         )
 
     def _post_reverse_safe_creep_rollout_candidate(
-        self, pose, now_sec: float, preferred_steer: float
+        self,
+        pose,
+        now_sec: float,
+        preferred_steer: float,
+        footprint_radius=None,
     ):
         """Find a map/V2X-safe steer for a short post-reverse creep.
 
@@ -2281,11 +2321,13 @@ class MPCController(Node):
                 self._post_reverse_pose_recovery_prediction_sec / dt)),
         )
         wheelbase = max(float(self._cfg.bicycle_model.length), 0.1)
-        clearance = (
+        rollout_footprint_radius = (
             self._post_reverse_pose_recovery_footprint_radius
-            + self._v2x_vehicle_radius
-            + 0.10
+            if footprint_radius is None
+            else max(float(footprint_radius), 0.0)
         )
+        clearance = (
+            rollout_footprint_radius + self._v2x_vehicle_radius + 0.10)
         best = None
         for steer in candidate_steers:
             x = float(pose.x)
@@ -2295,7 +2337,7 @@ class MPCController(Node):
             footprint_became_free = self._map.static_disk_is_free(
                 x,
                 y,
-                self._post_reverse_pose_recovery_footprint_radius,
+                rollout_footprint_radius,
             )
             for step in range(1, steps + 1):
                 yaw_rate = speed / wheelbase * math.tan(steer)
@@ -2314,7 +2356,7 @@ class MPCController(Node):
                 full_footprint_free = self._map.static_disk_is_free(
                     x,
                     y,
-                    self._post_reverse_pose_recovery_footprint_radius,
+                    rollout_footprint_radius,
                 )
                 if footprint_became_free and not full_footprint_free:
                     safe = False
@@ -2374,6 +2416,15 @@ class MPCController(Node):
     ) -> None:
         """Detect and resolve a stopped-follow deadlock without blind motion."""
         if not self._follow_deadlock_escape_enabled:
+            return
+        if (
+            self._stuck_recovery_until is not None
+            or self._post_reverse_full_width_recovery_active
+        ):
+            # StuckRecovery and its post-reverse confirmation own every
+            # longitudinal recovery decision until they explicitly release
+            # control.  Do not let the ordinary FollowDeadlock detector arm a
+            # competing reverse or replace its saved target meanwhile.
             return
 
         position = self._follow_deadlock_position(pose)
@@ -2655,9 +2706,14 @@ class MPCController(Node):
         """Route an unlatched, close stopped blocker into follow/reverse recovery."""
         if vehicle_id is None:
             return
-        if self._stuck_recovery_until is not None:
+        if (
+            self._stuck_recovery_until is not None
+            or self._post_reverse_full_width_recovery_active
+        ):
             # Do not reset reverse-distance bookkeeping after the shift/reverse
-            # sequence has already started.
+            # sequence has already started. Post-reverse recovery also keeps
+            # exclusive ownership until its saved-target reassessment either
+            # releases control or explicitly arms the bounded retry.
             return
         if (
             self._prepass_retry_after_reverse
@@ -4361,6 +4417,40 @@ class MPCController(Node):
             minimum_clearance=minimum_clearance,
         )
 
+    def _shadow_probe_has_live_budget(self) -> bool:
+        """Allow a shadow solve only when the live solve left CPU headroom."""
+        period_ms = 1000.0 / max(
+            float(self._cfg.mpc.control_rate), 1e-6)
+        live_ms = max(float(getattr(
+            self._mpc, "last_compute_time_ms", math.inf)), 0.0)
+        return bool(
+            live_ms <= period_ms * self._shadow_live_max_period_ratio)
+
+    def _update_shadow_budget_pause(
+        self, *, available: bool, now_sec: float
+    ) -> None:
+        """Pause probe timeouts while CPU budget prevents shadow attempts."""
+        probe_timer_active = bool(
+            self._outer_shadow_started_at is not None
+            or self._race_rejoin_probe_started_at is not None
+        )
+        if not probe_timer_active:
+            self._shadow_budget_deferred_since = None
+            return
+        if not available:
+            if self._shadow_budget_deferred_since is None:
+                self._shadow_budget_deferred_since = float(now_sec)
+            return
+        if self._shadow_budget_deferred_since is None:
+            return
+        paused_sec = max(
+            float(now_sec) - self._shadow_budget_deferred_since, 0.0)
+        if self._outer_shadow_started_at is not None:
+            self._outer_shadow_started_at += paused_sec
+        if self._race_rejoin_probe_started_at is not None:
+            self._race_rejoin_probe_started_at += paused_sec
+        self._shadow_budget_deferred_since = None
+
     def _reset_outer_lane_shadow(self, *, clear_commit: bool = True) -> None:
         """Clear the pending hard L0/L2 feasibility probe."""
         self._outer_shadow_lane_idx = None
@@ -5488,11 +5578,18 @@ class MPCController(Node):
             infeasibility_counter=self._mpc.infeasibility_counter,
             has_fresh_valid_prediction=has_fresh_valid_prediction,
         )
-        if is_stuck_state and (
+        normal_reverse_requested = bool(
             u[0] > self._stuck_forward_cmd_threshold
             or should_recover_from_close_obstacle
             or recover_from_mpc_stall
-        ):
+        )
+        reverse_requested = should_start_reverse_recovery(
+            post_reverse_recovery_active=(
+                self._post_reverse_full_width_recovery_active),
+            post_reverse_retry_requested=post_reverse_retry_requested,
+            normal_reverse_requested=normal_reverse_requested,
+        )
+        if is_stuck_state and reverse_requested:
             if self._stuck_since is None:
                 # gnss_is_stuck already covers the observation period, so an
                 # MPC stall must not wait for the same duration a second time.
@@ -5502,7 +5599,9 @@ class MPCController(Node):
                     else now_sec
                 )
             elif now_sec - self._stuck_since >= self._stuck_time_threshold:
-                if post_reverse_retry_requested:
+                starting_post_reverse_retry = bool(
+                    post_reverse_retry_requested)
+                if starting_post_reverse_retry:
                     self.get_logger().warn(
                         "[PostReverseDeadlockRetry] accurate full-width MPC "
                         "did not provide an executable escape from the "
@@ -5531,7 +5630,7 @@ class MPCController(Node):
                     self._post_reverse_creep_motion_start_gnss_xy = None
                     self._mpc_safety_recovery_active = False
                     self._mpc_safety_recovery_success_cycles = 0
-                if recover_from_mpc_stall:
+                if recover_from_mpc_stall and not starting_post_reverse_retry:
                     self.get_logger().warn(
                         "[MPCStallRecovery] starting reverse after GNSS "
                         f"movement stayed below "
@@ -8727,22 +8826,32 @@ class MPCController(Node):
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
 
-        self._run_outer_lane_shadow_probe(
-            predicted_pose,
-            recovery_active=recovery_active,
+        shadow_budget_available = self._shadow_probe_has_live_budget()
+        self._update_shadow_budget_pause(
+            available=shadow_budget_available,
             now_sec=current_time_sec,
         )
-
-        # The Race solve is a shadow feasibility check only.  It runs after
-        # the live Center solve, never publishes a command, and is active only
-        # during the short Center-to-Race handoff window.
-        self._run_race_rejoin_probe(
-            predicted_pose,
-            recovery_active=recovery_active,
-            now_sec=current_time_sec,
-            heading_ok=race_rejoin_probe_heading_ok,
-            heading_release_exceeded=race_rejoin_probe_heading_released,
-        )
+        if shadow_budget_available:
+            # At most one extra N=25 solve is allowed in a control cycle.
+            # Outer-lane validation owns priority while an overtake request
+            # is pending; Race handoff is evaluated on a later free cycle.
+            if self._outer_shadow_lane_idx in (0, 2):
+                self._run_outer_lane_shadow_probe(
+                    predicted_pose,
+                    recovery_active=recovery_active,
+                    now_sec=current_time_sec,
+                )
+            else:
+                # The Race solve is a feasibility check only and never
+                # publishes its command.
+                self._run_race_rejoin_probe(
+                    predicted_pose,
+                    recovery_active=recovery_active,
+                    now_sec=current_time_sec,
+                    heading_ok=race_rejoin_probe_heading_ok,
+                    heading_release_exceeded=
+                        race_rejoin_probe_heading_released,
+                )
 
         if self._mpc.used_prediction_fallback:
             self._mpc_prediction_fallback_cycles += 1
@@ -10075,6 +10184,7 @@ class MPCController(Node):
             normal_forward_prediction = bool(
                 mpc_forward_prediction and prediction_heading_ok)
             safe_creep_rollout_steer = None
+            accurate_pose_creep = False
             if (
                 full_width_applied
                 and feasible_accurate_solution
@@ -10086,6 +10196,30 @@ class MPCController(Node):
                     self._post_reverse_safe_creep_rollout_candidate(
                         pose, current_time_sec, float(u[1]))
                 )
+                if (
+                    safe_creep_rollout_steer is None
+                    and self._post_reverse_accurate_pose_creep_enabled
+                    and current_heading_error
+                        > self._post_reverse_creep_max_heading_error
+                ):
+                    # A conservative circumscribed disk can reject every
+                    # short rollout when the kart is already close to a wall,
+                    # even though the live full-width MPC itself is accurate.
+                    # In that narrow case, retry the same map/V2X/heading
+                    # rollout with the physical lateral envelope.  The result
+                    # still needs the normal consecutive-solve confirmation
+                    # before any speed command is released.
+                    safe_creep_rollout_steer = (
+                        self._post_reverse_safe_creep_rollout_candidate(
+                            pose,
+                            current_time_sec,
+                            float(u[1]),
+                            footprint_radius=(
+                                self._post_reverse_accurate_pose_creep_footprint_radius),
+                        )
+                    )
+                    accurate_pose_creep = (
+                        safe_creep_rollout_steer is not None)
             safe_creep_rollout = safe_creep_rollout_steer is not None
             executable_forward_prediction = bool(
                 normal_forward_prediction or safe_creep_rollout)
@@ -10161,7 +10295,7 @@ class MPCController(Node):
                     f"vehicle_id={recovery_target_id}, "
                     f"success_cycles={self._post_reverse_creep_success_cycles}, "
                     f"speed={self._post_reverse_creep_speed:.2f}m/s, "
-                    f"mode={'mpc' if normal_forward_prediction else 'safe_rollout'}, "
+                    f"mode={'mpc' if normal_forward_prediction else 'accurate_mpc_pose_creep' if accurate_pose_creep else 'safe_rollout'}, "
                     f"heading_error={math.degrees(current_heading_error):.1f}deg, "
                     f"predicted_heading_error={predicted_heading_text}"
                     f"{steer_text}"
@@ -10573,18 +10707,18 @@ class MPCController(Node):
             self._control()
 
     def stop(self):
-        # Wait for stopping
+        # Never re-enter MPC after an exception.  The failed problem may still
+        # contain invalid bounds, and calling _control() here can reproduce the
+        # original exception before a safe command is published.
         self.get_logger().warn("----------------------")
         self.get_logger().warn("Stopping...")
         self.get_logger().warn("----------------------")
-        timeout_time = self.get_clock().now() + rclpy.time.Duration(seconds=5)
-        while self._odom.twist.twist.linear.x > 0.1 and self.get_clock().now() < timeout_time:
-            self._enable_control = False
-            self._control()
-
-        # Publish zero command to stop the car completely
-        zero_cmd = self._create_ackerman_control_command(self.get_clock().now(), [0.0, 0.0], 0.0, False)
-        self._command_pub.publish(zero_cmd)
+        self._enable_control = False
+        self._last_acc = 0.0
+        self._last_u = np.array([0.0, 0.0])
+        self._car.drive([0.0, 0.0])
+        self._publish_control_command(
+            self.get_clock().now(), np.array([0.0, 0.0]), 0.0, False)
 
         self.get_logger().warn(">> Stop Completed!")
 
