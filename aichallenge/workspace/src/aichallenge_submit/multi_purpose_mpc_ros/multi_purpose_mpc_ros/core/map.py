@@ -89,7 +89,6 @@ class Map:
         # Containers for user-specified additional obstacles and boundaries
         self.obstacles = list()
         self.boundaries = list()
-        self.revision = 0
 
         self.data_backup = self.data.copy()
 
@@ -198,7 +197,6 @@ class Map:
     def reset_map(self):
         self.data = self.data_backup.copy()
         self.obstacles = list()
-        self.revision += 1
 
     def add_obstacles(self, obstacles):
         """

@@ -51,34 +51,15 @@ reference_path:
 trajectory_switch:
   enter_center_wps: 20   # 前方車がこのWaypoint差未満ならCenterへ切り替え
   exit_center_wps: 25    # Center中はこのWaypoint差を超えるまで維持
-  overtake_latch_max_distance: 18.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
-  overtake_latch_release_distance: 22.0 # [m] ラッチ後はこの距離以上になるまで解除しない（距離揺れ対策）
+  overtake_latch_max_distance: 15.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
   center_lane_rejoin_behind_wps: 6 # 追い越した車が後方へこの差以上 離れたらCenter軌道のL1へ戻る
   behind_release_wps: 12 # 追い越した車が後方へこの差以上離れるまで維持
   min_hold_sec: 1.0      # 切り替え直後の再切り替え禁止時間
   lane_change_cooldown_sec: 2.0 # L0/L1/L2の目標変更後、次の車線変更を禁止する時間
   exit_confirm_sec: 0.5  # Race復帰条件の継続確認時間
   race_rejoin_max_heading_deg: 10.0 # Race/Centerの方位差がこれ以下の地点でRaceへ復帰
-  race_rejoin_probe_start_heading_deg: 12.0 # [deg] この方位差以内でRace shadow probeを開始
-  race_rejoin_probe_release_heading_deg: 15.0 # [deg] probe成功後もこの方位差までは成功状態を保持
-  race_rejoin_direct_max_position_gap: 0.75 # [m] これ以下ならL1を介さずRace MPCを直接probe
-  race_rejoin_probe_success_cycles: 3 # Race MPCがこの回数連続で正確に解けた場合だけRaceへ切り替える
-  race_handoff_ramp_sec: 1.5 # [s] 位置差が大きい場合にRace参照へ移す最低時間
-  race_handoff_max_reference_speed: 0.7 # [m/s] 全幅制約中のRace参照への最大横移動速度
-  race_handoff_max_position_gap: 3.0 # [m] これを超えるRace横目標は対応誤りとして既存L1復帰へ戻す
-  race_handoff_max_target_step: 0.75 # [m/wp] 予測区間内でこれを超えて飛ぶRace横目標を使用しない
-  race_handoff_guard_extra_lookahead_wps: 10 # MPC予測26点に加え、Guardだけが先行検査するWaypoint数
-  race_rejoin_probe_timeout_sec: 1.0 # [s] Race probe不成立時は既存のL1復帰へ戻す
-  race_rejoin_retry_backoff_sec: 2.0 # [s] Race probe失敗後の即時再試行を抑止
   outer_lane_release_infeasible_cycles: 5 # 追越し後、対象が後方にいる状態でこの回数連続失敗したらL0/L2固定を解除
   outer_lane_release_behind_m: 0.5 # 追越し後、対象が進行方向への射影でこの距離以上後方なら解除を許可
-  outer_shadow_success_cycles: 3 # L0/L2ハード制約shadowがこの回数連続成功してから実MPCへ適用
-  outer_shadow_retry_interval_cycles: 6 # 失敗中のshadow再試行間隔（制御周期）
-  outer_shadow_timeout_sec: 2.0 # [s] 確定できなければ失敗車線としてPrepassへ渡す
-  outer_shadow_max_steer_rate_ratio: 1.05 # QP内制約後の操舵速度診断閾値（Commit条件には使用しない）
-  shadow_live_max_period_ratio: 0.75 # live MPCが制御周期のこの割合以内で終わった周期だけshadowを解く
-  outer_failure_backoff_sec: 1.0 # [s] 失敗した外側車線を再選択しない時間
-  outer_failure_backoff_wps: 8 # 時間前でもこのWaypoint数を進めば再評価を許可
 
 prepass_lane_fallback:
   enabled: true
@@ -86,7 +67,7 @@ prepass_lane_fallback:
   recovery_stable_sec: 0.5 # 全幅解除後、MPC正常かつ候補車線基準の車両安定条件がこの時間続いてから代替車線を選択
   recovery_timeout_sec: 5.0 # 全幅回復がこの時間成立しなければラッチ対象を再評価。通過不可/後方危険なら追従、近すぎて通過可能なら後退後に再評価
   follow_retry_sec: 2.0 # [s] 追従へ移行後も、この周期で外側車線の通過幅とV2X競合を再評価する
-  follow_retry_max_distance: 18.0 # [m] 追従から追い越しを再評価する最大距離（この値未満のみ）
+  follow_retry_max_distance: 15.0 # [m] 追従から追い越しを再評価する最大距離（この値未満のみ）
   behind_release_longitudinal: 0.5 # [m] 対象がこの距離より後方にいる状態が継続したらPrepassを解除
   behind_release_confirm_sec: 0.25 # [s] V2X位置揺れで誤解除しないための後方判定継続時間
   max_heading_error_deg: 10.0 # [deg] 候補車線中心軌道に対するPrepass回復時の許容方位誤差
@@ -105,9 +86,6 @@ follow_control:
   desired_distance: 8.0  # [m] 目標車間距離
   lateral_distance: 1.2  # [m] 同一車線とみなす横方向距離
   spacing_kp: 1.2        # [1/s] target=front_speed+Kp*(distance-desired_distance)
-  overtake_commit_success_cycles: 3 # 外側車線MPCと対象非重複予測の連続成功回数
-  overtake_commit_prediction_miss_sec: 0.20 # [s] Commit後の一時的な予測欠落を保持（期間中は速度上乗せを停止）
-  overtake_speed_margin: 1.5 # [m/s] 追越し確定後に前方車速度へ加える速度差
   deadlock_escape_enabled: true # 追従対象と自車が停止した際に安全な前進probe/後退で脱出
   deadlock_ego_speed_threshold: 0.15 # [m/s]
   deadlock_lead_speed_threshold: 0.3 # [m/s]
@@ -119,18 +97,6 @@ follow_control:
   escape_reevaluate_sec: 0.75 # [s] 前後とも不安全な場合の再評価周期
   escape_creep_speed: 1.0 # [m/s] probe成功後の低速前進速度
   escape_forward_sec: 1.0 # [s] 低速前進後に追従状態を再評価
-
-# Wang et al. (2019) fuzzy adaptive MPC weights. The sparse QP structure is
-# built once; each control cycle updates only numeric P values through OSQP Px.
-fuzzy_weight:
-  enabled: false
-  lateral_error_full_scale: 1.5       # [m] NB/PBとなる横偏差
-  heading_error_full_scale_deg: 15.0  # [deg] NB/PBとなる方位偏差
-  q_lateral_min_ratio: 0.30           # Q[e_y]をゼロにしない安全下限
-  q_heading_min_ratio: 0.40           # Q[e_psi]をゼロにしない安全下限
-  steer_delta_min_ratio: 0.25         # 操舵変化量コストの下限
-  steer_delta_max_weight: 1000.0      # 曲率入力差分(kappa[k]-kappa[k-1])の最大重み
-  smoothing_sec: 0.15                 # 重み比の一次遅れ時定数
 
 center_lane_rejoin_stability:
   enabled: true
@@ -166,12 +132,10 @@ mpc:
   a_min: -1.0 # m/s^2
   a_max: 2.5 # m/s^2
   delta_max_deg: 18.0 # degrees
-  steer_rate_max: 0.80 # rad/s max_steering_rate
+  steer_rate_max: 0.60 # rad/s max_steering_rate
   control_rate: 40.0 # Hz Ts=1/control_rate
   solve_time_budget_ms: 20.0 # 初回失敗後、安全マージンを緩和する追加再試行だけの時間上限
   max_prediction_fallback_cycles: 3 # 古い予測・制御列を再利用できる最大連続失敗周期
-  prediction_outer_boundary_guard: 0.10 # [m] 物理外周境界の内側へ追加する軽量な予測ガード
-  prediction_lateral_tolerance: 0.02 # [m] 解の採用時に許容する境界違反（OSQP数値誤差用）
   safety_recovery_speed: 1.0 # [m/s] 古い予測破棄後の全幅MPC回復中の上限速度
   safety_recovery_success_sec: 0.5 # [s] 全幅MPCが連続成功してから通常車線選択へ戻す時間
   #steering_tire_angle_gain_var: 1.639
@@ -194,11 +158,11 @@ mpc:
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  v_max: 20.0   # km/h
+  v_max: 40.0   # km/h
   ay_max: 18.0  # m/s^2, maximum lateral acceleration in curves
   # kappa_actual = kappa_cmd / (1 + understeer_coeff * v^2)
   # 0.002 gives about 16% curvature loss at 35 km/h.
-  understeer_coeff: 0.004  # [s^2/m^2]
+  understeer_coeff: 0.005  # [s^2/m^2]
   Q: [3000000.0, 55000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
@@ -247,7 +211,7 @@ v2x_obstacle_avoidance:
   v_max_safety: 40.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
   parallel_vehicle_half_width: 0.725 # [m] 並走横クリアランス用の相手車両半幅
-  parallel_ego_half_length: 1.2     # [m] 自車の全長2.0mに対する半長
+  parallel_ego_half_length: 1.0     # [m] 自車の全長2.0mに対する半長
   parallel_vehicle_half_length: 1.0 # [m] 相手車の全長2.0mに対する半長
   parallel_critical_clearance: 0.30  # [m] 車両包絡間の実空きがこれ以下なら強減速
   parallel_warning_clearance: 1.30   # [m] 車両包絡間の実空きがこれ以下なら並走減速
@@ -262,16 +226,9 @@ v2x_obstacle_avoidance:
   parallel_abort_arc_behind: 0.5     # [m] Center累積弧長によるAbort後方範囲
   parallel_abort_arc_ahead: 5.0      # [m]
   parallel_abort_sec: 4.0            # [s] 同じ車両との並走が継続する時間
-  emergency_distance: 6.0            # [m] Center弧長上で近接速度制限を開始する前方距離
-  emergency_target_distance: 5.5     # [m] 近接速度制御の目標車間
-  emergency_spacing_kp: 1.5          # [1/s] 近接距離誤差による速度補正
-  emergency_lateral_clearance: 0.30  # [m] 車両包絡間の横空きがこれ以下なら速度制限
-  emergency_hard_clearance: 0.10     # [m] Commit解除候補となる車両包絡間の空き
-  emergency_hard_confirm_sec: 0.25   # [s] 同一追越し対象の危険が継続してからCommit解除
-  emergency_min_forward_dot: -0.20   # 自車方位への内積がこれ未満の明確な後方車はEmergencyBrakeから除外
 
 stopped_vehicle_overtake:
-  speed_threshold: 0.5     # [m/s] 前走車を停止とみなす速度
+  speed_threshold: 0.3     # [m/s] 前走車を停止とみなす速度
   max_speed: 10.0          # [m/s] 強制追い越し中の上限速度
   reverse_distance: 3.0    # [m] 安全な追い越しが解けない場合に後退を待つ車間
   infeasible_cycles: 4     # 後退待機へ入るMPC infeasible連続回数
@@ -308,26 +265,6 @@ stuck_recovery:
   enabled: true
   speed_threshold: 0.15
   mpc_stall_speed_threshold: 0.4 # [m/s] MPC安全回復中、この速度以下かつGNSS不動なら後退
-  post_reverse_recovery_min_wp_progress: 1 # 後退後、全幅回復解除前に要求する前進Waypoint数
-  post_reverse_recovery_min_gnss_progress: 0.3 # [m] Waypoint進行の代わりに認めるGNSS前進量
-  post_reverse_recovery_guard_sec: 2.0 # [s] 前進確認後も全幅を維持して再失敗を監視
-  post_reverse_creep_success_cycles: 3 # 低速前進を許可する正確・安全なMPCの連続周期数
-  post_reverse_creep_speed: 0.5 # [m/s] 実前進確認用の全幅回復速度
-  post_reverse_creep_wait_timeout_sec: 3.0 # [s] 確認走行を開始できない場合に失敗理由を再評価する周期
-  post_reverse_creep_response_timeout_sec: 2.0 # [s] 確認前進指令に対するGNSS実応答の待機時間
-  post_reverse_creep_response_command_threshold: 0.3 # [m/s] 実応答監視を開始する最低速度指令
-  post_reverse_creep_response_min_gnss_distance: 0.1 # [m] 上記時間内に要求する実GNSS移動量
-  post_reverse_max_retry_attempts: 1 # 確認前進失敗後の再後退はこの回数まで。以後は全車両再評価へ移行
-  post_reverse_creep_max_heading_error_deg: 20.0 # [deg] これを超える場合は通常の直進クリープを許可せず姿勢回復候補を評価
-  post_reverse_creep_min_prediction_heading_improvement_deg: 5.0 # [deg] 大方位誤差時に直近予測へ要求する改善量
-  post_reverse_recovery_min_actual_heading_improvement_deg: 3.0 # [deg] 0.3m前進後、回復進捗として要求する実測方位改善量
-  post_reverse_pose_recovery_enabled: true # MPC予測が姿勢を直さない場合、安全な短距離固定操舵候補で姿勢回復
-  post_reverse_pose_recovery_steer_gain: 0.8 # [rad/rad] Center方位誤差から姿勢回復操舵を生成
-  post_reverse_pose_recovery_max_steer_deg: 20.0 # [deg] 姿勢回復前進の最大操舵角
-  post_reverse_pose_recovery_prediction_sec: 1.0 # [s] 固定操舵候補の静的地図/V2X検査時間
-  post_reverse_pose_recovery_footprint_radius: 1.13 # [m] 既存の後退掃引と同じ保守的な車体包絡半径
-  post_reverse_accurate_pose_creep_enabled: true # 正確な全幅MPCが連続した場合、姿勢修正用の低速前進候補を追加
-  post_reverse_accurate_pose_creep_footprint_radius: 0.80 # [m] 姿勢修正前進だけに使う実車半幅0.725m＋小マージン
   forward_cmd_threshold: 0.8
   stuck_time_threshold: 2.0
   forward_resume_gap: 4.0 # [m] 後退中、ラッチ前方車がこの距離以上前進し、かつ動いていればDRIVEへ戻す
@@ -364,10 +301,6 @@ stuck_recovery:
   drive_control_mode_request_value: true
   gear_shift_delay: 1.0
   max_shift_wait: 8.0
-  drive_confirmation_total_timeout_sec: 12.0 # [s] DRIVE＋自動モード確認シーケンス全体の上限
-  drive_confirmation_max_requests: 20 # DRIVE要求の最大送信回数
-  require_control_mode_confirmation: true # 後退後はDRIVEだけでなくAUTONOMOUS reportも必須
-  control_mode_freshness_sec: 1.0 # [s] 自動制御モードreportの最大受信経過時間
   drive_request_resend_sec: 0.5 # [s] DRIVE未確認時のギア要求再送周期。確認まで速度ゼロを維持
   reverse_request_resend_sec: 0.5 # [s] REVERSE未確認時のギア要求再送周期。確認まで速度ゼロを維持
   use_actuation_cmd: false

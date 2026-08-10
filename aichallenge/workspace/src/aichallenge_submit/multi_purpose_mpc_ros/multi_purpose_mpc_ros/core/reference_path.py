@@ -329,14 +329,6 @@ class ReferencePath:
         self.target_lane_idx = None
         self.n_lanes = 3
         self.inner_lane_width = 0.5
-        self.last_constraints_valid = True
-        self.invalid_constraint_wp_ids = []
-        # The live Center MPC and its outer-lane shadow share this
-        # ReferencePath and the same occupancy-map array during one control
-        # cycle.  Cache the expensive full-width raster scan so the shadow
-        # only clips the already scanned free intervals to L0/L2.
-        self._free_segment_scan_cache_token = None
-        self._free_segment_scan_cache = {}
 
         self.bounds = np.loadtxt(
             self._bounds_csv_path,
@@ -1090,83 +1082,89 @@ class ReferencePath:
         free_segments = []
 
         target_lane = getattr(self, 'target_lane_idx', None)
-        normalized_wp_idx = (
-            int(wp_idx) % self.n_waypoints if wp_idx is not None else None)
-        map_token = (id(self.map.data), getattr(self.map, "revision", 0))
-        if map_token != self._free_segment_scan_cache_token:
-            self._free_segment_scan_cache_token = map_token
-            self._free_segment_scan_cache.clear()
 
-        # Always scan the physical full width. Lane-specific probes below
-        # clip these raw intervals, allowing the live full-width solve and an
-        # L0/L2 shadow solve to reuse exactly the same occupancy lookup.
-        raw_segments = self._free_segment_scan_cache.get(normalized_wp_idx)
-        if raw_segments is None:
-            ub_p = self.map.w2m(
-                wp.static_border_cells[0][0],
-                wp.static_border_cells[0][1])
-            lb_p = self.map.w2m(
-                wp.static_border_cells[1][0],
-                wp.static_border_cells[1][1])
-            x_list, y_list, _ = line_aa(
-                ub_p[0], ub_p[1], lb_p[0], lb_p[1])
-            ub_o = ub_p
-            free_cells = False
-            raw_segments = []
-            map_data = self.map.data
-            for x, y in zip(x_list[1:], y_list[1:]):
-                cell_value = map_data[y, x]
-                if cell_value == 1:
-                    free_cells = True
-                if (cell_value == 0 or (x, y) == lb_p) and free_cells:
-                    lb_o = (x, y)
-                    raw_segments.append((
-                        self.map.m2w(ub_o[0], ub_o[1]),
-                        self.map.m2w(lb_o[0], lb_o[1]),
-                    ))
-                    ub_o = (x, y)
-                    free_cells = False
-                elif cell_value == 0 and not free_cells:
-                    ub_o = (x, y)
-            self._free_segment_scan_cache[normalized_wp_idx] = raw_segments
-
-        scan_upper = float(wp.ub)
-        scan_lower = float(wp.lb)
-        if target_lane is not None and normalized_wp_idx is not None:
-            lanes = self.get_lane_bounds(normalized_wp_idx)
+        if target_lane is not None and wp_idx is not None:
+            # 追い越し中（target_lane が設定されているとき）
+            lanes = self.get_lane_bounds(wp_idx)
             if lanes and target_lane < len(lanes):
                 ub_lane, lb_lane = lanes[target_lane]
-                if target_lane == 0:
-                    scan_upper = float(ub_lane)
-                elif target_lane == 2:
-                    scan_lower = float(lb_lane)
-                else:
-                    scan_upper = float(ub_lane)
-                    scan_lower = float(lb_lane)
+                angle_ub = np.mod(math.pi / 2.0 + wp.psi + math.pi, 2 * math.pi) - math.pi
+                
+                if target_lane == 0:  # 右車線 (L0)
+                    # 左端は L0 の上限。下限を使うと走査幅がほぼゼロになる。
+                    ub_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
+                    ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
+                    # 右端 (lb_p, コース境界側) はマップ本来の右端 static_border_cells[1] を直接使用
+                    lb_p = self.map.w2m(wp.static_border_cells[1][0], wp.static_border_cells[1][1])
+                elif target_lane == 2:  # 左車線 (L2)
+                    # 左端 (ub_p, コース境界側) はマップ本来の左端 static_border_cells[0] を直接使用
+                    ub_p = self.map.w2m(wp.static_border_cells[0][0], wp.static_border_cells[0][1])
+                    # 右端は L2 の下限。上限を使うと走査幅がほぼゼロになる。
+                    lb_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
+                    lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
+                else:  # 中央車線 (L1) またはその他
+                    ub_cell_world = (wp.x + ub_lane * math.cos(angle_ub), wp.y + ub_lane * math.sin(angle_ub))
+                    lb_cell_world = (wp.x + lb_lane * math.cos(angle_ub), wp.y + lb_lane * math.sin(angle_ub))
+                    ub_p = self.map.w2m(ub_cell_world[0], ub_cell_world[1])
+                    lb_p = self.map.w2m(lb_cell_world[0], lb_cell_world[1])
+            else:
+                ub_p = self.map.w2m(wp.static_border_cells[0][0], wp.static_border_cells[0][1])
+                lb_p = self.map.w2m(wp.static_border_cells[1][0], wp.static_border_cells[1][1])
+        else:
+            # 通常走行（Raceモード時など）はコース全体をスキャン範囲とする
+            ub_p = self.map.w2m(wp.static_border_cells[0][0],
+                                wp.static_border_cells[0][1])
+            lb_p = self.map.w2m(wp.static_border_cells[1][0],
+                                wp.static_border_cells[1][1])
 
-        normal_angle = wp.psi + math.pi / 2.0
-        normal_x = math.cos(normal_angle)
-        normal_y = math.sin(normal_angle)
-        for raw_upper, raw_lower in raw_segments:
-            raw_offsets = (
-                (raw_upper[0] - wp.x) * normal_x
-                + (raw_upper[1] - wp.y) * normal_y,
-                (raw_lower[0] - wp.x) * normal_x
-                + (raw_lower[1] - wp.y) * normal_y,
-            )
-            segment_upper = min(max(raw_offsets), scan_upper)
-            segment_lower = max(min(raw_offsets), scan_lower)
-            if segment_upper - segment_lower <= min_width:
-                continue
-            upper_world = (
-                wp.x + segment_upper * normal_x,
-                wp.y + segment_upper * normal_y,
-            )
-            lower_world = (
-                wp.x + segment_lower * normal_x,
-                wp.y + segment_lower * normal_y,
-            )
-            free_segments.append((upper_world, lower_world))
+        # Compute path from left border cell to right border cell
+        x_list, y_list, _ = line_aa(ub_p[0], ub_p[1], lb_p[0], lb_p[1])
+
+        # Initialize upper and lower bound of drivable area to
+        # upper bound of path
+        ub_o, lb_o = ub_p, ub_p
+
+        # Assume occupied path
+        free_cells = False
+
+        # Iterate over path from left border to right border
+        map_data = self.map.data
+        all_segments = []
+        for x, y in zip(x_list[1:], y_list[1:]):
+            cell_value = map_data[y, x]
+            # If cell is free, update lower bound
+            if cell_value == 1:
+                # Free cell detected
+                free_cells = True
+                lb_o = (x, y)
+            # If cell is occupied or end of path, end segment. Add segment
+            # to list of candidates. Then, reset upper and lower bound to
+            # current cell.
+            if (cell_value == 0 or (x, y) == lb_p) and free_cells:
+                # Set lower bound to border cell of segment
+                lb_o = (x, y)
+                # Transform upper and lower bound cells to world coordinates
+                ub_w = self.map.m2w(ub_o[0], ub_o[1])
+                lb_w = self.map.m2w(lb_o[0], lb_o[1])
+                
+                segment_width_sq = (ub_w[0]-lb_w[0])**2 + (ub_w[1]-lb_w[1])**2
+                all_segments.append(((ub_w, lb_w), segment_width_sq))
+                
+                # If segment larger than threshold, add to candidates
+                if segment_width_sq > min_width**2:
+                    free_segments.append((ub_w, lb_w))
+                # Start new segment
+                ub_o = (x, y)
+                free_cells = False
+            elif cell_value == 0 and not free_cells:
+                ub_o = (x, y)
+                lb_o = (x, y)
+
+        # もし min_width を満たすセグメントが1つも無い場合は、
+        # 見つかった全てのセグメントの中で最も幅が広いものをフォールバックとして採用する
+        if not free_segments and all_segments:
+            all_segments.sort(key=lambda s: s[1], reverse=True)
+            free_segments.append(all_segments[0][0])
 
         return free_segments
 
@@ -1188,10 +1186,8 @@ class ReferencePath:
 
                 # Check feasibility of the path after subtracting safety margin
                 if ub_sm < lb_sm:
-                    self.last_constraints_valid = False
-                    invalid_wp_id = int(wp_id % self.n_waypoints)
-                    if invalid_wp_id not in self.invalid_constraint_wp_ids:
-                        self.invalid_constraint_wp_ids.append(invalid_wp_id)
+                    ub_sm = 0.0
+                    lb_sm = 0.0
 
                 # wp.ub_sm = ub_sm
                 # wp.lb_sm = lb_sm
@@ -1236,10 +1232,8 @@ class ReferencePath:
 
             # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
-                self.last_constraints_valid = False
-                invalid_wp_id = int((wp_id + n) % self.n_waypoints)
-                if invalid_wp_id not in self.invalid_constraint_wp_ids:
-                    self.invalid_constraint_wp_ids.append(invalid_wp_id)
+                ub_sm = 0.0
+                lb_sm = 0.0
 
             # Compute absolute angle of bound cell
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
@@ -1269,9 +1263,6 @@ class ReferencePath:
         Compute upper and lower bounds of the drivable area orthogonal to
         the given waypoint.
         """
-
-        self.last_constraints_valid = True
-        self.invalid_constraint_wp_ids = []
 
         # min_width = model_width / np.sqrt(2)
         # Note: During overtaking, we do NOT add extra margin here.
@@ -1357,15 +1348,10 @@ class ReferencePath:
             # 安全マージンを差し引いた後の経路の実現可能性を確認する。
             #print(f"ub_sm: {ub_sm}, lb_sm: {lb_sm}")
             if ub_sm < lb_sm:
-                # Do not disguise an inverted corridor as a zero-width one.
-                # A later outer-boundary guard would turn 0/0 into lower >
-                # upper and make OSQP raise from update_bounds().  Preserve
-                # the bad values for diagnostics and route this cycle through
-                # the normal MPC SafetyRecovery path instead.
-                self.last_constraints_valid = False
-                invalid_wp_id = int((wp_id + n) % self.n_waypoints)
-                if invalid_wp_id not in self.invalid_constraint_wp_ids:
-                    self.invalid_constraint_wp_ids.append(invalid_wp_id)
+                # 一つ前のifの判定でboundsは正常になっているはずなので、こちらの判定に入る場合は何らかの実装上の異常がある
+                #print("!!!! Infeasible path detected !!!!")
+                ub_sm = 0.0
+                lb_sm = 0.0
 
             # 上限（ub_sm）および下限（lb_sm）のセルから絶対角度を計算する
             angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
@@ -1430,101 +1416,63 @@ class ReferencePath:
 
             # Iterate over free segments for current waypoint
             if len(free_segments) >= 2:
-                segment_layers = [free_segments]
-                for i in range(n + 1, n + 5):
+                free_segments_indices = [[idx for idx in range(len(free_segments))]]
+                for i in range(n+1, n+5):
                     if i >= N:
                         break
-                    next_segments = free_segments_hor[i]
-                    if not next_segments:
-                        break
-                    segment_layers.append(next_segments)
+                    free_segments = free_segments_hor[i]
+                    if len(free_segments) == 0:
+                      break
+                    else:
+                      free_segments_indices.append([idx for idx in range(len(free_segments))])
 
-                if n > 0:
-                    initial_upper, initial_lower = border_cells_hor[n - 1]
-                elif pose is not None:
-                    initial_upper = initial_lower = [pose[0], pose[1]]
-                else:
-                    initial_upper = initial_lower = [wp.x, wp.y]
-                initial_center = (
-                    np.asarray(initial_upper, dtype=float)
-                    + np.asarray(initial_lower, dtype=float)
-                ) / 2.0
+                free_segments_indices_combinations = itertools.product(*free_segments_indices)
+                # if show:
+                #     print(f"n :{n}, free_segments_indices: {free_segments_indices}")
 
-                # Layered dynamic programming computes the same objective as
-                # the former Cartesian-product search (maximum accumulated
-                # free width with collision-free center transitions), but in
-                # O(sum(|layer_i|*|layer_i+1|)) instead of a product of all
-                # candidate counts.
-                scores = []
-                parents = []
-                for layer_index, layer in enumerate(segment_layers):
-                    layer_scores = [-math.inf] * len(layer)
-                    layer_parents = [None] * len(layer)
-                    for segment_index, (upper, lower) in enumerate(layer):
-                        center = (
-                            np.asarray(upper, dtype=float)
-                            + np.asarray(lower, dtype=float)
-                        ) / 2.0
-                        width = dist(
-                            upper[0], upper[1], lower[0], lower[1])
-                        if layer_index == 0:
-                            if not has_collision_in_line(
-                                self.map, initial_center, center
-                            ):
-                                layer_scores[segment_index] = width
-                            else:
-                                self.upper_cols.append([
-                                    [initial_center[0], center[0]],
-                                    [initial_center[1], center[1]],
-                                ])
-                            continue
-                        previous_layer = segment_layers[layer_index - 1]
-                        for previous_index, previous_score in enumerate(
-                            scores[layer_index - 1]
-                        ):
-                            if not math.isfinite(previous_score):
-                                continue
-                            previous_upper, previous_lower = (
-                                previous_layer[previous_index])
-                            previous_center = (
-                                np.asarray(previous_upper, dtype=float)
-                                + np.asarray(previous_lower, dtype=float)
-                            ) / 2.0
-                            if has_collision_in_line(
-                                self.map, previous_center, center
-                            ):
-                                continue
-                            candidate_score = previous_score + width
-                            if candidate_score > layer_scores[segment_index]:
-                                layer_scores[segment_index] = candidate_score
-                                layer_parents[segment_index] = previous_index
-                    scores.append(layer_scores)
-                    parents.append(layer_parents)
+                def calculate_combination_total_segment_length(index_combination, ub_pw, lb_pw):
+                    total_segment_length = 0.0
 
-                last_reachable_layer = None
-                for layer_index in range(len(scores) - 1, -1, -1):
-                    if any(math.isfinite(score) for score in scores[layer_index]):
-                        last_reachable_layer = layer_index
-                        break
-                if last_reachable_layer is None:
-                    # Preserve deterministic progress when the current pose
-                    # cannot connect to any candidate. The resulting corridor
-                    # will still be rejected by the normal MPC feasibility
-                    # and prediction checks if it is not executable.
-                    selected_indices = [int(np.argmax([
-                        dist(u[0], u[1], l[0], l[1])
-                        for u, l in segment_layers[0]
-                    ]))]
-                else:
-                    selected_index = int(np.argmax(
-                        scores[last_reachable_layer]))
-                    selected_indices = [selected_index]
-                    for layer_index in range(last_reachable_layer, 0, -1):
-                        selected_index = parents[layer_index][selected_index]
-                        selected_indices.append(selected_index)
-                    selected_indices.reverse()
+                    for i, segment_index in enumerate(index_combination):
+                        ub_fs, lb_fs = free_segments_hor[n+i][segment_index]
 
-                for i in selected_indices:
+                        mean_prev = (np.array(ub_pw) + np.array(lb_pw)) / 2.
+                        mean_fs = (np.array(ub_fs) + np.array(lb_fs)) / 2.
+
+                        if has_collision_in_line(self.map, mean_prev, mean_fs):
+                            self.upper_cols.append([[mean_prev[0], mean_fs[0]], [mean_prev[1], mean_fs[1]]])
+                            return -1000000.0 # penalty because has collision!
+
+                        total_segment_length += dist(ub_fs[0], ub_fs[1], lb_fs[0], lb_fs[1])
+                        ub_pw = ub_fs
+                        lb_pw = lb_fs
+
+                    return total_segment_length
+
+                combination_segment_length = []
+                combination_indices = []
+                for combination in free_segments_indices_combinations:
+                    if n > 0:
+                        ub_pw, lb_pw = border_cells_hor[n-1]
+                    else:
+                        if pose is not None:
+                            ub_pw, lb_pw =  [pose[0], pose[1]], [pose[0], pose[1]]
+                        else:
+                            ub_pw, lb_pw =  [wp.x, wp.y], [wp.x, wp.y]
+
+                    total_segment_length = calculate_combination_total_segment_length(combination, ub_pw, lb_pw)
+                    combination_segment_length.append(total_segment_length)
+                    combination_indices.append(combination)
+
+                max_area = max(combination_segment_length)
+                max_area_index = combination_segment_length.index(max_area)
+                max_area_combination_indices = combination_indices[max_area_index]
+
+                # if show:
+                #     print(f"max_area_combination_indices: {max_area_combination_indices}")
+                #     print(f"n: {n}, combination_segment_length: {combination_segment_length}, combination_indices: {combination_indices}")
+
+                for i in max_area_combination_indices:
                     wp = self.get_waypoint(wp_id+n)
                     ub_ls, lb_ls = free_segments_hor[n][i]
                     add_constraint(wp, ub_ls, lb_ls)
@@ -1537,15 +1485,27 @@ class ReferencePath:
                 n += 1  # increment waypoint index
 
             else:
-                # Never invent a corridor when the occupancy map has no
-                # segment wide enough for the vehicle. Keep array shapes
-                # intact for diagnostics, but mark this solve invalid so MPC
-                # enters its normal fallback/recovery path without driving it.
-                self.last_constraints_valid = False
-                self.invalid_constraint_wp_ids.append(
-                    int((wp_id + n) % self.n_waypoints))
-                ub_ls = wp.static_border_cells[0]
-                lb_ls = wp.static_border_cells[1]
+                #if not self.is_overtaking:
+                    #print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}. Forcing minimum width.", flush=True)
+
+                # 追い越し中は車線痁めによりフリーセグメントが見つからない場合がある。
+                # その場合は車線幅僕の強制適用でなく、静的ウェイポイント境界 (wp.ub/wp.lb) にフォールバックする。
+                # これにより、OSQP の infeasible を最小限に抑える。
+                if self.is_overtaking:
+                    # 追い越し中: 全幅静的境界をフォールバックとして当てる
+                    ub_ls = wp.static_border_cells[0]
+                    lb_ls = wp.static_border_cells[1]
+                else:
+                    left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
+                                      2 * math.pi) - math.pi
+                    right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
+                                        2 * math.pi) - math.pi
+                    # 通常走行中: 小幅強制幅を当てる
+                    FORCE_HALF_WIDTH = 0.8
+                    ub_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(left_angle),
+                             wp.y + FORCE_HALF_WIDTH * np.sin(left_angle))
+                    lb_ls = (wp.x + FORCE_HALF_WIDTH * np.cos(right_angle),
+                             wp.y + FORCE_HALF_WIDTH * np.sin(right_angle))
 
                 add_constraint(wp, ub_ls, lb_ls)
 
@@ -1675,21 +1635,13 @@ class ReferencePath:
                 # 現在の横ズレが上限を超えている場合は、その差分を上限に徐々に減衰させながら上乗せ
                 if e_y_current > ub_hor[n]:
                     slack = e_y_current - ub_hor[n]
-                    # Transition relaxation may cross an internal lane edge,
-                    # but must never expand beyond the physical course bound.
-                    ub_hor[n] = min(
-                        ub_hor[n] + slack * decay,
-                        wp.ub,
-                    )
+                    ub_hor[n] += slack * decay
                     wp.ub_sm = ub_hor[n]
                     
                 # 現在の横ズレが下限を下回っている場合は、下限を緩和
                 if e_y_current < lb_hor[n]:
                     slack = lb_hor[n] - e_y_current
-                    lb_hor[n] = max(
-                        lb_hor[n] - slack * decay,
-                        wp.lb,
-                    )
+                    lb_hor[n] -= slack * decay
                     wp.lb_sm = lb_hor[n]
 
                 # 緩和後の範囲に対応する境界セル座標を再計算

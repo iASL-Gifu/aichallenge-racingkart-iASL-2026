@@ -8,7 +8,6 @@ from multi_purpose_mpc_ros.core.MPC import (
     can_reuse_prediction_fallback,
     is_plausible_mpc_prediction,
     is_plausible_world_prediction,
-    apply_outer_boundary_guard,
     is_primal_infeasible,
     is_valid_osqp_solution,
 )
@@ -77,18 +76,6 @@ class TestPredictionPlausibility(unittest.TestCase):
 
         self.assertFalse(self.is_plausible(spatial_states=states))
 
-    def test_small_lateral_constraint_violation_is_invalid(self):
-        states = self.states.copy()
-        states[2, 0] = 2.05
-
-        self.assertFalse(self.is_plausible(spatial_states=states))
-
-    def test_solver_scale_lateral_noise_is_allowed(self):
-        states = self.states.copy()
-        states[2, 0] = 2.01
-
-        self.assertTrue(self.is_plausible(spatial_states=states))
-
     def test_distant_prediction_start_is_invalid(self):
         prediction = ([20.0, 21.0, 22.0], [0.0, 0.0, 0.0])
 
@@ -109,46 +96,6 @@ class TestPredictionPlausibility(unittest.TestCase):
             self.prediction,
             current_position=(20.0, 0.0),
         ))
-
-
-class TestOuterBoundaryGuard(unittest.TestCase):
-    def setUp(self):
-        self.lower = np.array([-2.0, -2.0])
-        self.upper = np.array([2.0, 2.0])
-
-    def test_full_width_guards_both_course_edges(self):
-        lower, upper = apply_outer_boundary_guard(
-            self.lower, self.upper, None, 0.1)
-
-        np.testing.assert_allclose(lower, [-1.9, -1.9])
-        np.testing.assert_allclose(upper, [1.9, 1.9])
-
-    def test_l0_guards_only_right_outer_edge(self):
-        lower, upper = apply_outer_boundary_guard(
-            self.lower, self.upper, 0, 0.1)
-
-        np.testing.assert_allclose(lower, [-1.9, -1.9])
-        np.testing.assert_allclose(upper, self.upper)
-
-    def test_l2_guards_only_left_outer_edge(self):
-        lower, upper = apply_outer_boundary_guard(
-            self.lower, self.upper, 2, 0.1)
-
-        np.testing.assert_allclose(lower, self.lower)
-        np.testing.assert_allclose(upper, [1.9, 1.9])
-
-    def test_l1_internal_edges_are_unchanged(self):
-        lower, upper = apply_outer_boundary_guard(
-            self.lower, self.upper, 1, 0.1)
-
-        np.testing.assert_allclose(lower, self.lower)
-        np.testing.assert_allclose(upper, self.upper)
-
-    def test_full_width_guard_exposes_collapsed_corridor_as_inverted(self):
-        lower, upper = apply_outer_boundary_guard(
-            np.array([0.0]), np.array([0.0]), None, 0.1)
-
-        self.assertGreater(lower[0], upper[0])
 
 
 class TestPredictionFallbackLimit(unittest.TestCase):

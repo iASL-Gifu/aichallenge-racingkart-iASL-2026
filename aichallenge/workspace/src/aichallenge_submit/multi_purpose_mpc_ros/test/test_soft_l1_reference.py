@@ -76,24 +76,3 @@ def test_clearing_soft_lane_reference_clears_offset():
 
     assert mpc.soft_target_lane_idx is None
     assert mpc.soft_target_lateral_offset == pytest.approx(0.0)
-
-
-def test_soft_reference_accepts_and_clears_explicit_horizon_targets():
-    mpc = MPC.__new__(MPC)
-    targets = [-0.4, -0.2, 0.1]
-
-    mpc.set_soft_lateral_reference(
-        start_e_y=-0.8,
-        alpha=0.5,
-        lateral_targets=targets,
-    )
-
-    assert mpc.soft_target_lane_idx is None
-    assert mpc.soft_lateral_targets.tolist() == pytest.approx(targets)
-
-    # The MPC owns a copy so a caller may reuse its temporary horizon array.
-    targets[0] = 99.0
-    assert mpc.soft_lateral_targets[0] == pytest.approx(-0.4)
-
-    mpc.set_soft_lateral_reference()
-    assert mpc.soft_lateral_targets is None

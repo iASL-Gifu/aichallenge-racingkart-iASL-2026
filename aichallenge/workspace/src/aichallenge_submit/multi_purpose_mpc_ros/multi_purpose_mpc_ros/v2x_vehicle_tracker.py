@@ -728,66 +728,15 @@ def should_recover_from_mpc_stall(
     infeasibility_counter,
     has_fresh_valid_prediction,
 ):
-    """Allow reverse while GNSS proves that an invalid MPC is not moving.
-
-    Wheel/odometry speed can remain high while a kart is pressed against a
-    wall.  The already time-qualified GNSS immobility is the physical motion
-    authority here, so do not let a high reported speed suppress recovery.
-    """
+    """Allow reverse only while MPC still has no fresh feasible solution."""
     return (
         safety_recovery_active
+        and abs(actual_speed) <= stall_speed_threshold
         and gnss_is_stuck
         and (
             infeasibility_counter > 0
             or not has_fresh_valid_prediction
         )
-    )
-
-
-def should_start_reverse_recovery(
-    *,
-    post_reverse_recovery_active,
-    post_reverse_retry_requested,
-    normal_reverse_requested,
-):
-    """Arbitrate reverse ownership after a completed reverse manoeuvre.
-
-    DRIVE confirmation, full-width recovery, forward-creep confirmation and
-    bounded traffic reassessment form one exclusive post-reverse state
-    machine.  While it owns the vehicle, ordinary positive-command,
-    close-obstacle and MPC-stall detectors must not start another reverse.
-    Only the saved-target retry path may explicitly hand ownership back to
-    StuckRecovery.
-    """
-    if post_reverse_recovery_active:
-        return bool(post_reverse_retry_requested)
-    return bool(normal_reverse_requested)
-
-
-def post_reverse_creep_response_failed(
-    *,
-    command_speed,
-    minimum_command_speed,
-    command_elapsed,
-    response_timeout,
-    gnss_distance,
-    minimum_gnss_distance,
-):
-    """Detect a commanded post-reverse creep with no physical response."""
-    return bool(
-        float(command_speed) >= max(float(minimum_command_speed), 0.0)
-        and float(command_elapsed) >= max(float(response_timeout), 0.0)
-        and float(gnss_distance) < max(float(minimum_gnss_distance), 0.0)
-    )
-
-
-def drive_confirmation_exhausted(
-    *, elapsed, timeout, request_count, max_requests
-):
-    """Bound the DRIVE/control-mode confirmation sequence."""
-    return bool(
-        float(elapsed) >= max(float(timeout), 0.0)
-        or int(request_count) >= max(int(max_requests), 1)
     )
 
 
@@ -798,10 +747,6 @@ def should_count_mpc_recovery_success(
     infeasibility_counter,
     has_current_prediction,
     used_prediction_fallback,
-    solution_accurate=True,
-    require_accurate_solution=False,
-    control_mode_autonomous=True,
-    require_autonomous_control=False,
 ):
     """Count full-width recovery only after reverse/shift has fully ended."""
     return (
@@ -810,70 +755,7 @@ def should_count_mpc_recovery_success(
         and infeasibility_counter == 0
         and has_current_prediction
         and not used_prediction_fallback
-        and (solution_accurate or not require_accurate_solution)
-        and (control_mode_autonomous or not require_autonomous_control)
     )
-
-
-def post_reverse_progress_confirmed(
-    *,
-    waypoint_progress,
-    min_waypoint_progress,
-    gnss_forward_progress,
-    min_gnss_forward_progress,
-):
-    """Return whether real forward motion was observed after reversing."""
-    return bool(
-        int(waypoint_progress) >= max(int(min_waypoint_progress), 0)
-        or float(gnss_forward_progress)
-            >= max(float(min_gnss_forward_progress), 0.0)
-    )
-
-
-def should_allow_post_reverse_deadlock_retry(
-    *,
-    post_reverse_recovery_active,
-    explicit_reverse_requested,
-    vehicle_is_stuck,
-    target_is_ahead,
-    target_is_stopped,
-    forward_progress_confirmed,
-    forward_command,
-    min_forward_command,
-    prediction_clears_target,
-):
-    """Allow a new reverse only for a verified stopped-lead deadlock."""
-    return bool(
-        post_reverse_recovery_active
-        and explicit_reverse_requested
-        and vehicle_is_stuck
-        and target_is_ahead
-        and target_is_stopped
-        and not forward_progress_confirmed
-        and float(forward_command) < max(float(min_forward_command), 0.0)
-        and not prediction_clears_target
-    )
-
-
-def update_post_reverse_creep_success_cycles(
-    current_cycles,
-    *,
-    full_width_applied,
-    feasible_accurate_solution,
-    executable_forward_prediction,
-    prediction_clear,
-    emergency_brake_active,
-):
-    """Count safe full-width solves before allowing recovery creep."""
-    if (
-        full_width_applied
-        and feasible_accurate_solution
-        and executable_forward_prediction
-        and prediction_clear
-        and not emergency_brake_active
-    ):
-        return int(current_cycles) + 1
-    return 0
 
 
 def prediction_clears_moving_vehicle(
