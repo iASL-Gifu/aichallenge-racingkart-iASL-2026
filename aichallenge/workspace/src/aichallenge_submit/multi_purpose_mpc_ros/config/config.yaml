@@ -60,6 +60,11 @@ trajectory_switch:
   race_rejoin_max_heading_deg: 10.0 # Race/Centerの方位差がこれ以下の地点でRaceへ復帰
   outer_lane_release_infeasible_cycles: 5 # 追越し後、対象が後方にいる状態でこの回数連続失敗したらL0/L2固定を解除
   outer_lane_release_behind_m: 0.5 # 追越し後、対象が進行方向への射影でこの距離以上後方なら解除を許可
+  outer_shadow_success_cycles: 3 # L0/L2操舵状態MPCがこの回数連続成功してから実制御へハード制約を適用
+  outer_shadow_retry_interval_cycles: 3 # Shadow失敗中の再試行間隔（制御周期）
+  outer_shadow_timeout_sec: 2.0 # [s] 成立しなければ失敗車線として全幅Prepass回復へ移行
+  outer_failure_backoff_sec: 1.0 # [s] Shadow失敗車線の即時再選択を禁止
+  outer_failure_backoff_wps: 8 # 時間前でもこのWaypoint数を進めば再評価
 
 prepass_lane_fallback:
   enabled: true
@@ -132,7 +137,7 @@ mpc:
   a_min: -1.0 # m/s^2
   a_max: 2.5 # m/s^2
   delta_max_deg: 18.0 # degrees
-  steer_rate_max: 0.60 # rad/s max_steering_rate
+  steer_rate_max: 0.6 # rad/s max_steering_rate
   # Steering-state MPC: x=[e_y,e_psi,t,delta], u=[v,delta_rate].
   # steer_rate_max is a physical tire-angle rate [rad/s] in both MPC and AWSIM.
   steering_state_weight: 1000000.0
@@ -140,6 +145,8 @@ mpc:
   control_rate: 40.0 # Hz Ts=1/control_rate
   solve_time_budget_ms: 20.0 # 初回失敗後、安全マージンを緩和する追加再試行だけの時間上限
   max_prediction_fallback_cycles: 3 # 古い予測・制御列を再利用できる最大連続失敗周期
+  prediction_outer_boundary_guard: 0.10 # [m] L0/L2/全幅の物理外周境界から予測車両中心を追加で離す
+  prediction_lateral_tolerance: 0.02 # [m] OSQP数値誤差として解採用時に許容する境界違反
   safety_recovery_speed: 1.0 # [m/s] 古い予測破棄後の全幅MPC回復中の上限速度
   safety_recovery_success_sec: 0.5 # [s] 全幅MPCが連続成功してから通常車線選択へ戻す時間
   #steering_tire_angle_gain_var: 1.639

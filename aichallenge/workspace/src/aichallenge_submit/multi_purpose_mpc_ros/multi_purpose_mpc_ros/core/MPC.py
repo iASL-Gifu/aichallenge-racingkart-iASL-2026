@@ -160,6 +160,47 @@ def is_plausible_mpc_prediction(
     )
 
 
+def apply_outer_boundary_guard(
+    lower_bounds,
+    upper_bounds,
+    target_lane,
+    guard_margin,
+):
+    """Inset only the physical course edge(s) used by the active corridor.
+
+    L0 touches the lower/right physical edge and L2 touches the upper/left
+    edge.  Full-width/Race driving touches both.  L1 is bounded only by
+    internal lane boundaries, so applying this wall guard there would narrow
+    an already constrained rejoin corridor without adding wall clearance.
+
+    Always copy the arrays: the non-obstacle path can hand us views into the
+    reference path's cached constraints, which must not be modified in place.
+    """
+    lower = np.asarray(lower_bounds, dtype=float).copy()
+    upper = np.asarray(upper_bounds, dtype=float).copy()
+    guard = float(guard_margin)
+    if not np.isfinite(guard) or guard <= 0.0:
+        return lower, upper
+    if target_lane is None:
+        lower += guard
+        upper -= guard
+    elif target_lane == 0:
+        lower += guard
+    elif target_lane == 2:
+        upper -= guard
+    return lower, upper
+
+
+def zero_inverted_bounds(lower_bounds, upper_bounds):
+    """Replace inverted corridor samples with the zero-width sentinel."""
+    lower = np.asarray(lower_bounds, dtype=float).copy()
+    upper = np.asarray(upper_bounds, dtype=float).copy()
+    inverted = upper < lower
+    lower[inverted] = 0.0
+    upper[inverted] = 0.0
+    return lower, upper
+
+
 def is_plausible_world_prediction(
     world_prediction,
     current_position,
@@ -414,6 +455,11 @@ class MPC:
         self.infeasibility_counter = 0
         self.solve_time_budget_ms = 20.0
         self.max_prediction_fallback_cycles = 3
+        # Keep predicted vehicle centers away from physical course edges and
+        # reject solver solutions outside the exact corridor beyond ordinary
+        # OSQP numerical error.  Both are configurable by the controller.
+        self.prediction_outer_boundary_guard = 0.0
+        self.prediction_lateral_tolerance = 0.02
         self.used_prediction_fallback = False
         self.time_budget_exceeded = False
         self.recovery_requested = False
@@ -873,6 +919,19 @@ class MPC:
                 ub[infeasible_index] = 0.0
                 lb[infeasible_index] = 0.0
 
+        lb, ub = apply_outer_boundary_guard(
+            lb,
+            ub,
+            self._constraint_target_lane,
+            self.prediction_outer_boundary_guard,
+        )
+        # Obstacle narrowing may already leave a corridor thinner than the
+        # physical-edge guard.  Never send inverted bounds to OSQP: represent
+        # those invalid prediction points with the existing zero-width
+        # sentinel so the QP becomes safely infeasible instead of raising an
+        # uncaught bounds-update exception.
+        lb, ub = zero_inverted_bounds(lb, ub)
+
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
         #print("N =", N)
@@ -1132,6 +1191,7 @@ class MPC:
                 (self.model.temporal_state.x, self.model.temporal_state.y),
                 self._prediction_lower_bounds,
                 self._prediction_upper_bounds,
+                lateral_tolerance=self.prediction_lateral_tolerance,
             ):
                 raise ValueError("OSQP returned an implausible prediction")
 
@@ -1371,4 +1431,3 @@ class MPC:
             # ax.scatter(self.current_prediction[0], self.current_prediction[1],
             #            c=PREDICTION, s=5)
             ax.plot(self.current_prediction[0], self.current_prediction[1], c=PREDICTION)
-

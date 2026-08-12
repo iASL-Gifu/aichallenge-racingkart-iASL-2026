@@ -5,11 +5,13 @@ import numpy as np
 import osqp
 
 from multi_purpose_mpc_ros.core.MPC import (
+    apply_outer_boundary_guard,
     can_reuse_prediction_fallback,
     is_plausible_mpc_prediction,
     is_plausible_world_prediction,
     is_primal_infeasible,
     is_valid_osqp_solution,
+    zero_inverted_bounds,
 )
 
 
@@ -76,6 +78,15 @@ class TestPredictionPlausibility(unittest.TestCase):
 
         self.assertFalse(self.is_plausible(spatial_states=states))
 
+    def test_configured_small_lateral_violation_is_invalid(self):
+        states = self.states.copy()
+        states[2, 0] = 2.03
+
+        self.assertFalse(self.is_plausible(
+            spatial_states=states,
+            lateral_tolerance=0.02,
+        ))
+
     def test_distant_prediction_start_is_invalid(self):
         prediction = ([20.0, 21.0, 22.0], [0.0, 0.0, 0.0])
 
@@ -96,6 +107,61 @@ class TestPredictionPlausibility(unittest.TestCase):
             self.prediction,
             current_position=(20.0, 0.0),
         ))
+
+
+class TestOuterBoundaryGuard(unittest.TestCase):
+    def setUp(self):
+        self.lower = np.array([-3.0, -3.1])
+        self.upper = np.array([3.0, 3.1])
+
+    def test_full_width_insets_both_physical_edges(self):
+        lower, upper = apply_outer_boundary_guard(
+            self.lower, self.upper, None, 0.1)
+
+        np.testing.assert_allclose(lower, [-2.9, -3.0])
+        np.testing.assert_allclose(upper, [2.9, 3.0])
+
+    def test_outer_lanes_inset_only_their_physical_edge(self):
+        l0_lower, l0_upper = apply_outer_boundary_guard(
+            self.lower, self.upper, 0, 0.1)
+        l2_lower, l2_upper = apply_outer_boundary_guard(
+            self.lower, self.upper, 2, 0.1)
+
+        np.testing.assert_allclose(l0_lower, self.lower + 0.1)
+        np.testing.assert_allclose(l0_upper, self.upper)
+        np.testing.assert_allclose(l2_lower, self.lower)
+        np.testing.assert_allclose(l2_upper, self.upper - 0.1)
+
+    def test_l1_is_unchanged_and_inputs_are_not_mutated(self):
+        lower_before = self.lower.copy()
+        upper_before = self.upper.copy()
+        lower, upper = apply_outer_boundary_guard(
+            self.lower, self.upper, 1, 0.1)
+
+        np.testing.assert_allclose(lower, lower_before)
+        np.testing.assert_allclose(upper, upper_before)
+        np.testing.assert_array_equal(self.lower, lower_before)
+        np.testing.assert_array_equal(self.upper, upper_before)
+
+    def test_guard_can_expose_an_inverted_narrow_corridor(self):
+        lower, upper = apply_outer_boundary_guard(
+            np.array([-0.04]), np.array([0.04]), None, 0.1)
+
+        self.assertGreater(lower[0], upper[0])
+
+        normalized_lower, normalized_upper = zero_inverted_bounds(
+            lower, upper)
+        np.testing.assert_array_equal(normalized_lower, [0.0])
+        np.testing.assert_array_equal(normalized_upper, [0.0])
+
+    def test_normalization_preserves_valid_samples(self):
+        lower, upper = zero_inverted_bounds(
+            np.array([-1.0, 0.5]),
+            np.array([1.0, 0.4]),
+        )
+
+        np.testing.assert_array_equal(lower, [-1.0, 0.0])
+        np.testing.assert_array_equal(upper, [1.0, 0.0])
 
 
 class TestPredictionFallbackLimit(unittest.TestCase):
