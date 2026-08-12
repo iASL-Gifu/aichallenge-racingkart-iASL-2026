@@ -132,7 +132,15 @@ mpc:
   a_min: -1.0 # m/s^2
   a_max: 2.5 # m/s^2
   delta_max_deg: 18.0 # degrees
-  steer_rate_max: 0.60 # rad/s max_steering_rate
+  # 物理タイヤ角の速度上限 [rad/s]。3.00から段階的に下げて比較する。
+  # steering_tire_angle_gain_varでは割らず、MPCと出力メッセージへ直接渡す。
+  steer_rate_max: 1.50
+  # Steering-state MPC: x=[e_y,e_psi,t,delta], u=[v,delta_rate]
+  steering_state_weight: 1000000.0
+  terminal_steering_state_weight: 1000000.0
+  # レート下限の単独評価中は、先読みと追加の到達可能速度制限を無効にする。
+  steering_preview_enabled: false
+  steering_reachability_speed_enabled: false
   control_rate: 40.0 # Hz Ts=1/control_rate
   solve_time_budget_ms: 20.0 # 初回失敗後、安全マージンを緩和する追加再試行だけの時間上限
   max_prediction_fallback_cycles: 3 # 古い予測・制御列を再利用できる最大連続失敗周期
@@ -143,6 +151,7 @@ mpc:
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 0.2
+  # steering-state MPCでは使用しない（旧curvature-input MPC互換用）。
   steer_low_pass_gain: 0.5
   # 遅延後の姿勢を予測するため、固定Waypoint先読みは重ねない。
   wp_id_offset: 0
@@ -207,7 +216,6 @@ mpc:
 
 v2x_obstacle_avoidance:
   vehicle_radius: 0.725          # [m]
-  sample_freshness_sec: 0.5      # [s] active車両の衝突判定に使えるV2X受信鮮度
   v_max_safety: 40.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
   parallel_vehicle_half_width: 0.725 # [m] 並走横クリアランス用の相手車両半幅

@@ -217,12 +217,8 @@ class V2XVehicleTracker:
         self._velocities: Dict[str, Tuple[float, float]] = {}
         self._velocity_valid: Dict[str, bool] = {}
         self._active: List[str] = []
-        self._last_seen_received_at: Dict[str, float] = {}
 
-    def update(self, msg, received_at=None) -> None:
-        if received_at is None:
-            received_at = _stamp_to_seconds(msg.header.stamp)
-        received_at = float(received_at)
+    def update(self, msg) -> None:
         active: List[str] = []
         for v in msg.vehicles:
             vid = v.vehicle_id
@@ -267,7 +263,6 @@ class V2XVehicleTracker:
                     self._velocities[vid] = (0.0, 0.0)
                     self._velocity_valid[vid] = False
             active.append(vid)
-            self._last_seen_received_at[vid] = received_at
         self._active = active
 
     def velocity(self, vehicle_id: str) -> Tuple[float, float]:
@@ -288,25 +283,6 @@ class V2XVehicleTracker:
 
     def active_vehicle_ids(self) -> List[str]:
         return list(self._active)
-
-    def clear_active(self) -> None:
-        """Invalidate the latest active set while retaining velocity history."""
-        self._active = []
-
-    def is_active_and_fresh(
-        self, vehicle_id: str, now_sec: float, max_age_sec: float
-    ) -> bool:
-        """Return whether a vehicle is present in the latest fresh V2X array."""
-        if vehicle_id not in self._active:
-            return False
-        last_seen = self._last_seen_received_at.get(vehicle_id)
-        if last_seen is None:
-            return False
-        age = float(now_sec) - float(last_seen)
-        # A small future timestamp can occur at a clock update boundary. It is
-        # still current, but a large clock mismatch must not remain valid.
-        max_age = max(float(max_age_sec), 0.0)
-        return -max_age <= age <= max_age
 
     def predict_all(self, t_samples) -> Dict[str, List[Tuple[float, float]]]:
         return {vid: self.predict_positions(vid, t_samples) for vid in self._active}

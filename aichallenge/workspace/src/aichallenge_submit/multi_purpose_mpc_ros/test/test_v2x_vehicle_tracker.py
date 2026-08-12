@@ -135,27 +135,6 @@ def test_active_ids_reflect_latest_message_only():
     assert tracker.velocity("d3") == pytest.approx((0.0, 0.0))
 
 
-def test_active_vehicle_must_also_be_fresh():
-    tracker = V2XVehicleTracker(
-        v_max_safety=30.0, position_jump_threshold=20.0)
-    tracker.update(
-        _msg(10.0, [("d2", 1.0, 2.0)]), received_at=100.0)
-
-    assert tracker.is_active_and_fresh("d2", 100.4, 0.5) is True
-    assert tracker.is_active_and_fresh("d2", 100.6, 0.5) is False
-
-
-def test_dropped_vehicle_is_not_current_even_with_retained_samples():
-    tracker = V2XVehicleTracker(
-        v_max_safety=30.0, position_jump_threshold=20.0)
-    tracker.update(
-        _msg(10.0, [("d2", 1.0, 2.0)]), received_at=100.0)
-    tracker.update(_msg(10.1, []), received_at=100.1)
-
-    assert tracker.is_active_and_fresh("d2", 100.1, 0.5) is False
-    assert tracker.predict_positions("d2", [0.0])
-
-
 def test_predict_all_returns_only_active_vehicles():
     tracker = V2XVehicleTracker(v_max_safety=30.0, position_jump_threshold=20.0)
     tracker.update(_msg(0.0, [("d2", 0.0, 0.0), ("d3", 10.0, 10.0)]))

@@ -122,12 +122,14 @@ RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
 YELLOW = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
 CYAN = ColorRGBA(r=0.0, g=156.0 / 255.0, b=209.0 / 255.0, a=1.0)
 
-def array_to_ackermann_control_command(stamp, u: np.ndarray, acc: float) -> AckermannControlCommand:
+def array_to_ackermann_control_command(
+        stamp, u: np.ndarray, acc: float,
+        steering_rate_radps: float) -> AckermannControlCommand:
     msg = AckermannControlCommand()
     msg.stamp = stamp
     msg.lateral.stamp = stamp
     msg.lateral.steering_tire_angle = u[1]
-    msg.lateral.steering_tire_rotation_rate = 0.6
+    msg.lateral.steering_tire_rotation_rate = float(steering_rate_radps)
     msg.longitudinal.stamp = stamp
     msg.longitudinal.speed = u[0]
     msg.longitudinal.acceleration = acc
@@ -490,10 +492,6 @@ class MPCController(Node):
                 "umin": np.array([0.0, -np.tan(mpc_cfg.delta_max) / car.length]),
                 "umax": np.array([mpc_cfg.v_max, np.tan(mpc_cfg.delta_max) / car.length])}
 
-            # mpcからのsteer指令出力は、gainを掛けて出力され、その状態で車体のsteer rate limit が適用されるため、
-            # mpcの制御計算におけるsteer_rate_maxは、実際のsteer_rate_maxをgainで除した値で設定する
-            scaled_steer_rate_max = mpc_cfg.steer_rate_max / mpc_cfg.steering_tire_angle_gain_var
-
             mpc = MPC(
                 car,
                 N,
@@ -503,12 +501,31 @@ class MPCController(Node):
                 state_constraints,
                 input_constraints,
                 mpc_cfg.ay_max,
-                scaled_steer_rate_max,
+                # Physical tire-angle rate [rad/s].  The MPC steering state,
+                # controller output and steering report all use physical tire
+                # angle. steering_tire_angle_gain_var is only a wire-command
+                # conversion applied immediately before publication, so it
+                # must not scale this dynamics constraint.
+                mpc_cfg.steer_rate_max,
                 mpc_cfg.wp_id_offset,
                 self.USE_OBSTACLE_AVOIDANCE,
                 self._cfg.reference_path.use_path_constraints_topic,
                 mpc_cfg.use_max_kappa_pred,
-                mpc_cfg.understeer_coeff)
+                mpc_cfg.understeer_coeff,
+                use_steering_state=True,
+                steering_state_weight=float(getattr(
+                    cfg_mpc, "steering_state_weight", 1.0e6)),
+                terminal_steering_state_weight=float(getattr(
+                    cfg_mpc, "terminal_steering_state_weight", 1.0e6)),
+                # Keep the first rate-limit sweep isolated from preview and
+                # proactive speed-cap effects. These can be enabled later
+                # after the lowest stable physical rate is identified.
+                steering_preview_enabled=bool(getattr(
+                    cfg_mpc, "steering_preview_enabled", False)),
+                steering_command_delay=float(getattr(
+                    cfg_mpc, "steering_command_delay", 0.15)),
+                steering_reachability_speed_enabled=bool(getattr(
+                    cfg_mpc, "steering_reachability_speed_enabled", False)))
 
             mpc.solve_time_budget_ms = max(float(getattr(
                 cfg_mpc, "solve_time_budget_ms", 20.0)), 0.0)
@@ -925,7 +942,6 @@ class MPCController(Node):
             #動的障害物(V2Xなど他車両)
             self._dynamic_obstacles: List[Obstacle] = []
             self._obstacles_updated = bool(self._static_obstacles)
-            self._last_v2x_received_sec = None
             v2x_cfg = self._cfg.v2x_obstacle_avoidance  # type: ignore
             #V2Xの位置追跡からtrackingを行うモジュール(id管理、位置のスムージング、ジャンプ除去、速度推定)
             self._v2x_tracker = V2XVehicleTracker(
@@ -934,8 +950,6 @@ class MPCController(Node):
                 warn_callback=self.get_logger().warn,
             )
             self._v2x_vehicle_radius = float(v2x_cfg.vehicle_radius)
-            self._v2x_sample_freshness_sec = max(float(getattr(
-                v2x_cfg, "sample_freshness_sec", 0.5)), 0.0)
             self._v2x_parallel_vehicle_half_width = max(float(getattr(
                 v2x_cfg, "parallel_vehicle_half_width",
                 self._v2x_vehicle_radius)), 0.0)
@@ -1292,7 +1306,9 @@ class MPCController(Node):
         v_cmd = u[0]
         steer_cmd = u[1]
 
-        ackerman_cmd = array_to_ackermann_control_command(stamp.to_msg(), [v_cmd, steer_cmd], acc)
+        ackerman_cmd = array_to_ackermann_control_command(
+            stamp.to_msg(), [v_cmd, steer_cmd], acc,
+            self._mpc_cfg.steer_rate_max)
 
         if not self.USE_BUG_ACC:
             return ackerman_cmd
@@ -1850,11 +1866,6 @@ class MPCController(Node):
     def _prediction_is_clear_of_vehicle(self, target_id) -> bool:
         """Check the current MPC prediction against one moving V2X vehicle."""
         if target_id is None or self._mpc.current_prediction is None:
-            return False
-        now_sec = float(self.get_clock().now().nanoseconds) / 1e9
-        if not self._v2x_tracker.is_active_and_fresh(
-            target_id, now_sec, self._v2x_sample_freshness_sec
-        ):
             return False
         target_buf = self._v2x_tracker._samples.get(target_id)
         if not target_buf:
@@ -3964,7 +3975,7 @@ class MPCController(Node):
         # If obstacle avoidance is disabled, clear tracker and bypass V2X processing entirely.
         if not self.USE_OBSTACLE_AVOIDANCE:
             if hasattr(self, '_v2x_tracker'):
-                self._v2x_tracker.clear_active()
+                self._v2x_tracker._active = []
             return
 
         # Create a new list excluding the ego vehicle
@@ -3977,9 +3988,7 @@ class MPCController(Node):
         # Override msg.vehicles with the filtered list
         msg.vehicles = filtered_vehicles
 
-        received_at = float(self.get_clock().now().nanoseconds) / 1e9
-        self._v2x_tracker.update(msg, received_at=received_at)
-        self._last_v2x_received_sec = received_at
+        self._v2x_tracker.update(msg)
         self._v2x_received_once = True
         self._capture_grounded_start_boost_layout()
         predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
@@ -4392,24 +4401,6 @@ class MPCController(Node):
                     self._car.update_reference_path(self._car.reference_path)
 
         #メイン更新処理
-        if (
-            self.USE_OBSTACLE_AVOIDANCE
-            and self._dynamic_obstacles
-            and self._last_v2x_received_sec is not None
-            and float(now.nanoseconds) / 1e9 - self._last_v2x_received_sec
-                > self._v2x_sample_freshness_sec
-        ):
-            # No callback arrives when the whole V2X stream stops. Clear the
-            # retained obstacle array so old positions cannot become permanent
-            # map obstacles or remain active targets.
-            self._dynamic_obstacles = []
-            self._v2x_tracker.clear_active()
-            self._obstacles_updated = True
-            self.get_logger().warn(
-                "[V2XFreshness] V2X stream became stale; clearing retained "
-                "dynamic obstacles and active vehicle IDs.",
-                throttle_duration_sec=1.0,
-            )
         if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
             self._obstacles_updated = False
             self._map.reset_map() #毎周期障害物を消して作り直している
@@ -7956,7 +7947,16 @@ class MPCController(Node):
                 or initial_start_boost_active
             ):
                 acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
-            u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
+            # Steering-state MPC already integrates the physically bounded
+            # delta_rate into the command sequence. Applying another low-pass
+            # filter here would create an actuator trajectory different from
+            # the one used by the prediction and delay model.
+            if not getattr(self._mpc, "uses_steering_state", False):
+                u[1] = (
+                    self._last_u[1]
+                    + (u[1] - self._last_u[1])
+                    * self._mpc_cfg.steer_low_pass_gain
+                )
 
         self._last_acc = acc
         self._last_u[0] = u[0]
