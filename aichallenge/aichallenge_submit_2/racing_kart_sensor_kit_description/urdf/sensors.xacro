@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<robot name="vehicle" xmlns:xacro="http://ros.org/wiki/xacro">
+  <xacro:arg name="config_dir" default="$(find racing_kart_sensor_kit_description)/config"/>
+  <xacro:property name="calibration" value="${xacro.load_yaml('$(arg config_dir)/sensors_calibration.yaml')}"/>
+
+  <!-- sensor kit -->
+  <xacro:include filename="sensor_kit.xacro"/>
+  <xacro:sensor_kit_macro
+    parent="base_link"
+    x="${calibration['base_link']['sensor_kit_base_link']['x']}"
+    y="${calibration['base_link']['sensor_kit_base_link']['y']}"
+    z="${calibration['base_link']['sensor_kit_base_link']['z']}"
+    roll="${calibration['base_link']['sensor_kit_base_link']['roll']}"
+    pitch="${calibration['base_link']['sensor_kit_base_link']['pitch']}"
+    yaw="${calibration['base_link']['sensor_kit_base_link']['yaw']}"
+  />
+
+  <!-- lidar -->
+  <xacro:include filename="VLP-16.urdf.xacro"/>
+  <xacro:VLP-16
+    name="lidar"
+    parent="base_link">
+    <origin
+      xyz="${calibration['base_link']['lidar_link']['x']}
+           ${calibration['base_link']['lidar_link']['y']}
+           ${calibration['base_link']['lidar_link']['z']}"
+      rpy="${calibration['base_link']['lidar_link']['roll']}
+           ${calibration['base_link']['lidar_link']['pitch']}
+           ${calibration['base_link']['lidar_link']['yaw']}"
+    />
+  </xacro:VLP-16>
+
+  <!-- camera -->
+  <xacro:include filename="monocular_camera.xacro"/>
+  <xacro:monocular_camera_macro
+    name="camera"
+    parent="base_link"
+    x="${calibration['base_link']['camera_link']['x']}"
+    y="${calibration['base_link']['camera_link']['y']}"
+    z="${calibration['base_link']['camera_link']['z']}"
+    roll="${calibration['base_link']['camera_link']['roll']}"
+    pitch="${calibration['base_link']['camera_link']['pitch']}"
+    yaw="${calibration['base_link']['camera_link']['yaw']}"
+  />
+</robot>

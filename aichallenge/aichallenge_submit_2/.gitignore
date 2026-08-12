@@ -1,0 +1,24 @@
+*details.json
+/log
+*.log
+*.webm
+*.db3
+*.mcap
+rosbag2*/
+*.pyc
+*pem
+*.zstd
+.env
+vehicle/.env
+metadata.yaml
+output/
+outputs/
+aichallenge/capture/
+
+# AI related local notes (do not commit)
+.claude
+doc/tmp/*
+/MEMORY.md
+/Plan.md
+/PR.md
+/CLAUDE.md
