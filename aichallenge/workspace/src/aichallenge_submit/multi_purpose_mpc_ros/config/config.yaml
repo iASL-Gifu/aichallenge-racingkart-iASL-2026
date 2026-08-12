@@ -8,10 +8,11 @@ map:
   # path from pkg share dir
   yaml_path: "env/min_curv/occupancy_grid_map.yaml"
 
+
 waypoints:
   # path from pkg share dir
   # csv_path: "maps/occupancy_grid_map_waypoints.csv"
-  csv_path: "env/centerline/waypoint_bounds_center.csv"
+  csv_path: "env/centerline/waypoint_bounds_center_geometry_smooth_local.csv"
 
 obstacles:
   # path from pkg share dir
@@ -24,7 +25,7 @@ reference_path:
   # path from pkg share dir
   # csv_path: ""
   # csv_path は追い越し・追従フラグ時（center セット）に使用する軌道
-  csv_path: "env/centerline/traj_center313.csv"
+  csv_path: "env/centerline/traj_center313_geometry_smooth_local.csv"
 
   # --- 軌道・境界線CSVの切り替え設定 ---
   # 通常走行時（追い越し・追従フラグなし）に使用するレースライン軌道
@@ -33,10 +34,9 @@ reference_path:
   race_bounds_csv_path: "env/min_curv2/waypoint_bounds.csv"
 
   # 追い越し・追従フラグ時に使用する安定化軌道（センターライン）
-  center_csv_path: "env/centerline/traj_center313.csv"
+  center_csv_path: "env/centerline/traj_center313_geometry_smooth_local.csv"
   # 追い越し・追従フラグ時の境界線CSV（センターライン基準）
-  center_bounds_csv_path: "env/centerline/waypoint_bounds_center.csv"
-
+  center_bounds_csv_path: "env/centerline/waypoint_bounds_center_geometry_smooth_local.csv"
   resolution: 0.6
   smoothing_distance: 2
   #(ref_max_width / 2.0 + self._v2x_vehicle_radius + 0.5) ** 2
