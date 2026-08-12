@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""Compare aggregated safety metrics from two logs or log directories."""
+
+import argparse
+import csv
+import json
+import math
+import re
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+LAP_RE = re.compile(r"Lap\s+\d+\s+completed!")
+EB_RE = re.compile(r"\[EmergencyBrake\].*?at\s+([0-9.]+)m")
+TIMING_RE = re.compile(
+    r"N=\d+\s+build=([0-9.]+)ms\s+solve=([0-9.]+)ms\s+"
+    r"total=([0-9.]+)ms\s+target=([0-9.]+)ms"
+)
+CONFIG_RE = re.compile(r"\[SafetyEvaluationConfig\]\s+(.*)")
+PAIR_RE = re.compile(r"([A-Za-z0-9_]+)=([^\s]+)")
+
+
+@dataclass
+class Metrics:
+    log_files: int = 0
+    completed_laps: int = 0
+    emergency_brakes: int = 0
+    closest_emergency_brake_m: float | None = None
+    emergency_brakes_under_2m: int = 0
+    primal_infeasible: int = 0
+    mpc_fallback: int = 0
+    safety_recovery_starts: int = 0
+    no_control_signal: int = 0
+    reverse_recovery_completed: int = 0
+    lane_state_changes: int = 0
+    mean_mpc_time_ms: float | None = None
+    mpc_budget_overrun_percent: float | None = None
+    max_mpc_time_ms: float | None = None
+    timing_samples: int = 0
+    timing_overruns: int = 0
+    timing_total_ms: float = 0.0
+
+
+def read_log(path: Path) -> tuple[Metrics, dict[str, str]]:
+    metrics = Metrics()
+    metrics.log_files = 1
+    times: list[float] = []
+    overruns = 0
+    config: dict[str, str] = {}
+    text = ANSI_RE.sub("", path.read_text(encoding="utf-8", errors="replace"))
+
+    for line in text.splitlines():
+        if LAP_RE.search(line):
+            metrics.completed_laps += 1
+        match = EB_RE.search(line)
+        if match:
+            distance = float(match.group(1))
+            metrics.emergency_brakes += 1
+            if distance < 2.0:
+                metrics.emergency_brakes_under_2m += 1
+            if (metrics.closest_emergency_brake_m is None
+                    or distance < metrics.closest_emergency_brake_m):
+                metrics.closest_emergency_brake_m = distance
+        if "primal infeasible" in line.lower():
+            metrics.primal_infeasible += 1
+        if "[MPCFallback]" in line:
+            metrics.mpc_fallback += 1
+        if ("[MPCSafetyRecovery] discarding stale prediction" in line
+                or "[SafetyMetric] event=safety_recovery_start" in line):
+            metrics.safety_recovery_starts += 1
+        if "No control signal computed" in line:
+            metrics.no_control_signal += 1
+        if "[StuckRecovery] REVERSE drive finished" in line:
+            metrics.reverse_recovery_completed += 1
+        if "[LaneChange] Switching" in line:
+            metrics.lane_state_changes += 1
+        match = TIMING_RE.search(line)
+        if match:
+            total = float(match.group(3))
+            target = float(match.group(4))
+            times.append(total)
+            overruns += int(total > target)
+        match = CONFIG_RE.search(line)
+        if match:
+            config.update(dict(PAIR_RE.findall(match.group(1))))
+
+    if times:
+        metrics.timing_samples = len(times)
+        metrics.timing_overruns = overruns
+        metrics.timing_total_ms = sum(times)
+        metrics.mean_mpc_time_ms = sum(times) / len(times)
+        metrics.mpc_budget_overrun_percent = 100.0 * overruns / len(times)
+        metrics.max_mpc_time_ms = max(times)
+    return metrics, config
+
+
+def resolve_logs(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        return sorted(item for item in path.rglob("*.log") if item.is_file())
+    raise FileNotFoundError(f"ログまたはディレクトリが見つかりません: {path}")
+
+
+def read_logs(path: Path) -> tuple[Metrics, list[dict[str, str]], list[Path]]:
+    files = resolve_logs(path)
+    if not files:
+        raise ValueError(f".logファイルがありません: {path}")
+    total = Metrics()
+    configs: list[dict[str, str]] = []
+    for log_path in files:
+        current, config = read_log(log_path)
+        total.log_files += 1
+        total.completed_laps += current.completed_laps
+        total.emergency_brakes += current.emergency_brakes
+        total.emergency_brakes_under_2m += current.emergency_brakes_under_2m
+        total.primal_infeasible += current.primal_infeasible
+        total.mpc_fallback += current.mpc_fallback
+        total.safety_recovery_starts += current.safety_recovery_starts
+        total.no_control_signal += current.no_control_signal
+        total.reverse_recovery_completed += current.reverse_recovery_completed
+        total.lane_state_changes += current.lane_state_changes
+        total.timing_samples += current.timing_samples
+        total.timing_overruns += current.timing_overruns
+        total.timing_total_ms += current.timing_total_ms
+        if current.closest_emergency_brake_m is not None:
+            if (total.closest_emergency_brake_m is None
+                    or current.closest_emergency_brake_m < total.closest_emergency_brake_m):
+                total.closest_emergency_brake_m = current.closest_emergency_brake_m
+        if current.max_mpc_time_ms is not None:
+            total.max_mpc_time_ms = max(
+                total.max_mpc_time_ms or current.max_mpc_time_ms,
+                current.max_mpc_time_ms)
+        if config:
+            configs.append(config)
+    if total.timing_samples:
+        total.mean_mpc_time_ms = total.timing_total_ms / total.timing_samples
+        total.mpc_budget_overrun_percent = (
+            100.0 * total.timing_overruns / total.timing_samples)
+    return total, configs, files
+
+
+def lower_is_better(new: float, old: float, near_equal: float = 0.10) -> str:
+    if new == old:
+        return "同等"
+    scale = max(abs(new), abs(old), 1.0)
+    if abs(new - old) / scale <= near_equal:
+        return "ほぼ同等"
+    winner = "修正版" if new < old else "旧版"
+    ratio = abs(new - old) / scale
+    strength = "が明確に優位" if ratio >= 0.50 else "優位" if ratio >= 0.25 else "がやや良い"
+    return winner + strength
+
+
+def higher_is_better(new: float, old: float, near_equal: float = 0.10) -> str:
+    return lower_is_better(-new, -old, near_equal)
+
+
+def fmt(value: float | int | None, unit: str = "", digits: int = 1) -> str:
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "N/A"
+    if isinstance(value, int):
+        return f"{value}{unit}"
+    return f"{value:.{digits}f}{unit}"
+
+
+def rows(new: Metrics, old: Metrics) -> list[tuple[str, str, str, str]]:
+    closest_eval = "評価不能"
+    if new.closest_emergency_brake_m is not None and old.closest_emergency_brake_m is not None:
+        closest_eval = higher_is_better(
+            new.closest_emergency_brake_m, old.closest_emergency_brake_m, 0.05)
+    return [
+        ("完走ラップ", fmt(new.completed_laps), fmt(old.completed_laps),
+         higher_is_better(new.completed_laps, old.completed_laps)),
+        ("EmergencyBrake", fmt(new.emergency_brakes, "回"), fmt(old.emergency_brakes, "回"),
+         lower_is_better(new.emergency_brakes, old.emergency_brakes)),
+        ("最接近時のEmergencyBrake距離", fmt(new.closest_emergency_brake_m, " m", 2),
+         fmt(old.closest_emergency_brake_m, " m", 2), closest_eval),
+        ("2 m未満への接近", fmt(new.emergency_brakes_under_2m, "回"),
+         fmt(old.emergency_brakes_under_2m, "回"),
+         lower_is_better(new.emergency_brakes_under_2m, old.emergency_brakes_under_2m)),
+        ("MPC primal infeasible", fmt(new.primal_infeasible, "回"),
+         fmt(old.primal_infeasible, "回"), lower_is_better(new.primal_infeasible, old.primal_infeasible)),
+        ("MPC fallback", fmt(new.mpc_fallback, "回"), fmt(old.mpc_fallback, "回"),
+         lower_is_better(new.mpc_fallback, old.mpc_fallback)),
+        ("SafetyRecovery開始", fmt(new.safety_recovery_starts, "回"),
+         fmt(old.safety_recovery_starts, "回"),
+         lower_is_better(new.safety_recovery_starts, old.safety_recovery_starts)),
+        ("No control signal", fmt(new.no_control_signal, "回"), fmt(old.no_control_signal, "回"),
+         lower_is_better(new.no_control_signal, old.no_control_signal)),
+        ("後退復旧完了", fmt(new.reverse_recovery_completed, "回"),
+         fmt(old.reverse_recovery_completed, "回"),
+         lower_is_better(new.reverse_recovery_completed, old.reverse_recovery_completed)),
+        ("車線状態変更", fmt(new.lane_state_changes, "回"), fmt(old.lane_state_changes, "回"),
+         lower_is_better(new.lane_state_changes, old.lane_state_changes, 0.12)),
+        ("平均MPC処理時間", fmt(new.mean_mpc_time_ms, " ms"), fmt(old.mean_mpc_time_ms, " ms"),
+         lower_is_better(new.mean_mpc_time_ms or math.inf, old.mean_mpc_time_ms or math.inf)),
+        ("25 ms超過率", fmt(new.mpc_budget_overrun_percent, "%"),
+         fmt(old.mpc_budget_overrun_percent, "%"),
+         lower_is_better(new.mpc_budget_overrun_percent or 0.0,
+                         old.mpc_budget_overrun_percent or 0.0)),
+        ("最大MPC処理時間", fmt(new.max_mpc_time_ms, " ms"), fmt(old.max_mpc_time_ms, " ms"),
+         lower_is_better(new.max_mpc_time_ms or math.inf, old.max_mpc_time_ms or math.inf)),
+    ]
+
+
+def config_warnings(new_configs: list[dict[str, str]], old_configs: list[dict[str, str]]) -> list[str]:
+    if not new_configs or not old_configs:
+        return ["SafetyEvaluationConfigがない旧ログです。走行条件の一致は手動確認してください。"]
+    new_variants = {tuple(sorted(config.items())) for config in new_configs}
+    old_variants = {tuple(sorted(config.items())) for config in old_configs}
+    warnings = []
+    if len(new_variants) > 1:
+        warnings.append(f"修正版ログ内に{len(new_variants)}種類の設定があります。")
+    if len(old_variants) > 1:
+        warnings.append(f"旧版ログ内に{len(old_variants)}種類の設定があります。")
+    new = dict(next(iter(new_variants)))
+    old = dict(next(iter(old_variants)))
+    ignored = {"steering_state_mpc"}
+    keys = sorted((set(new) | set(old)) - ignored)
+    warnings.extend(
+        f"設定不一致: {key}: 修正版={new.get(key, 'N/A')}, 旧版={old.get(key, 'N/A')}"
+        for key in keys if new.get(key) != old.get(key))
+    return warnings
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "new_log", nargs="?", type=Path,
+        default=Path("/home/takenoyama/aichallenge-racingkart/output/new"),
+        help="修正版の.logファイルまたはディレクトリ")
+    parser.add_argument(
+        "old_log", nargs="?", type=Path,
+        default=Path("/home/takenoyama/aichallenge-racingkart/output/old"),
+        help="旧版の.logファイルまたはディレクトリ")
+    parser.add_argument("--format", choices=("markdown", "json", "csv"), default="markdown")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    new, new_cfg, new_files = read_logs(args.new_log)
+    old, old_cfg, old_files = read_logs(args.old_log)
+    result_rows = rows(new, old)
+    warnings = config_warnings(new_cfg, old_cfg)
+
+    if args.format == "json":
+        output = json.dumps({"new": asdict(new), "old": asdict(old),
+                             "new_configs": new_cfg, "old_configs": old_cfg,
+                             "new_files": [str(path) for path in new_files],
+                             "old_files": [str(path) for path in old_files],
+                             "evaluation": result_rows, "warnings": warnings},
+                            ensure_ascii=False, indent=2)
+    elif args.format == "csv":
+        import io
+        stream = io.StringIO()
+        writer = csv.writer(stream)
+        writer.writerow(("安全性指標", "修正版", "旧版", "評価"))
+        writer.writerows(result_rows)
+        output = stream.getvalue().rstrip()
+    else:
+        lines = [f"集計ログ数: 修正版={len(new_files)}、旧版={len(old_files)}", "",
+                 "| 安全性指標 | 修正版 | 旧版 | 評価 |",
+                 "|---|---:|---:|---|"]
+        lines.extend(f"| {name} | {new_v} | {old_v} | {evaluation} |"
+                     for name, new_v, old_v, evaluation in result_rows)
+        if warnings:
+            lines.extend(["", "注意:"] + [f"- {warning}" for warning in warnings])
+        lines.extend(["", f"処理時間サンプル: 修正版={new.timing_samples}, 旧版={old.timing_samples}"])
+        output = "\n".join(lines)
+
+    if args.output:
+        args.output.write_text(output + "\n", encoding="utf-8")
+    else:
+        print(output)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

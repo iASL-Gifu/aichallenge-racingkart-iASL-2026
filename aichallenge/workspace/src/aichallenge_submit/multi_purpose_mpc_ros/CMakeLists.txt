@@ -29,6 +29,7 @@ ament_python_install_package(${PROJECT_NAME}
 )
 
 install(PROGRAMS
+  scripts/compare_mpc_safety_logs
   scripts/run_mpc_controller.bash
   scripts/run_mpc_simulation.bash
   scripts/run_reference_path_visualizer.bash

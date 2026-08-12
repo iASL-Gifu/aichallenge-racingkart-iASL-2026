@@ -69,7 +69,6 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     prediction_clears_moving_vehicle,
     predictions_to_obstacles,
     project_to_closed_path_frenet,
-    relative_longitudinal_distance,
     reverse_path_has_vehicle_conflict,
     select_safe_outer_lane,
     select_latched_overtake_lane,
@@ -594,6 +593,9 @@ class MPCController(Node):
             self._center_arc_cumulative,
             self._center_arc_total_length,
         ) = build_closed_path_arc_lengths(center_arc_points)
+        self._center_arc_mean_wp_spacing = (
+            self._center_arc_total_length / max(len(center_arc_points), 1)
+        )
         #compute_speed_profile(self._car10_center, self._mpc_cfg_center)
 
         # Lane lock on curves configuration
@@ -614,6 +616,17 @@ class MPCController(Node):
         self._mpc = self._mpcN
 
         cfg_mpc = self._cfg.mpc  # type: ignore
+        self.get_logger().info(
+            "[SafetyEvaluationConfig] "
+            f"N={int(cfg_mpc.N)} "
+            f"control_rate_hz={float(cfg_mpc.control_rate):.3f} "
+            f"solve_budget_ms={float(getattr(cfg_mpc, 'solve_time_budget_ms', 20.0)):.3f} "
+            f"steer_rate_max_radps={float(cfg_mpc.steer_rate_max):.6f} "
+            f"delta_max_deg={float(cfg_mpc.delta_max_deg):.3f} "
+            f"steering_state_mpc={bool(getattr(self._mpc, 'uses_steering_state', False))} "
+            f"steer_output_lowpass={float(cfg_mpc.steer_low_pass_gain):.6f} "
+            f"steering_gain={float(cfg_mpc.steering_tire_angle_gain_var):.6f}"
+        )
         self._delay_prediction_enabled = bool(
             getattr(cfg_mpc, "delay_prediction_enabled", True))
         self._steering_command_delay = max(
@@ -1502,8 +1515,10 @@ class MPCController(Node):
                 continue
             _, vehicle_x, vehicle_y = buf[-1]
             lane_idx = self._lane_index_for_position(vehicle_x, vehicle_y)
-            longitudinal = relative_longitudinal_distance(
-                vehicle_x - pose.x, vehicle_y - pose.y, pose.theta)
+            longitudinal = self._center_longitudinal_between(
+                pose.x, pose.y, vehicle_x, vehicle_y)
+            if longitudinal is None:
+                continue
             samples.append((vehicle_id, lane_idx, longitudinal))
 
             if prediction_sec <= 0.0:
@@ -1512,11 +1527,10 @@ class MPCController(Node):
             future_x = vehicle_x + velocity_x * prediction_sec
             future_y = vehicle_y + velocity_y * prediction_sec
             future_lane_idx = self._lane_index_for_position(future_x, future_y)
-            future_longitudinal = relative_longitudinal_distance(
-                future_x - ego_future_x,
-                future_y - ego_future_y,
-                pose.theta,
-            )
+            future_longitudinal = self._center_longitudinal_between(
+                ego_future_x, ego_future_y, future_x, future_y)
+            if future_longitudinal is None:
+                continue
             samples.append((vehicle_id, future_lane_idx, future_longitudinal))
         return samples
 
@@ -3100,8 +3114,8 @@ class MPCController(Node):
             "x": target_x,
             "y": target_y,
             "distance": math.hypot(target_x - pose.x, target_y - pose.y),
-            "longitudinal": relative_longitudinal_distance(
-                target_x - pose.x, target_y - pose.y, pose.theta),
+            "longitudinal": self._center_longitudinal_between(
+                pose.x, pose.y, target_x, target_y),
             "speed": math.hypot(velocity_x, velocity_y),
             "offset": target_offset,
             "velocity_valid": velocity_valid,
@@ -3951,6 +3965,23 @@ class MPCController(Node):
             self._center_arc_total_length,
         )
 
+    def _center_longitudinal_between(
+        self, ego_x: float, ego_y: float, other_x: float, other_y: float
+    ):
+        """Return signed other-minus-ego distance along the Center arc."""
+        ego_frenet = self._center_frenet(ego_x, ego_y)
+        other_frenet = self._center_frenet(other_x, other_y)
+        if ego_frenet is None or other_frenet is None:
+            return None
+        return signed_closed_path_arc_distance(
+            ego_frenet[0], other_frenet[0], self._center_arc_total_length)
+
+    def _center_arc_as_waypoint_delta(self, arc_delta):
+        """Convert Center arc metres to legacy waypoint-count thresholds."""
+        if arc_delta is None or self._center_arc_mean_wp_spacing <= 1e-6:
+            return None
+        return float(arc_delta) / self._center_arc_mean_wp_spacing
+
     def _center_lane_index_for_offset(
         self, x: float, y: float, lateral_offset: float
     ):
@@ -4474,11 +4505,13 @@ class MPCController(Node):
                     # Euclidean 距離で事前フィルタ（過度に遠い車は全点スキャンをスキップ）
                     if math.hypot(opp_x - pose.x, opp_y - pose.y) > 35.0:
                         continue
-                    opp_wp_id = self._carN_race.get_closest_waypoint(opp_x, opp_y)
-                    # 符号付きインデックス差（-N_total/2 〜 +N_total/2）
-                    wp_diff = (opp_wp_id - wp_temp + N_total_temp // 2) % N_total_temp - N_total_temp // 2
+                    arc_delta = self._center_longitudinal_between(
+                        pose.x, pose.y, opp_x, opp_y)
+                    wp_diff = self._center_arc_as_waypoint_delta(arc_delta)
+                    if wp_diff is None:
+                        continue
                     
-                    if wp_diff >= 0:
+                    if wp_diff >= 0.0:
                         if wp_diff < closest_opp_ahead:
                             closest_opp_ahead = wp_diff
                             closest_opp_ahead_id = vid
@@ -5337,13 +5370,13 @@ class MPCController(Node):
                 if buf:
                     _, opp_x, opp_y = buf[-1]
                     opp_wp_id = self._car.get_closest_waypoint(opp_x, opp_y)
-                    
-                    wp_diff = (opp_wp_id - wp) % N_total
-                    rel_forward = (
-                        (opp_x - pose.x) * math.cos(pose.theta)
-                        + (opp_y - pose.y) * math.sin(pose.theta)
-                    )
-                    same_wp_ahead = (wp_diff == 0 and rel_forward > 0.0)
+                    rel_forward = self._center_longitudinal_between(
+                        pose.x, pose.y, opp_x, opp_y)
+                    if rel_forward is None:
+                        continue
+                    wp_diff = self._center_arc_as_waypoint_delta(rel_forward)
+                    if wp_diff is None:
+                        continue
                     if startup_follow_priority_active:
                         start_distance = math.hypot(opp_x - pose.x, opp_y - pose.y)
                         priority_key = startup_same_lane_lead_key(
@@ -5366,7 +5399,7 @@ class MPCController(Node):
                             )
                         ):
                             startup_same_lane_candidate = candidate
-                    if same_wp_ahead or 0 < wp_diff < 40:
+                    if 0.0 < wp_diff < 40.0:
                         if wp_diff < min_wp_diff:
                             min_wp_diff = wp_diff
                             opponent_ahead = opp_wp_id
@@ -5395,9 +5428,8 @@ class MPCController(Node):
                     opp_y,
                 ) = startup_same_lane_candidate
                 start_longitudinal, opponent_distance, _ = startup_priority_key
-                min_wp_diff = (
-                    opponent_ahead - wp
-                ) % N_total
+                min_wp_diff = self._center_arc_as_waypoint_delta(
+                    start_longitudinal)
                 opp_wp = self._reference_path.get_waypoint(opponent_ahead)
                 angle_ub = opp_wp.psi + math.pi / 2.0
                 opponent_offset = (
@@ -5612,10 +5644,11 @@ class MPCController(Node):
             abort_vehicle_safely_ahead = abort_buf is None
             if abort_buf:
                 _, abort_x, abort_y = abort_buf[-1]
-                abort_longitudinal = relative_longitudinal_distance(
-                    abort_x - pose.x, abort_y - pose.y, pose.theta)
+                abort_longitudinal = self._center_longitudinal_between(
+                    pose.x, pose.y, abort_x, abort_y)
                 abort_vehicle_safely_ahead = (
-                    abort_longitudinal
+                    abort_longitudinal is not None
+                    and abort_longitudinal
                     >= self._prepass_lane_fallback_front_distance
                 )
             if abort_vehicle_safely_ahead:
@@ -6007,11 +6040,10 @@ class MPCController(Node):
             forced_vehicle_passed = forced_id not in active_ids
             if forced_buf:
                 _, forced_x, forced_y = forced_buf[-1]
-                forced_lon = (
-                    (forced_x - pose.x) * math.cos(pose.theta)
-                    + (forced_y - pose.y) * math.sin(pose.theta)
-                )
-                forced_vehicle_passed = forced_lon < -1.0
+                forced_lon = self._center_longitudinal_between(
+                    pose.x, pose.y, forced_x, forced_y)
+                forced_vehicle_passed = (
+                    forced_lon is not None and forced_lon < -1.0)
             if forced_vehicle_passed:
                 self.get_logger().info(
                     f"[StoppedVehicle] vehicle_id={forced_id} "
@@ -6027,11 +6059,8 @@ class MPCController(Node):
             target_buf = self._v2x_tracker._samples.get(latched_target_id)
             if target_buf:
                 _, target_x, target_y = target_buf[-1]
-                latched_target_longitudinal = relative_longitudinal_distance(
-                    target_x - pose.x,
-                    target_y - pose.y,
-                    pose.theta,
-                )
+                latched_target_longitudinal = self._center_longitudinal_between(
+                    pose.x, pose.y, target_x, target_y)
 
         prepass_target_tracking_active = bool(
             self._prepass_fallback_recovery_active
@@ -7276,15 +7305,13 @@ class MPCController(Node):
             # --- Emergency Proximity Brake (waypoint-independent) ---
             # opponent_ahead (waypoint差ベースの検出) に依存せず、全V2X車両を直接スキャンする。
             # wp_diff=0 の場合など waypoint 検出をすり抜けても必ずブレーキがかかる。
-            # 自車ヨー角を用いて「前方向」かどうかを判定する。
+            # Front/rear is determined on the Center arc. Ego yaw projection
+            # changes sign in corners and must not suppress a relevant car.
             EMERGENCY_BRAKE_DIST  = 6.0  # [m] この距離以内で前方に車がいたら緊急ブレーキ
-            EMERGENCY_BRAKE_ANGLE = 60.0 # [deg] 前方判定の角度半幅（進行方向±この角度以内）
             EMERGENCY_BRAKE_LATERAL_DIST = 1.2 # [m] 車線境界付近を含む横接近判定
             emergency_stopped_blocker_id = None
             emergency_stopped_blocker_dist = float("inf")
             if hasattr(self, '_v2x_tracker'):
-                ego_yaw = pose.theta  # 自車ヨー角 [rad]
-                cos_thresh = math.cos(math.radians(EMERGENCY_BRAKE_ANGLE))
                 for vid in self._v2x_tracker.active_vehicle_ids():
                     buf = self._v2x_tracker._samples.get(vid)
                     if buf:
@@ -7293,9 +7320,14 @@ class MPCController(Node):
                         dy = opp_y - pose.y
                         dist = math.hypot(dx, dy)
                         if dist < EMERGENCY_BRAKE_DIST and dist > 0.01:
-                            # 自車前方向ベクトルとの内積で「前方」を判定
-                            fwd_dot = (dx * math.cos(ego_yaw) + dy * math.sin(ego_yaw)) / dist
-                            if fwd_dot > cos_thresh:
+                            center_longitudinal = self._center_longitudinal_between(
+                                pose.x, pose.y, opp_x, opp_y)
+                            if (
+                                center_longitudinal is not None
+                                and 0.0 < center_longitudinal
+                                <= EMERGENCY_BRAKE_DIST
+                            ):
+                                fwd_dot = center_longitudinal / dist
                                 opp_wp_id = self._car.get_closest_waypoint(opp_x, opp_y)
                                 opp_wp = self._reference_path.get_waypoint(opp_wp_id)
                                 if opp_wp.normal_angle is not None:
@@ -7440,10 +7472,10 @@ class MPCController(Node):
                     _, opp_x, opp_y = buf[-1]
                     dx = opp_x - pose.x
                     dy = opp_y - pose.y
-                    longitudinal = relative_longitudinal_distance(
-                        dx, dy, pose.theta)
+                    longitudinal = self._center_longitudinal_between(
+                        pose.x, pose.y, opp_x, opp_y)
                     # Negative projection means the latched vehicle is truly behind.
-                    if longitudinal < 0.0:
+                    if longitudinal is not None and longitudinal < 0.0:
                         behind_dist = -longitudinal
                         if behind_dist < 12.0:
                             opp_vx, opp_vy = self._v2x_tracker.velocity(
@@ -7489,27 +7521,6 @@ class MPCController(Node):
                     buf = self._v2x_tracker._samples.get(vid)
                     if buf:
                         _, opp_x, opp_y = buf[-1]
-                        dx = opp_x - pose.x
-                        dy = opp_y - pose.y
-                        longitudinal_d = (
-                            dx * math.cos(pose.theta)
-                            + dy * math.sin(pose.theta)
-                        )
-                        # Both Safety and Abort reject samples outside these
-                        # signed windows, so avoid a full Center-polyline
-                        # projection for obviously irrelevant vehicles.
-                        if (
-                            longitudinal_d
-                                < -max(
-                                    self._parallel_safety_lon_behind,
-                                    self._parallel_abort_lon_behind,
-                                )
-                            or longitudinal_d > max(
-                                self._parallel_safety_lon_ahead,
-                                self._parallel_abort_lon_ahead,
-                            )
-                        ):
-                            continue
                         opp_center_frenet = self._center_frenet(opp_x, opp_y)
                         if opp_center_frenet is None:
                             continue
@@ -7520,6 +7531,22 @@ class MPCController(Node):
                             self._center_arc_total_length,
                         )
                         if parallel_arc_delta is None:
+                            continue
+                        # Front/rear filtering must use the same Center arc as
+                        # the final parallel-envelope test. Ego-heading
+                        # projection changes sign in corners and previously
+                        # discarded relevant vehicles before this test.
+                        if (
+                            parallel_arc_delta
+                                < -max(
+                                    self._parallel_safety_arc_behind,
+                                    self._parallel_abort_arc_behind,
+                                )
+                            or parallel_arc_delta > max(
+                                self._parallel_safety_arc_ahead,
+                                self._parallel_abort_arc_ahead,
+                            )
+                        ):
                             continue
                         lateral_center_distance = abs(
                             opp_center_lateral - ego_center_lateral)
@@ -7538,6 +7565,7 @@ class MPCController(Node):
                         other_lane_idx = self._center_lane_index_for_offset(
                             opp_x, opp_y, opp_center_lateral)
                         arc_distance = parallel_arc_delta
+                        longitudinal_d = parallel_arc_delta
                         candidate = {
                             "vehicle_id": vid,
                             "lane_idx": other_lane_idx,
