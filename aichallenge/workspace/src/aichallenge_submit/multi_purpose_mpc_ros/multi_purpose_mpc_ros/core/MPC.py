@@ -1371,3 +1371,4 @@ class MPC:
             # ax.scatter(self.current_prediction[0], self.current_prediction[1],
             #            c=PREDICTION, s=5)
             ax.plot(self.current_prediction[0], self.current_prediction[1], c=PREDICTION)
+

@@ -129,6 +129,7 @@ def array_to_ackermann_control_command(
     msg.stamp = stamp
     msg.lateral.stamp = stamp
     msg.lateral.steering_tire_angle = u[1]
+    # MPC and AWSIM both use physical tire-angle rate [rad/s].
     msg.lateral.steering_tire_rotation_rate = float(steering_rate_radps)
     msg.longitudinal.stamp = stamp
     msg.longitudinal.speed = u[0]
@@ -501,31 +502,31 @@ class MPCController(Node):
                 state_constraints,
                 input_constraints,
                 mpc_cfg.ay_max,
-                # Physical tire-angle rate [rad/s].  The MPC steering state,
-                # controller output and steering report all use physical tire
-                # angle. steering_tire_angle_gain_var is only a wire-command
-                # conversion applied immediately before publication, so it
-                # must not scale this dynamics constraint.
                 mpc_cfg.steer_rate_max,
                 mpc_cfg.wp_id_offset,
                 self.USE_OBSTACLE_AVOIDANCE,
                 self._cfg.reference_path.use_path_constraints_topic,
                 mpc_cfg.use_max_kappa_pred,
                 mpc_cfg.understeer_coeff,
+                # x=[e_y,e_psi,t,delta], u=[v,delta_rate].  The rate bound is
+                # therefore the same physical tire-angle rate sent to AWSIM.
                 use_steering_state=True,
                 steering_state_weight=float(getattr(
                     cfg_mpc, "steering_state_weight", 1.0e6)),
                 terminal_steering_state_weight=float(getattr(
                     cfg_mpc, "terminal_steering_state_weight", 1.0e6)),
-                # Keep the first rate-limit sweep isolated from preview and
-                # proactive speed-cap effects. These can be enabled later
-                # after the lowest stable physical rate is identified.
                 steering_preview_enabled=bool(getattr(
                     cfg_mpc, "steering_preview_enabled", False)),
                 steering_command_delay=float(getattr(
                     cfg_mpc, "steering_command_delay", 0.15)),
+                steering_preview_max_distance=float(getattr(
+                    cfg_mpc, "steering_preview_max_distance", 6.0)),
                 steering_reachability_speed_enabled=bool(getattr(
-                    cfg_mpc, "steering_reachability_speed_enabled", False)))
+                    cfg_mpc, "steering_reachability_speed_enabled", False)),
+                steering_reachability_min_speed=float(getattr(
+                    cfg_mpc, "steering_reachability_min_speed", 2.0)),
+                steering_reachability_min_angle=float(getattr(
+                    cfg_mpc, "steering_reachability_min_angle", 0.03)))
 
             mpc.solve_time_budget_ms = max(float(getattr(
                 cfg_mpc, "solve_time_budget_ms", 20.0)), 0.0)
@@ -7947,10 +7948,8 @@ class MPCController(Node):
                 or initial_start_boost_active
             ):
                 acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
-            # Steering-state MPC already integrates the physically bounded
-            # delta_rate into the command sequence. Applying another low-pass
-            # filter here would create an actuator trajectory different from
-            # the one used by the prediction and delay model.
+            # Steering-state MPC already integrates the bounded delta_rate.
+            # Applying another output low-pass would create unmodelled delay.
             if not getattr(self._mpc, "uses_steering_state", False):
                 u[1] = (
                     self._last_u[1]
