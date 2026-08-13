@@ -1004,6 +1004,7 @@ class MPC:
                 # steering-rate saturation speed protection.
                 if (
                     not self.steering_preview_enabled
+                    and not self.steering_reservation_enabled
                     and abs(delta_change_ref) > 1e-4
                 ):
                     steering_vmax = (

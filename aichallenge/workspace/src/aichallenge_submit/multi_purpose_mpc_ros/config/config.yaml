@@ -60,7 +60,8 @@ trajectory_switch:
   race_rejoin_max_heading_deg: 10.0 # Race/Centerの方位差がこれ以下の地点でRaceへ復帰
   outer_lane_release_infeasible_cycles: 5 # 追越し後、対象が後方にいる状態でこの回数連続失敗したらL0/L2固定を解除
   outer_lane_release_behind_m: 0.5 # 追越し後、対象が進行方向への射影でこの距離以上後方なら解除を許可
-  outer_shadow_success_cycles: 3 # L0/L2操舵状態MPCがこの回数連続成功してから実制御へハード制約を適用
+  outer_shadow_enabled: false # OLD同様、追い越しラッチをShadow待ちせず実MPCへ反映
+  outer_shadow_success_cycles: 3 # Shadowを再度有効化した場合の連続成功回数
   outer_shadow_retry_interval_cycles: 3 # Shadow失敗中の再試行間隔（制御周期）
   outer_shadow_timeout_sec: 2.0 # [s] 成立しなければ失敗車線として全幅Prepass回復へ移行
   outer_failure_backoff_sec: 1.0 # [s] Shadow失敗車線の即時再選択を禁止
@@ -131,7 +132,7 @@ lane_transition_stability:
   require_accurate_solution: true
   l1_probe_start_stable_sec: 0.30
   l1_probe_commit_stable_sec: 0.20
-  outer_shadow_start_stable_sec: 0.15
+  outer_shadow_start_stable_sec: 0.0 # 新規追い越しは検出周期で即時ラッチ
   outer_shadow_commit_stable_sec: 0.20
   l1_preempt_stable_sec: 0.30
   prepass_commit_stable_sec: 0.50
@@ -182,9 +183,11 @@ mpc:
   delay_prediction_steps: 7
   # 単一点previewではなく、150ms先の曲率要求から0.60rad/sで到達可能な
   # 操舵ランプを弧長方向へ後方伝播する予約列方式を使用する。
-  steering_preview_enabled: false
+  steering_preview_enabled: false # reservationとの二重先読みを避ける
   steering_preview_max_distance: 6.0
-  steering_reservation_enabled: false
+  steering_reservation_enabled: true # 0.60rad/sで間に合う時点から操舵を開始
+  # 操舵予約だけで0.60rad/sへの先行対応を行う。ホライズン内の曲率変化を
+  # 逐次速度上限へ変換すると、連続コーナー全体が約15km/hに張り付くため無効化。
   steering_reachability_speed_enabled: false
   steering_reachability_min_speed: 2.0
   steering_reachability_min_angle: 0.03

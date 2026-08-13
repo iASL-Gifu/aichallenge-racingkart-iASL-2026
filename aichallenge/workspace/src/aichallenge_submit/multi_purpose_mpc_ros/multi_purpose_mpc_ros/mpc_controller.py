@@ -823,6 +823,8 @@ class MPCController(Node):
             float(getattr(switch_cfg, "outer_lane_release_behind_m", 1.0)), 0.0)
         self._outer_shadow_success_cycles_required = max(int(getattr(
             switch_cfg, "outer_shadow_success_cycles", 3)), 1)
+        self._outer_shadow_enabled = bool(getattr(
+            switch_cfg, "outer_shadow_enabled", False))
         self._outer_shadow_retry_interval_cycles = max(int(getattr(
             switch_cfg, "outer_shadow_retry_interval_cycles", 3)), 1)
         self._outer_shadow_timeout_sec = max(float(getattr(
@@ -1228,6 +1230,11 @@ class MPCController(Node):
             0.0)
         self._forward_pose_recovery_interference_tolerance = max(float(get_cfg(
             "forward_pose_recovery_interference_tolerance", 0.005)), 0.0)
+        self._forward_pose_recovery_interference_trend_window = max(int(
+            get_cfg("forward_pose_recovery_interference_trend_window", 4)), 2)
+        self._forward_pose_recovery_total_improvement_threshold = max(float(
+            get_cfg("forward_pose_recovery_total_improvement_threshold", 0.001)),
+            0.0)
         self._forward_pose_recovery_v2x_margin = max(float(get_cfg(
             "forward_pose_recovery_v2x_margin", 0.30)), 0.0)
         self._forward_pose_recovery_min_progress = max(float(get_cfg(
@@ -1298,6 +1305,9 @@ class MPCController(Node):
         self._forward_pose_recovery_until = None
         self._forward_pose_recovery_steer_command = 0.0
         self._forward_pose_recovery_start_xy = None
+        self._forward_pose_recovery_min_hold_until = None
+        self._forward_pose_recovery_initial_interference = 0.0
+        self._forward_pose_recovery_interference_history = []
         self._recovery_motion_mode = "idle"
         self._forward_pose_recovery_blocked_pose = None
         self._forward_pose_recovery_blocked_until = None
@@ -2228,6 +2238,18 @@ class MPCController(Node):
         self._forward_pose_recovery_until = math.inf
         self._forward_pose_recovery_steer_command = float(selected["steer"])
         self._forward_pose_recovery_start_xy = (pose.x, pose.y)
+        steer_rise_sec = (
+            abs(self._forward_pose_recovery_steer_command - float(self._last_u[1]))
+            / max(float(self._cfg.mpc.steer_rate_max), 1e-3)
+        )
+        self._forward_pose_recovery_min_hold_until = now_sec + steer_rise_sec
+        self._forward_pose_recovery_initial_interference = float(
+            self._map.static_oriented_box_interference(
+                pose.x, pose.y, pose.theta,
+                self._forward_pose_recovery_half_length,
+                self._forward_pose_recovery_half_width))
+        self._forward_pose_recovery_interference_history = [
+            self._forward_pose_recovery_initial_interference]
         # Forward and reverse recovery are mutually exclusive.  No reverse
         # command, gear transition or reverse acceleration may coexist with
         # this state.
@@ -4534,12 +4556,51 @@ class MPCController(Node):
                 and self._mpc.current_prediction is not None
                 and not self._mpc.used_prediction_fallback
                 and not self._mpc.recovery_requested
+                and (
+                    self._forward_pose_recovery_min_hold_until is None
+                    or now_sec >= self._forward_pose_recovery_min_hold_until
+                )
             )
             candidate = (
                 None if mpc_ready else self._forward_pose_recovery_candidate(
                     pose, self._forward_pose_recovery_steer_command)
             )
-            if not mpc_ready and candidate is not None:
+            current_interference = float(
+                self._map.static_oriented_box_interference(
+                    pose.x, pose.y, pose.theta,
+                    self._forward_pose_recovery_half_length,
+                    self._forward_pose_recovery_half_width))
+            history = self._forward_pose_recovery_interference_history
+            history.append(current_interference)
+            del history[:-self._forward_pose_recovery_interference_trend_window]
+            total_improving = bool(
+                self._forward_pose_recovery_initial_interference
+                    - current_interference
+                >= self._forward_pose_recovery_total_improvement_threshold)
+            sustained_worsening = bool(
+                len(history) >= self._forward_pose_recovery_interference_trend_window
+                and all(
+                    later > earlier
+                        + self._forward_pose_recovery_interference_tolerance
+                    for earlier, later in zip(history, history[1:])))
+            reject_reason = self._last_forward_pose_candidate_diagnostic.get(
+                "reason")
+            static_only_reject = bool(
+                candidate is None
+                and reject_reason in (
+                    "static_boundary", "static_escape_not_reached"))
+            steer_still_rising = bool(
+                self._forward_pose_recovery_min_hold_until is not None
+                and now_sec < self._forward_pose_recovery_min_hold_until
+                and reject_reason != "v2x_envelope")
+            keep_improving_escape = bool(
+                static_only_reject and total_improving
+                and not sustained_worsening)
+            if (
+                not mpc_ready
+                and (candidate is not None or steer_still_rising
+                     or keep_improving_escape)
+            ):
                 u[0] = self._forward_pose_recovery_speed
                 u[1] = self._forward_pose_recovery_steer_command
                 return True
@@ -4565,6 +4626,8 @@ class MPCController(Node):
             )
             self._forward_pose_recovery_until = None
             self._forward_pose_recovery_start_xy = None
+            self._forward_pose_recovery_min_hold_until = None
+            self._forward_pose_recovery_interference_history = []
             self._forward_pose_recovery_steer_command = 0.0
             self._recovery_motion_mode = "idle"
             self._mpc_safety_recovery_active = not mpc_ready
@@ -7183,6 +7246,8 @@ class MPCController(Node):
             latch_candidate_vehicle_id = opponent_vehicle_id
             latch_candidate_lane_idx = new_target_lane_idx
             if (
+                self._outer_shadow_enabled
+                and
                 not existing_outer_latch
                 and latch_candidate_lane_idx in (0, 2)
                 and latch_candidate_vehicle_id is not None
@@ -8145,7 +8210,10 @@ class MPCController(Node):
             # No lane change request, keep active candidate
             self._target_lane_idx = new_target_lane_idx
 
-        if self._reference_path is self._reference_pathN_center:
+        if (
+            self._outer_shadow_enabled
+            and self._reference_path is self._reference_pathN_center
+        ):
             self._sync_outer_lane_shadow(
                 self._target_lane_idx,
                 now_sec=current_time_sec,
@@ -8221,7 +8289,8 @@ class MPCController(Node):
             self._prev_applied_lane_idx = self._target_lane_idx
 
         outer_lane_waiting_for_shadow = bool(
-            self._reference_path is self._reference_pathN_center
+            self._outer_shadow_enabled
+            and self._reference_path is self._reference_pathN_center
             and self._target_lane_idx in (0, 2)
             and not self._outer_lane_commit_matches(self._target_lane_idx)
         )
