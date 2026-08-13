@@ -190,44 +190,29 @@ def is_primal_infeasible(result) -> bool:
 
 
 def diagnose_mpc_prediction(
-    spatial_states,
-    world_prediction,
-    current_position,
-    lower_bounds,
-    upper_bounds,
-    lateral_tolerance=0.5,
-    max_start_distance=8.0,
+    spatial_states, world_prediction, current_position, lower_bounds,
+    upper_bounds, lateral_tolerance=0.5, max_start_distance=8.0,
     max_step_distance=5.0,
 ) -> dict:
-    """Return a structured explanation of prediction plausibility."""
+    """Return a structured reason when a finite OSQP result is unusable."""
     diagnostic = {
-        "valid": False,
-        "reason": "unknown",
-        "point_index": None,
-        "lateral": np.nan,
-        "lower": np.nan,
-        "upper": np.nan,
-        "violation": np.nan,
-        "start_distance": np.nan,
-        "max_step_distance": np.nan,
-        "max_step_index": None,
+        "valid": False, "reason": "unknown", "point_index": None,
+        "lateral": np.nan, "lower": np.nan, "upper": np.nan,
+        "violation": np.nan, "start_distance": np.nan,
+        "max_step_distance": np.nan, "max_step_index": None,
     }
     states = np.asarray(spatial_states)
     if states.ndim != 2 or states.shape[0] < 3 or states.shape[1] < 2:
-        diagnostic["reason"] = "invalid_spatial_shape"
-        diagnostic["shape"] = tuple(states.shape)
+        diagnostic.update(reason="invalid_spatial_shape", shape=states.shape)
         return diagnostic
     if not np.all(np.isfinite(states)):
         invalid = np.argwhere(~np.isfinite(states))[0]
         diagnostic.update(
             reason="non_finite_spatial_state",
-            point_index=int(invalid[0]),
-            state_index=int(invalid[1]),
-        )
+            point_index=int(invalid[0]), state_index=int(invalid[1]))
         return diagnostic
-
-    lower = np.asarray(lower_bounds).reshape(-1)
-    upper = np.asarray(upper_bounds).reshape(-1)
+    lower = np.asarray(lower_bounds, dtype=float).reshape(-1)
+    upper = np.asarray(upper_bounds, dtype=float).reshape(-1)
     n_bounds = min(states.shape[0] - 1, lower.size, upper.size)
     if n_bounds == 0:
         diagnostic["reason"] = "missing_bounds"
@@ -239,37 +224,25 @@ def diagnose_mpc_prediction(
     worst_upper = int(np.argmax(upper_violation))
     if lower_violation[worst_lower] > lateral_tolerance:
         diagnostic.update(
-            reason="lateral_below_lower",
-            point_index=worst_lower + 1,
+            reason="lateral_below_lower", point_index=worst_lower + 1,
             lateral=float(lateral[worst_lower]),
-            lower=float(lower[worst_lower]),
-            upper=float(upper[worst_lower]),
-            violation=float(lower_violation[worst_lower]),
-        )
+            lower=float(lower[worst_lower]), upper=float(upper[worst_lower]),
+            violation=float(lower_violation[worst_lower]))
         return diagnostic
     if upper_violation[worst_upper] > lateral_tolerance:
         diagnostic.update(
-            reason="lateral_above_upper",
-            point_index=worst_upper + 1,
+            reason="lateral_above_upper", point_index=worst_upper + 1,
             lateral=float(lateral[worst_upper]),
-            lower=float(lower[worst_upper]),
-            upper=float(upper[worst_upper]),
-            violation=float(upper_violation[worst_upper]),
-        )
+            lower=float(lower[worst_upper]), upper=float(upper[worst_upper]),
+            violation=float(upper_violation[worst_upper]))
         return diagnostic
-
     x_pred, y_pred = world_prediction
     points = np.column_stack((x_pred, y_pred))
     if points.shape[0] == 0:
         diagnostic["reason"] = "empty_world_prediction"
         return diagnostic
     if not np.all(np.isfinite(points)):
-        invalid = np.argwhere(~np.isfinite(points))[0]
-        diagnostic.update(
-            reason="non_finite_world_prediction",
-            point_index=int(invalid[0]),
-            coordinate_index=int(invalid[1]),
-        )
+        diagnostic["reason"] = "non_finite_world_prediction"
         return diagnostic
     current_xy = np.asarray(current_position, dtype=float)
     if current_xy.shape != (2,) or not np.all(np.isfinite(current_xy)):
@@ -280,61 +253,70 @@ def diagnose_mpc_prediction(
     if start_distance > max_start_distance:
         diagnostic.update(
             reason="prediction_start_too_far",
-            violation=start_distance - max_start_distance,
-        )
+            violation=start_distance - max_start_distance)
         return diagnostic
     if len(points) > 1:
-        step_distances = np.linalg.norm(np.diff(points, axis=0), axis=1)
-        max_step_index = int(np.argmax(step_distances))
-        measured_max_step = float(step_distances[max_step_index])
+        steps = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        index = int(np.argmax(steps))
         diagnostic.update(
-            max_step_distance=measured_max_step,
-            max_step_index=max_step_index,
-        )
-        if measured_max_step > max_step_distance:
+            max_step_distance=float(steps[index]), max_step_index=index)
+        if steps[index] > max_step_distance:
             diagnostic.update(
-                reason="prediction_step_too_far",
-                point_index=max_step_index + 1,
-                violation=measured_max_step - max_step_distance,
-            )
+                reason="prediction_step_too_far", point_index=index + 1,
+                violation=float(steps[index] - max_step_distance))
             return diagnostic
     diagnostic.update(valid=True, reason="ok")
     return diagnostic
 
 
 def format_prediction_diagnostic(diagnostic) -> str:
-    """Format a stable single-line diagnostic suitable for ROS logs."""
-    fields = [
-        f"reason={diagnostic.get('reason', 'unknown')}",
-        f"point={diagnostic.get('point_index')}",
-    ]
+    """Format prediction diagnostics as stable key/value log fields."""
+    fields = []
     for key in (
-        "lateral", "lower", "upper", "violation",
+        "reason", "point_index", "lateral", "lower", "upper", "violation",
         "start_distance", "max_step_distance", "max_step_index",
     ):
         value = diagnostic.get(key)
         if isinstance(value, (float, np.floating)):
             value = f"{float(value):.4f}" if np.isfinite(value) else "nan"
         fields.append(f"{key}={value}")
-    return ", ".join(fields)
+    return " ".join(fields)
 
 
 def is_plausible_mpc_prediction(
-    spatial_states, world_prediction, current_position, lower_bounds,
-    upper_bounds, lateral_tolerance=0.5, max_start_distance=8.0,
+    spatial_states,
+    world_prediction,
+    current_position,
+    lower_bounds,
+    upper_bounds,
+    lateral_tolerance=0.5,
+    max_start_distance=8.0,
     max_step_distance=5.0,
 ) -> bool:
     """Reject finite but physically implausible solver predictions."""
-    return bool(diagnose_mpc_prediction(
-        spatial_states,
+    states = np.asarray(spatial_states)
+    if states.ndim != 2 or states.shape[0] < 3 or states.shape[1] < 2:
+        return False
+    if not np.all(np.isfinite(states)):
+        return False
+
+    lower = np.asarray(lower_bounds).reshape(-1)
+    upper = np.asarray(upper_bounds).reshape(-1)
+    n_bounds = min(states.shape[0] - 1, lower.size, upper.size)
+    if n_bounds == 0:
+        return False
+    lateral = states[1:n_bounds + 1, 0]
+    if np.any(lateral < lower[:n_bounds] - lateral_tolerance):
+        return False
+    if np.any(lateral > upper[:n_bounds] + lateral_tolerance):
+        return False
+
+    return is_plausible_world_prediction(
         world_prediction,
         current_position,
-        lower_bounds,
-        upper_bounds,
-        lateral_tolerance=lateral_tolerance,
         max_start_distance=max_start_distance,
         max_step_distance=max_step_distance,
-    )["valid"])
+    )
 
 
 def apply_outer_boundary_guard(
@@ -554,6 +536,9 @@ class MPC:
             self.QN,
             sparse.kron(sparse.eye(self.N), self.R)
         ], format='csc')
+        # Fixed horizon vectors used by every QP build. Keep these alongside
+        # P_base/A_inequality so numpy does not recreate them at 40 Hz.
+        self._refresh_cost_vector_cache()
 
         # A, B行列のスパース構造を完全に固定するためのインデックス事前計算
         row_A, col_A = [], []
@@ -595,6 +580,12 @@ class MPC:
         else:
             self.state_constraints = StateConstraints
             self.input_constraints = InputConstraints
+        self._cached_umin_horizon = np.tile(
+            np.asarray(self.input_constraints['umin'], dtype=float), self.N)
+        self._cached_rate_lower = (
+            -float(max_steering_rate) * self.model.Ts
+            * np.ones(self.n_rate_constraints))
+        self._cached_rate_upper = -self._cached_rate_lower
         self.ay_max = ay_max
         self.understeer_coeff = max(float(understeer_coeff), 0.0)
         self.steering_preview_enabled = bool(steering_preview_enabled)
@@ -625,6 +616,16 @@ class MPC:
         self.last_attempt_target_steering = np.array([], dtype=float)
         self.last_attempt_steering_angle_margin = np.nan
         self.last_attempt_steering_rate_margin = np.nan
+        self.last_solve_attempts = []
+        self.last_prediction_diagnostic = {
+            "valid": False, "reason": "not_evaluated"}
+        self.last_attempt_primal_infeasible = False
+        self.last_build_ms = 0.0
+        self.last_solve_ms = 0.0
+        self.last_total_ms = 0.0
+        self.last_attempt_primal_infeasible = False
+        self.primal_infeasible_event_count = 0
+        self.time_budget_exceeded_event_count = 0
         self.steering_rate_limited = False
         self.steering_rate_speed_cap = np.inf
 
@@ -659,22 +660,43 @@ class MPC:
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
         self.optimizer = osqp.OSQP()
-
         self.debug_counter = 0
-
-        self.startup =0
-        self.linearize =0
-        self.path_constraints =0
-        self.sparse =0
-        self.constraints2 =0
-        self.vector =0
-        self.update =0
-        
+        self.startup = 0
+        self.linearize = 0
+        self.path_constraints = 0
+        self.sparse = 0
+        self.constraints2 = 0
+        self.vector = 0
+        self.update = 0
 
         if not self.use_obstacle_avoidance:
             self.model.reference_path.update_simple_path_constraints(
-                N,
-                self.model.safety_margin)
+                N, self.model.safety_margin)
+
+    def _refresh_cost_vector_cache(self):
+        """Refresh fixed cost-vector coefficients after weight changes."""
+        self._cached_q_state_diag = np.tile(
+            np.asarray(self.Q.diagonal(), dtype=float), self.N)
+        self._cached_q_input_diag = np.tile(
+            np.asarray(self.R.diagonal(), dtype=float), self.N)
+
+    def _record_osqp_attempt(
+        self, phase: str, result, wall_solve_ms: float, safety_margin: float
+    ) -> None:
+        """Record one OSQP call independently from later retry outcomes."""
+        info = getattr(result, "info", None)
+        self.last_solve_attempts.append({
+            "phase": str(phase),
+            "status": str(getattr(info, "status", "missing_result")),
+            "status_val": int(getattr(info, "status_val", -1)),
+            "iterations": int(getattr(info, "iter", 0)),
+            "wall_solve_ms": float(wall_solve_ms),
+            "osqp_run_ms": 1000.0 * float(getattr(info, "run_time", 0.0)),
+            "osqp_solve_ms": 1000.0 * float(
+                getattr(info, "solve_time", 0.0)),
+            "safety_margin": float(safety_margin),
+            "primal_infeasible": bool(is_primal_infeasible(result)),
+        })
 
     def update_v_max(self, v_max: float):
         self.input_constraints['umax'][0] = v_max
@@ -705,9 +727,11 @@ class MPC:
             ], format='csc')
         else:
             self.Q = Q
+        self._refresh_cost_vector_cache()
 
     def update_R(self, R: np.ndarray):
         self.R = R
+        self._refresh_cost_vector_cache()
 
     def update_QN(self, QN: np.ndarray):
         if self.uses_steering_state and QN.shape == (self.model_nx, self.model_nx):
@@ -717,6 +741,7 @@ class MPC:
             ], format='csc')
         else:
             self.QN = QN
+        self._refresh_cost_vector_cache()
 
     def set_soft_lateral_reference(
         self, lane_idx=None, start_e_y=0.0, alpha=0.0,
@@ -1004,7 +1029,6 @@ class MPC:
                 # steering-rate saturation speed protection.
                 if (
                     not self.steering_preview_enabled
-                    and not self.steering_reservation_enabled
                     and abs(delta_change_ref) > 1e-4
                 ):
                     steering_vmax = (
@@ -1196,14 +1220,13 @@ class MPC:
         ueq = leq
 
         # 入力と状態の制約境界
-        lineq_basic = np.hstack([xmin_dyn, np.kron(np.ones(N), umin)])
+        lineq_basic = np.hstack([xmin_dyn, self._cached_umin_horizon])
         uineq_basic = np.hstack([xmax_dyn, umax_dyn])
 
         # Legacy curvature-input MPC needs adjacent-input constraints. In the
         # steering-state model delta_rate is already bounded in umin/umax.
-        max_delta_change = self.max_steering_rate * self.model.Ts
-        lineq_rate = -max_delta_change * np.ones(self.n_rate_constraints)
-        uineq_rate = max_delta_change * np.ones(self.n_rate_constraints)
+        lineq_rate = self._cached_rate_lower
+        uineq_rate = self._cached_rate_upper
 
         t_constraints2 = time.perf_counter()
 
@@ -1215,9 +1238,9 @@ class MPC:
         P = self.P_base
 
         q = np.hstack([
-            -np.tile(np.diag(self.Q.toarray()), N) * xr[:-self.nx],
+            -self._cached_q_state_diag * xr[:-self.nx],
             -self.QN.dot(xr[-self.nx:]),
-            -np.tile(np.diag(self.R.toarray()), N) * ur
+            -self._cached_q_input_diag * ur
         ])
 
         t_vector = time.perf_counter()
@@ -1296,6 +1319,10 @@ class MPC:
         self.last_attempt_target_steering = np.array([], dtype=float)
         self.last_attempt_steering_angle_margin = np.nan
         self.last_attempt_steering_rate_margin = np.nan
+        self.last_solve_attempts = []
+        self.last_prediction_diagnostic = {
+            "valid": False, "reason": "not_evaluated"}
+        self.last_attempt_primal_infeasible = False
 
         #最近傍Waypointを取得
         self.model.get_current_waypoint()
@@ -1338,12 +1365,19 @@ class MPC:
 
         try:
 
+            solve_started_at = time.perf_counter()
             dec = self.optimizer.solve()
+            self._record_osqp_attempt(
+                "initial", dec,
+                (time.perf_counter() - solve_started_at) * 1000.0,
+                self.model.safety_margin)
             if self.debug_counter % 20 == 0:
                 print(dec.info.status,flush=True)
             t2 = time.perf_counter()
 
             if is_primal_infeasible(dec):
+                self.last_attempt_primal_infeasible = True
+                self.primal_infeasible_event_count += 1
                 # Limit only the additional relaxed retries. The initial
                 # problem build and solve are normal MPC work and are not
                 # included in this deadline.
@@ -1353,13 +1387,19 @@ class MPC:
                         time.perf_counter() - retry_started_at) * 1000.0
                     if elapsed_ms >= self.solve_time_budget_ms:
                         self.time_budget_exceeded = True
+                        self.time_budget_exceeded_event_count += 1
                         break
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     # _init_problem applies wp_id_offset, so restore the
                     # unshifted waypoint before every retry.
                     self.model.wp_id = base_wp_id
                     self._init_problem(N, relaxed_safety_margin)
+                    solve_started_at = time.perf_counter()
                     dec = self.optimizer.solve()
+                    self._record_osqp_attempt(
+                        f"retry_{i}", dec,
+                        (time.perf_counter() - solve_started_at) * 1000.0,
+                        relaxed_safety_margin)
                     t2 = time.perf_counter()
 
                     if is_valid_osqp_solution(dec):
@@ -1381,7 +1421,7 @@ class MPC:
             optimizer_controls = np.array(dec.x[-N*nu:])
             x = np.reshape(dec.x[:(N+1)*nx], (N+1, nx))
             candidate_prediction = self.update_prediction(x, N)
-            prediction_diagnostic = diagnose_mpc_prediction(
+            self.last_prediction_diagnostic = diagnose_mpc_prediction(
                 x,
                 candidate_prediction,
                 (self.model.temporal_state.x, self.model.temporal_state.y),
@@ -1389,13 +1429,10 @@ class MPC:
                 self._prediction_upper_bounds,
                 lateral_tolerance=self.prediction_lateral_tolerance,
             )
-            if not prediction_diagnostic["valid"]:
+            if not self.last_prediction_diagnostic["valid"]:
                 diagnostic_text = format_prediction_diagnostic(
-                    prediction_diagnostic)
-                print(
-                    "[MPCPredictionReject] " + diagnostic_text,
-                    flush=True,
-                )
+                    self.last_prediction_diagnostic)
+                print("[MPCPredictionReject] " + diagnostic_text, flush=True)
                 raise ValueError(
                     "OSQP returned an implausible prediction: "
                     + diagnostic_text)
@@ -1541,6 +1578,11 @@ class MPC:
             print(now)
 
         self.debug_counter += 1
+
+        self.last_build_ms = (t1 - t0) * 1000.0
+        self.last_solve_ms = sum(
+            attempt["wall_solve_ms"] for attempt in self.last_solve_attempts)
+        self.last_total_ms = (time.perf_counter() - t0) * 1000.0
 
         '''
         if self.debug_counter % 20 == 0:    

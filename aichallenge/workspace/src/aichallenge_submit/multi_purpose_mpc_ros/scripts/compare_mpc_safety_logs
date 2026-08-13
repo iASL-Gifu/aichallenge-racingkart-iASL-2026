@@ -7,7 +7,7 @@ import json
 import math
 import re
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
@@ -20,6 +20,7 @@ TIMING_RE = re.compile(
 )
 CONFIG_RE = re.compile(r"\[SafetyEvaluationConfig\]\s+(.*)")
 PAIR_RE = re.compile(r"([A-Za-z0-9_]+)=([^\s]+)")
+MPC_DIAGNOSTIC_RE = re.compile(r"\[MPCSolveDiagnostic\]\s+(.*)")
 
 
 @dataclass
@@ -30,6 +31,7 @@ class Metrics:
     closest_emergency_brake_m: float | None = None
     emergency_brakes_under_2m: int = 0
     primal_infeasible: int = 0
+    time_budget_exceeded: int = 0
     mpc_fallback: int = 0
     safety_recovery_starts: int = 0
     no_control_signal: int = 0
@@ -41,6 +43,15 @@ class Metrics:
     timing_samples: int = 0
     timing_overruns: int = 0
     timing_total_ms: float = 0.0
+    mpc_diagnostic_samples: int = 0
+    shadow_diagnostic_samples: int = 0
+    min_boundary_width_m: float | None = None
+    max_lateral_violation_m: float | None = None
+    min_shadow_angle_margin_rad: float | None = None
+    min_shadow_rate_margin_radps: float | None = None
+    max_osqp_iterations: int = 0
+    diagnostic_reasons: dict[str, int] = field(default_factory=dict)
+    osqp_statuses: dict[str, int] = field(default_factory=dict)
 
 
 def read_log(path: Path) -> tuple[Metrics, dict[str, str]]:
@@ -63,7 +74,66 @@ def read_log(path: Path) -> tuple[Metrics, dict[str, str]]:
             if (metrics.closest_emergency_brake_m is None
                     or distance < metrics.closest_emergency_brake_m):
                 metrics.closest_emergency_brake_m = distance
-        if "primal infeasible" in line.lower():
+        diagnostic_match = MPC_DIAGNOSTIC_RE.search(line)
+        diagnostic = (
+            dict(PAIR_RE.findall(diagnostic_match.group(1)))
+            if diagnostic_match else None)
+        if diagnostic and diagnostic.get("role") == "live":
+            metrics.mpc_diagnostic_samples += 1
+            reason = diagnostic.get("reason", "unknown")
+            metrics.diagnostic_reasons[reason] = (
+                metrics.diagnostic_reasons.get(reason, 0) + 1)
+            metrics.primal_infeasible += int(
+                diagnostic.get("primal_infeasible") == "True")
+            metrics.time_budget_exceeded += int(
+                diagnostic.get("time_budget_exceeded") == "True")
+            for key, attribute, use_max in (
+                ("min_boundary_width", "min_boundary_width_m", False),
+                ("lateral_violation", "max_lateral_violation_m", True),
+            ):
+                try:
+                    value = float(diagnostic.get(key, "nan"))
+                except ValueError:
+                    value = math.nan
+                if math.isfinite(value):
+                    current = getattr(metrics, attribute)
+                    setattr(metrics, attribute, value if current is None else (
+                        max(current, value) if use_max else min(current, value)))
+            attempts = diagnostic.get("attempts", "")
+            for attempt in attempts.split(";"):
+                parts = attempt.split(":")
+                if len(parts) < 2:
+                    continue
+                status = parts[1]
+                metrics.osqp_statuses[status] = (
+                    metrics.osqp_statuses.get(status, 0) + 1)
+                for part in parts[2:]:
+                    if part.startswith("iter="):
+                        metrics.max_osqp_iterations = max(
+                            metrics.max_osqp_iterations,
+                            int(part.removeprefix("iter=")))
+            try:
+                total = float(diagnostic["total_ms"])
+            except (KeyError, ValueError):
+                total = math.nan
+            if math.isfinite(total):
+                times.append(total)
+                overruns += int(total > 25.0)
+        elif diagnostic and diagnostic.get("role") == "shadow":
+            metrics.shadow_diagnostic_samples += 1
+            for key, attribute in (
+                ("angle_margin", "min_shadow_angle_margin_rad"),
+                ("rate_margin", "min_shadow_rate_margin_radps"),
+            ):
+                try:
+                    value = float(diagnostic.get(key, "nan"))
+                except ValueError:
+                    value = math.nan
+                if math.isfinite(value):
+                    current = getattr(metrics, attribute)
+                    setattr(metrics, attribute,
+                            value if current is None else min(current, value))
+        if not diagnostic and "primal infeasible" in line.lower():
             metrics.primal_infeasible += 1
         if "[MPCFallback]" in line:
             metrics.mpc_fallback += 1
@@ -76,7 +146,7 @@ def read_log(path: Path) -> tuple[Metrics, dict[str, str]]:
             metrics.reverse_recovery_completed += 1
         if "[LaneChange] Switching" in line:
             metrics.lane_state_changes += 1
-        match = TIMING_RE.search(line)
+        match = None if diagnostic else TIMING_RE.search(line)
         if match:
             total = float(match.group(3))
             target = float(match.group(4))
@@ -117,6 +187,7 @@ def read_logs(path: Path) -> tuple[Metrics, list[dict[str, str]], list[Path]]:
         total.emergency_brakes += current.emergency_brakes
         total.emergency_brakes_under_2m += current.emergency_brakes_under_2m
         total.primal_infeasible += current.primal_infeasible
+        total.time_budget_exceeded += current.time_budget_exceeded
         total.mpc_fallback += current.mpc_fallback
         total.safety_recovery_starts += current.safety_recovery_starts
         total.no_control_signal += current.no_control_signal
@@ -125,6 +196,27 @@ def read_logs(path: Path) -> tuple[Metrics, list[dict[str, str]], list[Path]]:
         total.timing_samples += current.timing_samples
         total.timing_overruns += current.timing_overruns
         total.timing_total_ms += current.timing_total_ms
+        total.mpc_diagnostic_samples += current.mpc_diagnostic_samples
+        total.shadow_diagnostic_samples += current.shadow_diagnostic_samples
+        total.max_osqp_iterations = max(
+            total.max_osqp_iterations, current.max_osqp_iterations)
+        for key, count in current.diagnostic_reasons.items():
+            total.diagnostic_reasons[key] = (
+                total.diagnostic_reasons.get(key, 0) + count)
+        for key, count in current.osqp_statuses.items():
+            total.osqp_statuses[key] = total.osqp_statuses.get(key, 0) + count
+        for attribute, use_max in (
+            ("min_boundary_width_m", False),
+            ("max_lateral_violation_m", True),
+            ("min_shadow_angle_margin_rad", False),
+            ("min_shadow_rate_margin_radps", False),
+        ):
+            value = getattr(current, attribute)
+            if value is None:
+                continue
+            previous = getattr(total, attribute)
+            setattr(total, attribute, value if previous is None else (
+                max(previous, value) if use_max else min(previous, value)))
         if current.closest_emergency_brake_m is not None:
             if (total.closest_emergency_brake_m is None
                     or current.closest_emergency_brake_m < total.closest_emergency_brake_m):
@@ -183,6 +275,9 @@ def rows(new: Metrics, old: Metrics) -> list[tuple[str, str, str, str]]:
          lower_is_better(new.emergency_brakes_under_2m, old.emergency_brakes_under_2m)),
         ("MPC primal infeasible", fmt(new.primal_infeasible, "回"),
          fmt(old.primal_infeasible, "回"), lower_is_better(new.primal_infeasible, old.primal_infeasible)),
+        ("MPC retry時間超過", fmt(new.time_budget_exceeded, "回"),
+         fmt(old.time_budget_exceeded, "回"),
+         lower_is_better(new.time_budget_exceeded, old.time_budget_exceeded)),
         ("MPC fallback", fmt(new.mpc_fallback, "回"), fmt(old.mpc_fallback, "回"),
          lower_is_better(new.mpc_fallback, old.mpc_fallback)),
         ("SafetyRecovery開始", fmt(new.safety_recovery_starts, "回"),
@@ -203,6 +298,9 @@ def rows(new: Metrics, old: Metrics) -> list[tuple[str, str, str, str]]:
                          old.mpc_budget_overrun_percent or 0.0)),
         ("最大MPC処理時間", fmt(new.max_mpc_time_ms, " ms"), fmt(old.max_mpc_time_ms, " ms"),
          lower_is_better(new.max_mpc_time_ms or math.inf, old.max_mpc_time_ms or math.inf)),
+        ("最大OSQP反復回数", fmt(new.max_osqp_iterations),
+         fmt(old.max_osqp_iterations),
+         lower_is_better(new.max_osqp_iterations, old.max_osqp_iterations)),
     ]
 
 
@@ -266,7 +364,23 @@ def main() -> int:
                      for name, new_v, old_v, evaluation in result_rows)
         if warnings:
             lines.extend(["", "注意:"] + [f"- {warning}" for warning in warnings])
-        lines.extend(["", f"処理時間サンプル: 修正版={new.timing_samples}, 旧版={old.timing_samples}"])
+        lines.extend([
+            "", f"処理時間サンプル: 修正版={new.timing_samples}, 旧版={old.timing_samples}",
+            f"構造化MPC診断: 修正版={new.mpc_diagnostic_samples}, 旧版={old.mpc_diagnostic_samples}",
+            f"Shadow診断: 修正版={new.shadow_diagnostic_samples}, 旧版={old.shadow_diagnostic_samples}",
+            f"修正版 reason集計: {new.diagnostic_reasons}",
+            f"旧版 reason集計: {old.diagnostic_reasons}",
+            f"修正版 OSQP status集計: {new.osqp_statuses}",
+            f"旧版 OSQP status集計: {old.osqp_statuses}",
+            f"最小境界幅: 修正版={fmt(new.min_boundary_width_m, ' m', 3)}, "
+            f"旧版={fmt(old.min_boundary_width_m, ' m', 3)}",
+            f"最大横境界違反: 修正版={fmt(new.max_lateral_violation_m, ' m', 4)}, "
+            f"旧版={fmt(old.max_lateral_violation_m, ' m', 4)}",
+            f"Shadow最小角度余裕: 修正版={fmt(new.min_shadow_angle_margin_rad, ' rad', 4)}, "
+            f"旧版={fmt(old.min_shadow_angle_margin_rad, ' rad', 4)}",
+            f"Shadow最小レート余裕: 修正版={fmt(new.min_shadow_rate_margin_radps, ' rad/s', 4)}, "
+            f"旧版={fmt(old.min_shadow_rate_margin_radps, ' rad/s', 4)}",
+        ])
         output = "\n".join(lines)
 
     if args.output:

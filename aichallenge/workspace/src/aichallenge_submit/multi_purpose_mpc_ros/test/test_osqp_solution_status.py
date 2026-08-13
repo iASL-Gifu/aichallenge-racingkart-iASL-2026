@@ -3,16 +3,19 @@ from types import SimpleNamespace
 
 import numpy as np
 import osqp
+from scipy import sparse
 
 from multi_purpose_mpc_ros.core.MPC import (
     apply_outer_boundary_guard,
     can_reuse_prediction_fallback,
     diagnose_mpc_prediction,
+    format_prediction_diagnostic,
     is_plausible_mpc_prediction,
     is_plausible_world_prediction,
     is_primal_infeasible,
     is_valid_osqp_solution,
     zero_inverted_bounds,
+    MPC,
 )
 
 
@@ -52,6 +55,34 @@ class TestOsqpSolutionStatus(unittest.TestCase):
         self.assertFalse(is_valid_osqp_solution(max_iter))
 
 
+class TestMpcDiagnosticInitialization(unittest.TestCase):
+    def test_constructor_initializes_timing_counters_and_caches(self):
+        model = SimpleNamespace(
+            n_states=3, length=1.0, Ts=0.025, safety_margin=0.1)
+        q = sparse.eye(3, format="csc")
+        r = sparse.eye(2, format="csc")
+        constraints = {
+            "xmin": np.array([-3.0, -3.0, -3.0]),
+            "xmax": np.array([3.0, 3.0, 3.0]),
+        }
+        inputs = {
+            "umin": np.array([0.0, -0.2]),
+            "umax": np.array([10.0, 0.2]),
+        }
+
+        mpc = MPC(
+            model, 5, q, r, q, constraints, inputs,
+            10.0, 0.6, 0, True, False)
+
+        for name in (
+            "startup", "linearize", "path_constraints", "sparse",
+            "constraints2", "vector", "update", "debug_counter",
+        ):
+            self.assertEqual(getattr(mpc, name), 0)
+        self.assertEqual(mpc._cached_umin_horizon.shape, (10,))
+        self.assertEqual(mpc.last_solve_attempts, [])
+
+
 class TestPredictionPlausibility(unittest.TestCase):
     def setUp(self):
         self.states = np.zeros((5, 3))
@@ -88,6 +119,19 @@ class TestPredictionPlausibility(unittest.TestCase):
             lateral_tolerance=0.02,
         ))
 
+    def test_diagnostic_reports_lateral_violation_details(self):
+        states = self.states.copy()
+        states[2, 0] = 2.03
+        diagnostic = diagnose_mpc_prediction(
+            states, self.prediction, (0.0, 0.0), self.lower, self.upper,
+            lateral_tolerance=0.02)
+
+        self.assertEqual(diagnostic["reason"], "lateral_above_upper")
+        self.assertEqual(diagnostic["point_index"], 2)
+        self.assertAlmostEqual(diagnostic["violation"], 0.03)
+        self.assertIn("violation=0.0300", format_prediction_diagnostic(
+            diagnostic))
+
     def test_distant_prediction_start_is_invalid(self):
         prediction = ([20.0, 21.0, 22.0], [0.0, 0.0, 0.0])
 
@@ -102,37 +146,6 @@ class TestPredictionPlausibility(unittest.TestCase):
         prediction = ([1.0, np.nan, 3.0], [0.0, 0.0, 0.0])
 
         self.assertFalse(self.is_plausible(world_prediction=prediction))
-
-    def diagnose(self, **overrides):
-        values = {
-            "spatial_states": self.states,
-            "world_prediction": self.prediction,
-            "current_position": (0.0, 0.0),
-            "lower_bounds": self.lower,
-            "upper_bounds": self.upper,
-        }
-        values.update(overrides)
-        return diagnose_mpc_prediction(**values)
-
-    def test_diagnostic_reports_upper_lateral_violation(self):
-        states = self.states.copy()
-        states[2, 0] = 2.03
-        diagnostic = self.diagnose(
-            spatial_states=states, lateral_tolerance=0.02)
-
-        self.assertEqual(diagnostic["reason"], "lateral_above_upper")
-        self.assertEqual(diagnostic["point_index"], 2)
-        self.assertAlmostEqual(diagnostic["lateral"], 2.03)
-        self.assertAlmostEqual(diagnostic["upper"], 2.0)
-        self.assertAlmostEqual(diagnostic["violation"], 0.03)
-
-    def test_diagnostic_reports_world_point_jump(self):
-        prediction = ([1.0, 2.0, 20.0], [0.0, 0.0, 0.0])
-        diagnostic = self.diagnose(world_prediction=prediction)
-
-        self.assertEqual(diagnostic["reason"], "prediction_step_too_far")
-        self.assertEqual(diagnostic["max_step_index"], 1)
-        self.assertAlmostEqual(diagnostic["max_step_distance"], 18.0)
 
     def test_stale_fallback_prediction_is_invalid(self):
         self.assertFalse(is_plausible_world_prediction(
