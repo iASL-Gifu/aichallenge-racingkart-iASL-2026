@@ -106,6 +106,71 @@ def steering_reachability_speed_cap(
     return float(distance) / max(required_time, 1e-6)
 
 
+def build_arc_length_steering_reservation(
+    distances,
+    steering_refs,
+    speeds,
+    delay_sec,
+    steering_rate,
+    current_steering,
+    command_period,
+):
+    """Build a delayed, rate-feasible steering schedule along arc length."""
+    distance_array = np.asarray(distances, dtype=float)
+    reference_array = np.asarray(steering_refs, dtype=float)
+    speed_array = np.asarray(speeds, dtype=float)
+    if (
+        distance_array.size == 0
+        or distance_array.size != reference_array.size
+        or distance_array.size != speed_array.size
+        or steering_rate <= 0.0
+    ):
+        return reference_array.copy()
+
+    count = distance_array.size
+    delayed = reference_array.copy()
+    for index in range(count):
+        target_distance = (
+            distance_array[index]
+            + max(float(speed_array[index]), 0.0)
+            * max(float(delay_sec), 0.0)
+        )
+        target_index = int(np.searchsorted(
+            distance_array, target_distance, side='left'))
+        target_index = min(max(target_index, index), count - 1)
+        delayed[index] = reference_array[target_index]
+
+    # Backward propagation reserves the latest feasible start of each future
+    # steering change instead of waiting for lateral error at the corner.
+    reserved = delayed.copy()
+    for index in range(count - 2, -1, -1):
+        ds = max(float(distance_array[index + 1] - distance_array[index]), 0.0)
+        speed = max(float(speed_array[index]), 0.5)
+        max_change = float(steering_rate) * ds / speed
+        reserved[index] = float(np.clip(
+            reserved[index],
+            reserved[index + 1] - max_change,
+            reserved[index + 1] + max_change,
+        ))
+
+    # Anchor the first scheduled command to the command actually owned by the
+    # actuator, then keep the complete schedule rate-feasible going forward.
+    previous = float(current_steering)
+    for index in range(count):
+        if index == 0:
+            max_change = (
+                float(steering_rate) * max(float(command_period), 0.0))
+        else:
+            ds = max(float(
+                distance_array[index] - distance_array[index - 1]), 0.0)
+            speed = max(float(speed_array[index - 1]), 0.5)
+            max_change = float(steering_rate) * ds / speed
+        reserved[index] = float(np.clip(
+            reserved[index], previous - max_change, previous + max_change))
+        previous = reserved[index]
+    return reserved
+
+
 def is_valid_osqp_solution(result) -> bool:
     """Return whether OSQP produced a usable optimal solution."""
     return (
@@ -124,7 +189,7 @@ def is_primal_infeasible(result) -> bool:
     )
 
 
-def is_plausible_mpc_prediction(
+def diagnose_mpc_prediction(
     spatial_states,
     world_prediction,
     current_position,
@@ -133,31 +198,143 @@ def is_plausible_mpc_prediction(
     lateral_tolerance=0.5,
     max_start_distance=8.0,
     max_step_distance=5.0,
-) -> bool:
-    """Reject finite but physically implausible solver predictions."""
+) -> dict:
+    """Return a structured explanation of prediction plausibility."""
+    diagnostic = {
+        "valid": False,
+        "reason": "unknown",
+        "point_index": None,
+        "lateral": np.nan,
+        "lower": np.nan,
+        "upper": np.nan,
+        "violation": np.nan,
+        "start_distance": np.nan,
+        "max_step_distance": np.nan,
+        "max_step_index": None,
+    }
     states = np.asarray(spatial_states)
     if states.ndim != 2 or states.shape[0] < 3 or states.shape[1] < 2:
-        return False
+        diagnostic["reason"] = "invalid_spatial_shape"
+        diagnostic["shape"] = tuple(states.shape)
+        return diagnostic
     if not np.all(np.isfinite(states)):
-        return False
+        invalid = np.argwhere(~np.isfinite(states))[0]
+        diagnostic.update(
+            reason="non_finite_spatial_state",
+            point_index=int(invalid[0]),
+            state_index=int(invalid[1]),
+        )
+        return diagnostic
 
     lower = np.asarray(lower_bounds).reshape(-1)
     upper = np.asarray(upper_bounds).reshape(-1)
     n_bounds = min(states.shape[0] - 1, lower.size, upper.size)
     if n_bounds == 0:
-        return False
+        diagnostic["reason"] = "missing_bounds"
+        return diagnostic
     lateral = states[1:n_bounds + 1, 0]
-    if np.any(lateral < lower[:n_bounds] - lateral_tolerance):
-        return False
-    if np.any(lateral > upper[:n_bounds] + lateral_tolerance):
-        return False
+    lower_violation = lower[:n_bounds] - lateral
+    upper_violation = lateral - upper[:n_bounds]
+    worst_lower = int(np.argmax(lower_violation))
+    worst_upper = int(np.argmax(upper_violation))
+    if lower_violation[worst_lower] > lateral_tolerance:
+        diagnostic.update(
+            reason="lateral_below_lower",
+            point_index=worst_lower + 1,
+            lateral=float(lateral[worst_lower]),
+            lower=float(lower[worst_lower]),
+            upper=float(upper[worst_lower]),
+            violation=float(lower_violation[worst_lower]),
+        )
+        return diagnostic
+    if upper_violation[worst_upper] > lateral_tolerance:
+        diagnostic.update(
+            reason="lateral_above_upper",
+            point_index=worst_upper + 1,
+            lateral=float(lateral[worst_upper]),
+            lower=float(lower[worst_upper]),
+            upper=float(upper[worst_upper]),
+            violation=float(upper_violation[worst_upper]),
+        )
+        return diagnostic
 
-    return is_plausible_world_prediction(
+    x_pred, y_pred = world_prediction
+    points = np.column_stack((x_pred, y_pred))
+    if points.shape[0] == 0:
+        diagnostic["reason"] = "empty_world_prediction"
+        return diagnostic
+    if not np.all(np.isfinite(points)):
+        invalid = np.argwhere(~np.isfinite(points))[0]
+        diagnostic.update(
+            reason="non_finite_world_prediction",
+            point_index=int(invalid[0]),
+            coordinate_index=int(invalid[1]),
+        )
+        return diagnostic
+    current_xy = np.asarray(current_position, dtype=float)
+    if current_xy.shape != (2,) or not np.all(np.isfinite(current_xy)):
+        diagnostic["reason"] = "invalid_current_position"
+        return diagnostic
+    start_distance = float(np.linalg.norm(points[0] - current_xy))
+    diagnostic["start_distance"] = start_distance
+    if start_distance > max_start_distance:
+        diagnostic.update(
+            reason="prediction_start_too_far",
+            violation=start_distance - max_start_distance,
+        )
+        return diagnostic
+    if len(points) > 1:
+        step_distances = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        max_step_index = int(np.argmax(step_distances))
+        measured_max_step = float(step_distances[max_step_index])
+        diagnostic.update(
+            max_step_distance=measured_max_step,
+            max_step_index=max_step_index,
+        )
+        if measured_max_step > max_step_distance:
+            diagnostic.update(
+                reason="prediction_step_too_far",
+                point_index=max_step_index + 1,
+                violation=measured_max_step - max_step_distance,
+            )
+            return diagnostic
+    diagnostic.update(valid=True, reason="ok")
+    return diagnostic
+
+
+def format_prediction_diagnostic(diagnostic) -> str:
+    """Format a stable single-line diagnostic suitable for ROS logs."""
+    fields = [
+        f"reason={diagnostic.get('reason', 'unknown')}",
+        f"point={diagnostic.get('point_index')}",
+    ]
+    for key in (
+        "lateral", "lower", "upper", "violation",
+        "start_distance", "max_step_distance", "max_step_index",
+    ):
+        value = diagnostic.get(key)
+        if isinstance(value, (float, np.floating)):
+            value = f"{float(value):.4f}" if np.isfinite(value) else "nan"
+        fields.append(f"{key}={value}")
+    return ", ".join(fields)
+
+
+def is_plausible_mpc_prediction(
+    spatial_states, world_prediction, current_position, lower_bounds,
+    upper_bounds, lateral_tolerance=0.5, max_start_distance=8.0,
+    max_step_distance=5.0,
+) -> bool:
+    """Reject finite but physically implausible solver predictions."""
+    return bool(diagnose_mpc_prediction(
+        spatial_states,
         world_prediction,
         current_position,
+        lower_bounds,
+        upper_bounds,
+        lateral_tolerance=lateral_tolerance,
         max_start_distance=max_start_distance,
         max_step_distance=max_step_distance,
-    )
+    )["valid"])
 
 
 def apply_outer_boundary_guard(
@@ -275,6 +452,7 @@ class MPC:
                  steering_preview_enabled=True,
                  steering_command_delay=0.15,
                  steering_preview_max_distance=6.0,
+                 steering_reservation_enabled=False,
                  steering_reachability_speed_enabled=True,
                  steering_reachability_min_speed=2.0,
                  steering_reachability_min_angle=0.03):
@@ -423,6 +601,8 @@ class MPC:
         self.steering_command_delay = max(float(steering_command_delay), 0.0)
         self.steering_preview_max_distance = max(
             float(steering_preview_max_distance), 0.0)
+        self.steering_reservation_enabled = bool(
+            steering_reservation_enabled)
         self.steering_reachability_speed_enabled = bool(
             steering_reachability_speed_enabled)
         self.steering_reachability_min_speed = max(
@@ -635,7 +815,22 @@ class MPC:
                     )
 
             preview_reference = steering_reference.copy()
-            if self.steering_preview_enabled:
+            if self.steering_reservation_enabled:
+                reservation_speeds = np.asarray([
+                    max(float(self.model.reference_path.get_waypoint(
+                        self.model.wp_id + index).v_ref), 0.0)
+                    for index in range(N + 1)
+                ], dtype=float)
+                preview_reference = build_arc_length_steering_reservation(
+                    horizon_distance,
+                    steering_reference,
+                    reservation_speeds,
+                    self.steering_command_delay,
+                    self.max_steering_rate,
+                    self.previous_steering,
+                    self.model.Ts,
+                )
+            elif self.steering_preview_enabled:
                 for index in range(N + 1):
                     waypoint = self.model.reference_path.get_waypoint(
                         self.model.wp_id + index)
@@ -1185,15 +1380,24 @@ class MPC:
             optimizer_controls = np.array(dec.x[-N*nu:])
             x = np.reshape(dec.x[:(N+1)*nx], (N+1, nx))
             candidate_prediction = self.update_prediction(x, N)
-            if not is_plausible_mpc_prediction(
+            prediction_diagnostic = diagnose_mpc_prediction(
                 x,
                 candidate_prediction,
                 (self.model.temporal_state.x, self.model.temporal_state.y),
                 self._prediction_lower_bounds,
                 self._prediction_upper_bounds,
                 lateral_tolerance=self.prediction_lateral_tolerance,
-            ):
-                raise ValueError("OSQP returned an implausible prediction")
+            )
+            if not prediction_diagnostic["valid"]:
+                diagnostic_text = format_prediction_diagnostic(
+                    prediction_diagnostic)
+                print(
+                    "[MPCPredictionReject] " + diagnostic_text,
+                    flush=True,
+                )
+                raise ValueError(
+                    "OSQP returned an implausible prediction: "
+                    + diagnostic_text)
 
             if self.uses_steering_state:
                 # Expose [v, delta] to the existing controller/fallback code.

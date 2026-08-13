@@ -154,6 +154,196 @@ class Map:
         cells = self.data_backup[min_y:max_y + 1, min_x:max_x + 1]
         return bool(np.all(cells[disk] != 0))
 
+    def static_oriented_box_is_free(
+        self, x, y, heading, half_length, half_width, step=None
+    ):
+        """Return whether an oriented rectangular footprint is in free space.
+
+        This is intentionally separate from ``static_disk_is_free``. A disk
+        enclosing the complete kart is useful for conservative reverse sweeps,
+        but rejects valid wall-escape motion when the kart is nearly parallel
+        to a boundary. Recovery rollouts need the actual footprint orientation.
+        """
+        half_length = max(float(half_length), 0.0)
+        half_width = max(float(half_width), 0.0)
+        if step is None:
+            step = min(max(float(self.resolution) * 0.75, 0.02), 0.08)
+        step = max(float(step), 0.01)
+        n_long = max(int(math.ceil(2.0 * half_length / step)), 1)
+        n_lat = max(int(math.ceil(2.0 * half_width / step)), 1)
+        local_long = np.linspace(-half_length, half_length, n_long + 1)
+        local_lat = np.linspace(-half_width, half_width, n_lat + 1)
+        longitudinal, lateral = np.meshgrid(local_long, local_lat)
+        cos_yaw = math.cos(float(heading))
+        sin_yaw = math.sin(float(heading))
+        world_x = (
+            float(x) + longitudinal * cos_yaw - lateral * sin_yaw)
+        world_y = (
+            float(y) + longitudinal * sin_yaw + lateral * cos_yaw)
+        map_x = np.rint(
+            (world_x - self.origin[0]) / float(self.resolution)).astype(int)
+        map_y = np.rint(
+            (self.height - 1)
+            - (world_y - self.origin[1]) / float(self.resolution)).astype(int)
+        if (
+            np.any(map_x < 0) or np.any(map_x >= self.width)
+            or np.any(map_y < 0) or np.any(map_y >= self.height)
+        ):
+            return False
+        return bool(np.all(self.data_backup[map_y, map_x] != 0))
+
+    def static_oriented_box_interference(
+        self, x, y, heading, half_length, half_width, step=None
+    ):
+        """Return the occupied fraction of an oriented vehicle footprint.
+
+        A value of zero means that the complete footprint is in free space.
+        Samples outside the occupancy map are treated as occupied.  The
+        fraction, rather than only a boolean, lets recovery distinguish motion
+        that exits an existing boundary contact from motion that makes it
+        worse.
+        """
+        half_length = max(float(half_length), 0.0)
+        half_width = max(float(half_width), 0.0)
+        if step is None:
+            step = min(max(float(self.resolution) * 0.75, 0.02), 0.08)
+        step = max(float(step), 0.01)
+        n_long = max(int(math.ceil(2.0 * half_length / step)), 1)
+        n_lat = max(int(math.ceil(2.0 * half_width / step)), 1)
+        local_long = np.linspace(-half_length, half_length, n_long + 1)
+        local_lat = np.linspace(-half_width, half_width, n_lat + 1)
+        longitudinal, lateral = np.meshgrid(local_long, local_lat)
+        cos_yaw = math.cos(float(heading))
+        sin_yaw = math.sin(float(heading))
+        world_x = float(x) + longitudinal * cos_yaw - lateral * sin_yaw
+        world_y = float(y) + longitudinal * sin_yaw + lateral * cos_yaw
+        map_x = np.rint(
+            (world_x - self.origin[0]) / float(self.resolution)).astype(int)
+        map_y = np.rint(
+            (self.height - 1)
+            - (world_y - self.origin[1]) / float(self.resolution)).astype(int)
+        inside = (
+            (map_x >= 0) & (map_x < self.width)
+            & (map_y >= 0) & (map_y < self.height)
+        )
+        occupied = np.ones(map_x.shape, dtype=bool)
+        occupied[inside] = self.data_backup[
+            map_y[inside], map_x[inside]] == 0
+        return float(np.count_nonzero(occupied)) / float(occupied.size)
+
+    def static_straight_reverse_box_clearance(
+        self, x, y, heading, max_distance, half_length, half_width,
+        escape_max_distance, step=None, interference_tolerance=0.005,
+        trend_window=4, total_improvement_threshold=0.001,
+    ):
+        """Measure safe straight reverse travel with boundary-contact escape.
+
+        If the initial rectangle is already touching the static boundary, the
+        overlap must never increase and must become zero within
+        ``escape_max_distance``.  After reaching free space, every remaining
+        sample must stay completely free.  Steering is deliberately not
+        modelled here.
+        """
+        max_distance = max(float(max_distance), 0.0)
+        escape_max_distance = max(float(escape_max_distance), 0.0)
+        interference_tolerance = max(float(interference_tolerance), 0.0)
+        trend_window = max(int(trend_window), 2)
+        total_improvement_threshold = max(
+            float(total_improvement_threshold), 0.0)
+        if step is None:
+            step = min(max(float(self.resolution) * 0.5, 0.02), 0.10)
+        step = max(float(step), 0.01)
+        initial = self.static_oriented_box_interference(
+            x, y, heading, half_length, half_width)
+        diagnostic = {
+            "reason": "free_path",
+            "initial_interference": initial,
+            "failure_distance": None,
+            "previous_interference": initial,
+            "interference": initial,
+            "free_distance": 0.0 if initial <= 0.0 else None,
+            "safe_prefix_clearance": 0.0,
+            "total_improvement": 0.0,
+        }
+        escaping = initial > 0.0
+        reached_free = not escaping
+        previous = initial
+        recent_interference = [initial]
+        clearance = 0.0
+        distance = step
+        while distance <= max_distance + 1e-9:
+            sample_distance = min(distance, max_distance)
+            sample_x = float(x) - sample_distance * math.cos(float(heading))
+            sample_y = float(y) - sample_distance * math.sin(float(heading))
+            interference = self.static_oriented_box_interference(
+                sample_x, sample_y, heading, half_length, half_width)
+            if not reached_free:
+                recent_interference.append(interference)
+                recent_interference = recent_interference[-trend_window:]
+                total_improvement = initial - interference
+                exceeds_initial = (
+                    interference > initial + interference_tolerance)
+                sustained_worsening = False
+                if len(recent_interference) >= trend_window:
+                    indices = np.arange(len(recent_interference), dtype=float)
+                    slope = float(np.polyfit(
+                        indices, np.asarray(recent_interference), 1)[0])
+                    window_rise = (
+                        recent_interference[-1] - min(recent_interference))
+                    sustained_worsening = bool(
+                        slope > 0.0
+                        and window_rise > interference_tolerance
+                        and total_improvement
+                            < total_improvement_threshold)
+                if exceeds_initial or sustained_worsening:
+                    diagnostic.update(
+                        reason=(
+                            "interference_exceeds_initial"
+                            if exceeds_initial
+                            else "sustained_interference_worsening"),
+                        failure_distance=sample_distance,
+                        previous_interference=previous,
+                        interference=interference,
+                        total_improvement=total_improvement,
+                        interference_tolerance=interference_tolerance,
+                        trend_window=trend_window,
+                    )
+                    break
+                if interference <= 0.0:
+                    reached_free = True
+                    diagnostic["free_distance"] = sample_distance
+                elif sample_distance > escape_max_distance + 1e-9:
+                    diagnostic.update(
+                        reason="escape_distance_exceeded",
+                        failure_distance=sample_distance,
+                        previous_interference=previous,
+                        interference=interference,
+                        total_improvement=total_improvement,
+                        safe_prefix_clearance=sample_distance,
+                    )
+                    break
+            elif interference > 0.0:
+                diagnostic.update(
+                    reason="collision_after_escape",
+                    failure_distance=sample_distance,
+                    previous_interference=previous,
+                    interference=interference,
+                )
+                break
+            previous = interference
+            clearance = sample_distance
+            diagnostic["safe_prefix_clearance"] = clearance
+            if sample_distance >= max_distance:
+                break
+            distance += step
+
+        if escaping and not reached_free:
+            clearance = 0.0
+        elif reached_free and diagnostic["reason"] == "free_path":
+            diagnostic["reason"] = "clear"
+        self.last_static_reverse_diagnostic = diagnostic
+        return clearance, initial, reached_free
+
     def static_straight_path_clearance(
         self, x, y, heading, max_distance, footprint_radius, step=None
     ):

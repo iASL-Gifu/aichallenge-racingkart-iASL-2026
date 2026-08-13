@@ -520,6 +520,8 @@ class MPCController(Node):
                     cfg_mpc, "steering_command_delay", 0.15)),
                 steering_preview_max_distance=float(getattr(
                     cfg_mpc, "steering_preview_max_distance", 6.0)),
+                steering_reservation_enabled=bool(getattr(
+                    cfg_mpc, "steering_reservation_enabled", False)),
                 steering_reachability_speed_enabled=bool(getattr(
                     cfg_mpc, "steering_reachability_speed_enabled", False)),
                 steering_reachability_min_speed=float(getattr(
@@ -1098,6 +1100,26 @@ class MPCController(Node):
         )), 0.1)
         self._adaptive_reverse_min_clear_distance = max(float(get_cfg(
             "adaptive_reverse_min_clear_distance", 0.3)), 0.0)
+        self._adaptive_reverse_static_escape_max_distance = max(float(get_cfg(
+            "adaptive_reverse_static_escape_max_distance", 2.0)), 0.0)
+        self._adaptive_reverse_interference_tolerance = max(float(get_cfg(
+            "adaptive_reverse_interference_tolerance", 0.005)), 0.0)
+        self._adaptive_reverse_interference_trend_window = max(int(get_cfg(
+            "adaptive_reverse_interference_trend_window", 4)), 2)
+        self._adaptive_reverse_total_improvement_threshold = max(float(
+            get_cfg("adaptive_reverse_total_improvement_threshold", 0.001)),
+            0.0)
+        self._adaptive_reverse_escape_pulse_enabled = bool(get_cfg(
+            "adaptive_reverse_escape_pulse_enabled", True))
+        self._adaptive_reverse_escape_pulse_distance = max(float(get_cfg(
+            "adaptive_reverse_escape_pulse_distance", 0.4)), 0.1)
+        self._adaptive_reverse_escape_pulse_min_improvement = max(float(
+            get_cfg("adaptive_reverse_escape_pulse_min_improvement", 0.01)),
+            0.0)
+        self._adaptive_reverse_escape_pulse_min_improvement_ratio = max(float(
+            get_cfg(
+                "adaptive_reverse_escape_pulse_min_improvement_ratio", 0.10)),
+            0.0)
         self._adaptive_reverse_localization_max_error = max(float(get_cfg(
             "adaptive_reverse_localization_max_error", 0.5)), 0.0)
         self._adaptive_reverse_localization_fresh_sec = max(float(get_cfg(
@@ -1106,6 +1128,67 @@ class MPCController(Node):
             "adaptive_reverse_localization_confirm_sec", 0.25)), 0.0)
         self._adaptive_reverse_forward_success_cycles_required = max(int(
             get_cfg("adaptive_reverse_forward_success_cycles", 3)), 1)
+        self._forward_pose_recovery_enabled = bool(get_cfg(
+            "forward_pose_recovery_enabled", True))
+        self._forward_pose_recovery_speed = max(float(get_cfg(
+            "forward_pose_recovery_speed", 0.8)), 0.1)
+        self._forward_pose_recovery_duration = max(float(get_cfg(
+            "forward_pose_recovery_duration", 1.25)), 0.1)
+        self._forward_pose_recovery_horizon = max(float(get_cfg(
+            "forward_pose_recovery_horizon", 2.0)), 0.2)
+        self._forward_pose_recovery_dt = min(max(float(get_cfg(
+            "forward_pose_recovery_dt", 0.10)), 0.02), 0.25)
+        self._forward_pose_recovery_steer = math.radians(max(float(get_cfg(
+            "forward_pose_recovery_steer_deg", 18.0)), 0.0))
+        self._forward_pose_recovery_static_radius = (
+            float(self._cfg.bicycle_model.width) / math.sqrt(2.0)
+            + max(float(get_cfg(
+                "forward_pose_recovery_static_margin", 0.05)), 0.0)
+        )
+        recovery_static_margin = max(float(get_cfg(
+            "forward_pose_recovery_static_margin", 0.05)), 0.0)
+        self._forward_pose_recovery_half_length = max(float(get_cfg(
+            "forward_pose_recovery_half_length", 1.05)), 0.1)
+        self._forward_pose_recovery_half_width = max(float(get_cfg(
+            "forward_pose_recovery_half_width", 0.80)), 0.1)
+        self._forward_pose_recovery_half_length += recovery_static_margin
+        self._forward_pose_recovery_half_width += recovery_static_margin
+        self._forward_pose_recovery_static_escape_grace_distance = max(float(
+            get_cfg(
+                "forward_pose_recovery_static_escape_grace_distance", 2.0)),
+            0.0)
+        self._forward_pose_recovery_escape_pulse_enabled = bool(get_cfg(
+            "forward_pose_recovery_escape_pulse_enabled", True))
+        self._forward_pose_recovery_escape_pulse_distance = max(float(get_cfg(
+            "forward_pose_recovery_escape_pulse_distance", 0.4)), 0.1)
+        self._forward_pose_recovery_escape_pulse_min_improvement = max(float(
+            get_cfg(
+                "forward_pose_recovery_escape_pulse_min_improvement", 0.01)),
+            0.0)
+        self._forward_pose_recovery_escape_pulse_min_improvement_ratio = max(
+            float(get_cfg(
+                "forward_pose_recovery_escape_pulse_min_improvement_ratio",
+                0.10)),
+            0.0)
+        self._forward_pose_recovery_interference_tolerance = max(float(get_cfg(
+            "forward_pose_recovery_interference_tolerance", 0.005)), 0.0)
+        self._forward_pose_recovery_v2x_margin = max(float(get_cfg(
+            "forward_pose_recovery_v2x_margin", 0.30)), 0.0)
+        self._forward_pose_recovery_min_progress = max(float(get_cfg(
+            "forward_pose_recovery_min_progress", 0.20)), 0.0)
+        self._forward_pose_recovery_min_heading_improvement = math.radians(
+            max(float(get_cfg(
+                "forward_pose_recovery_heading_improvement_deg", 3.0)), 0.0))
+        self._reverse_no_progress_timeout_sec = max(float(get_cfg(
+            "reverse_no_progress_timeout_sec", 0.75)), 0.1)
+        self._reverse_no_progress_min_distance = max(float(get_cfg(
+            "reverse_no_progress_min_distance", 0.08)), 0.0)
+        self._reverse_retry_suppress_sec = max(float(get_cfg(
+            "reverse_retry_suppress_sec", 10.0)), 0.0)
+        self._reverse_retry_pose_tolerance = max(float(get_cfg(
+            "reverse_retry_pose_tolerance", 0.30)), 0.0)
+        self._reverse_retry_heading_tolerance = math.radians(max(float(get_cfg(
+            "reverse_retry_heading_tolerance_deg", 12.0)), 0.0))
         self._stuck_cooldown = float(get_cfg("cooldown", 2.0))
         self._stuck_forward_reverse_speed = abs(float(get_cfg("reverse_speed", 1.0)))
         self._stuck_reverse_speed = -abs(float(get_cfg("reverse_speed", 1.0)))
@@ -1156,6 +1239,20 @@ class MPCController(Node):
         self._adaptive_reverse_active = False
         self._adaptive_reverse_static_clearance = None
         self._adaptive_reverse_forward_success_cycles = 0
+        self._forward_pose_recovery_until = None
+        self._forward_pose_recovery_steer_command = 0.0
+        self._forward_pose_recovery_start_xy = None
+        self._recovery_motion_mode = "idle"
+        self._forward_pose_recovery_blocked_pose = None
+        self._forward_pose_recovery_blocked_until = None
+        self._forward_pose_recovery_no_progress_min_distance = max(float(
+            get_cfg("forward_pose_recovery_no_progress_min_distance", 0.08)),
+            0.0)
+        self._forward_pose_recovery_retry_suppress_sec = max(float(get_cfg(
+            "forward_pose_recovery_retry_suppress_sec", 10.0)), 0.0)
+        self._reverse_no_progress_checked = False
+        self._reverse_blocked_pose = None
+        self._reverse_blocked_until = None
         self._localization_consistent_since = None
         self._localization_consistent = False
         self._localization_position_error = math.inf
@@ -1218,6 +1315,7 @@ class MPCController(Node):
                 f"for {self._stuck_reverse_duration:.1f}s "
                 f"adaptive={self._adaptive_reverse_enabled} "
                 f"adaptive_max={self._adaptive_reverse_max_distance:.2f}m "
+                f"forward_pose_recovery={self._forward_pose_recovery_enabled} "
                 f"localization_error_max="
                 f"{self._adaptive_reverse_localization_max_error:.2f}m "
                 f"source={__file__}"
@@ -1682,17 +1780,532 @@ class MPCController(Node):
         return nearest_id == target_id
 
     def _static_reverse_clearance(self, pose, max_distance: float) -> float:
-        return self._map.static_straight_path_clearance(
+        clearance, initial_interference, reached_free = (
+            self._map.static_straight_reverse_box_clearance(
             pose.x,
             pose.y,
             pose.theta,
             max_distance,
-            self._adaptive_reverse_footprint_radius,
+            self._forward_pose_recovery_half_length,
+            self._forward_pose_recovery_half_width,
+            self._adaptive_reverse_static_escape_max_distance,
+            interference_tolerance=
+                self._adaptive_reverse_interference_tolerance,
+            trend_window=self._adaptive_reverse_interference_trend_window,
+            total_improvement_threshold=
+                self._adaptive_reverse_total_improvement_threshold,
+        ))
+        self._adaptive_reverse_initial_static_interference = (
+            initial_interference)
+        self._adaptive_reverse_static_escape_reached_free = reached_free
+        self._adaptive_reverse_static_diagnostic = dict(getattr(
+            self._map, "last_static_reverse_diagnostic", {}))
+        return clearance
+
+    def _reverse_static_diagnostic_text(self) -> str:
+        diagnostic = getattr(
+            self, "_adaptive_reverse_static_diagnostic", {})
+        def value(name):
+            item = diagnostic.get(name)
+            return "none" if item is None else f"{float(item):.4f}"
+        def distance(name):
+            item = diagnostic.get(name)
+            return "none" if item is None else f"{float(item):.4f}m"
+        return (
+            f"static_reason={diagnostic.get('reason', 'unknown')}, "
+            f"failure_distance={distance('failure_distance')}, "
+            f"previous_interference={value('previous_interference')}, "
+            f"failure_interference={value('interference')}, "
+            f"total_improvement={value('total_improvement')}, "
+            f"safe_prefix={distance('safe_prefix_clearance')}, "
+            f"free_distance={distance('free_distance')}"
         )
 
     def _static_current_footprint_is_free(self, pose) -> bool:
-        return self._map.static_disk_is_free(
-            pose.x, pose.y, self._adaptive_reverse_footprint_radius)
+        return self._map.static_oriented_box_is_free(
+            pose.x, pose.y, pose.theta,
+            self._forward_pose_recovery_half_length,
+            self._forward_pose_recovery_half_width)
+
+    def _forward_pose_recovery_candidate(self, pose, target_steer: float):
+        """Roll out one low-speed recovery candidate without invoking MPC.
+
+        The rollout uses the same bicycle length and steering-rate limit as the
+        live controller.  Static occupancy is checked with a conservative disk;
+        moving V2X vehicles are checked at matching future timestamps.
+        """
+        dt = self._forward_pose_recovery_dt
+        speed = self._forward_pose_recovery_speed
+        x = float(pose.x)
+        y = float(pose.y)
+        yaw = float(pose.theta)
+        steer = float(self._last_u[1])
+        steer_limit = math.radians(float(self._cfg.mpc.delta_max_deg))
+        target_steer = float(np.clip(target_steer, -steer_limit, steer_limit))
+        self._last_forward_pose_candidate_diagnostic = {
+            "steer": target_steer,
+            "accepted": False,
+            "reason": "not_evaluated",
+        }
+
+        def reject(reason: str, **details):
+            self._last_forward_pose_candidate_diagnostic = {
+                "steer": target_steer,
+                "accepted": False,
+                "reason": reason,
+                **details,
+            }
+            return None
+        steer_step = max(float(self._cfg.mpc.steer_rate_max), 0.0) * dt
+        initial_wp = self._carN_center.get_closest_waypoint(x, y)
+        initial_heading = self._reference_pathN_center.get_waypoint(
+            initial_wp).psi
+        initial_heading_error = absolute_heading_difference(yaw, initial_heading)
+        initial_frenet = self._center_frenet(x, y)
+        initial_lateral = (
+            abs(float(initial_frenet[1])) if initial_frenet is not None
+            else math.inf)
+        ego_radius = self._forward_pose_recovery_static_radius
+        v2x_clearance = (
+            ego_radius + self._v2x_vehicle_radius
+            + self._forward_pose_recovery_v2x_margin)
+        points = []
+        static_free_reached = self._map.static_oriented_box_is_free(
+            x, y, yaw,
+            self._forward_pose_recovery_half_length,
+            self._forward_pose_recovery_half_width)
+        initially_in_contact = not static_free_reached
+        initial_interference = (
+            self._map.static_oriented_box_interference(
+                x, y, yaw,
+                self._forward_pose_recovery_half_length,
+                self._forward_pose_recovery_half_width)
+            if initially_in_contact else 0.0)
+        max_prefix_interference = initial_interference
+        pulse_snapshot = None
+        pulse_improvement = 0.0
+        pulse_improvement_ratio = 0.0
+        pulse_plan = False
+        # A 2 m escape allowance is meaningful only if the rollout actually
+        # reaches beyond it. Keep the configured horizon when it is longer.
+        rollout_sec = max(
+            self._forward_pose_recovery_horizon,
+            self._forward_pose_recovery_static_escape_grace_distance / speed
+                + dt if initially_in_contact
+                else self._forward_pose_recovery_horizon,
+        )
+        steps = max(int(math.ceil(
+            rollout_sec / dt)), 1)
+
+        for step_idx in range(1, steps + 1):
+            steer += float(np.clip(
+                target_steer - steer, -steer_step, steer_step))
+            yaw_rate = speed / float(self._car.length) * math.tan(steer)
+            mid_yaw = yaw + 0.5 * yaw_rate * dt
+            x += speed * math.cos(mid_yaw) * dt
+            y += speed * math.sin(mid_yaw) * dt
+            yaw = math.atan2(
+                math.sin(yaw + yaw_rate * dt),
+                math.cos(yaw + yaw_rate * dt),
+            )
+            prediction_sec = step_idx * dt
+            static_free = self._map.static_oriented_box_is_free(
+                x, y, yaw,
+                self._forward_pose_recovery_half_length,
+                self._forward_pose_recovery_half_width)
+            travelled = speed * prediction_sec
+            if not static_free:
+                interference = self._map.static_oriented_box_interference(
+                    x, y, yaw,
+                    self._forward_pose_recovery_half_length,
+                    self._forward_pose_recovery_half_width)
+                max_prefix_interference = max(
+                    max_prefix_interference, interference)
+                # Once free space has been reached, re-entry is always unsafe.
+                if static_free_reached:
+                    return reject(
+                        "static_boundary",
+                        step=step_idx,
+                        prediction_sec=prediction_sec,
+                        travelled=travelled,
+                        interference=interference,
+                        free_was_reached=static_free_reached,
+                    )
+                # Before the pulse endpoint, do not accept a manoeuvre that
+                # first pushes the vehicle materially farther into the wall.
+                if (
+                    pulse_snapshot is None
+                    and interference
+                        > initial_interference
+                            + self._forward_pose_recovery_interference_tolerance
+                ):
+                    return reject(
+                        "interference_exceeds_initial",
+                        step=step_idx,
+                        prediction_sec=prediction_sec,
+                        travelled=travelled,
+                        initial_interference=initial_interference,
+                        interference=interference,
+                    )
+                if travelled > (
+                    self._forward_pose_recovery_static_escape_grace_distance
+                    + 1e-9
+                ):
+                    break
+            else:
+                static_free_reached = True
+            for vehicle_id in self._v2x_tracker.active_vehicle_ids():
+                samples = self._v2x_tracker._samples.get(vehicle_id)
+                if not samples:
+                    continue
+                _, vehicle_x, vehicle_y = samples[-1]
+                velocity_x, velocity_y = self._v2x_tracker.velocity(vehicle_id)
+                vehicle_x += velocity_x * prediction_sec
+                vehicle_y += velocity_y * prediction_sec
+                if math.hypot(x - vehicle_x, y - vehicle_y) < v2x_clearance:
+                    return reject(
+                        "v2x_envelope",
+                        step=step_idx,
+                        prediction_sec=prediction_sec,
+                        travelled=travelled,
+                        vehicle_id=vehicle_id,
+                        vehicle_distance=math.hypot(
+                            x - vehicle_x, y - vehicle_y),
+                        required_clearance=v2x_clearance,
+                    )
+            points.append((x, y, yaw, steer))
+            if (
+                initially_in_contact
+                and pulse_snapshot is None
+                and travelled + 1e-9
+                    >= self._forward_pose_recovery_escape_pulse_distance
+            ):
+                endpoint_interference = (
+                    0.0 if static_free else interference)
+                pulse_improvement = (
+                    initial_interference - endpoint_interference)
+                pulse_improvement_ratio = (
+                    pulse_improvement / initial_interference
+                    if initial_interference > 1e-9 else 0.0)
+                prefix_non_worsening = bool(
+                    max_prefix_interference
+                        <= initial_interference
+                            + self._forward_pose_recovery_interference_tolerance)
+                if (
+                    self._forward_pose_recovery_escape_pulse_enabled
+                    and prefix_non_worsening
+                    and pulse_improvement
+                        >= self._forward_pose_recovery_escape_pulse_min_improvement
+                    and pulse_improvement_ratio >= (
+                        self._forward_pose_recovery_escape_pulse_min_improvement_ratio)
+                ):
+                    pulse_snapshot = {
+                        "x": x, "y": y, "yaw": yaw, "steer": steer,
+                        "points": list(points),
+                        "travelled": travelled,
+                        "interference": endpoint_interference,
+                    }
+
+        if not static_free_reached:
+            if pulse_snapshot is None:
+                final_interference = (
+                    self._map.static_oriented_box_interference(
+                        x, y, yaw,
+                        self._forward_pose_recovery_half_length,
+                        self._forward_pose_recovery_half_width))
+                return reject(
+                    "static_escape_not_reached",
+                    step=steps,
+                    prediction_sec=steps * dt,
+                    travelled=speed * steps * dt,
+                    initial_interference=initial_interference,
+                    interference=final_interference,
+                    pulse_improvement=pulse_improvement,
+                    pulse_improvement_ratio=pulse_improvement_ratio,
+                )
+            # Full escape is not reachable within 2 m, but the first short
+            # segment is verified to improve boundary overlap. Execute only
+            # that segment and re-plan from measured state afterwards.
+            x = pulse_snapshot["x"]
+            y = pulse_snapshot["y"]
+            yaw = pulse_snapshot["yaw"]
+            steer = pulse_snapshot["steer"]
+            points = pulse_snapshot["points"]
+            pulse_plan = True
+        progress = math.hypot(x - float(pose.x), y - float(pose.y))
+        if progress < self._forward_pose_recovery_min_progress:
+            return reject(
+                "insufficient_progress",
+                progress=progress,
+                required_progress=self._forward_pose_recovery_min_progress,
+            )
+        final_wp = self._carN_center.get_closest_waypoint(x, y)
+        final_heading = self._reference_pathN_center.get_waypoint(final_wp).psi
+        final_heading_error = absolute_heading_difference(yaw, final_heading)
+        final_frenet = self._center_frenet(x, y)
+        final_lateral = (
+            abs(float(final_frenet[1])) if final_frenet is not None
+            else math.inf)
+        heading_improvement = initial_heading_error - final_heading_error
+        lateral_improvement = initial_lateral - final_lateral
+        # When badly misaligned, do not accept a safe manoeuvre that turns the
+        # car farther away from Center. Near the reference, lateral improvement
+        # is sufficient and avoids rejecting the straight candidate needlessly.
+        if (
+            initial_heading_error > math.radians(20.0)
+            and heading_improvement
+                < self._forward_pose_recovery_min_heading_improvement
+            and lateral_improvement <= 0.0
+        ):
+            return reject(
+                "center_pose_not_improved",
+                heading_before=initial_heading_error,
+                heading_after=final_heading_error,
+                heading_improvement=heading_improvement,
+                lateral_before=initial_lateral,
+                lateral_after=final_lateral,
+                lateral_improvement=lateral_improvement,
+            )
+        score = (
+            3.0 * heading_improvement
+            + 0.5 * lateral_improvement
+            - 0.05 * abs(target_steer))
+        self._last_forward_pose_candidate_diagnostic = {
+            "steer": target_steer,
+            "accepted": True,
+            "reason": "safe_improvement_pulse" if pulse_plan else "safe",
+            "score": score,
+            "heading_before": initial_heading_error,
+            "heading_after": final_heading_error,
+            "lateral_before": initial_lateral,
+            "lateral_after": final_lateral,
+            "pulse_plan": pulse_plan,
+            "initial_interference": initial_interference,
+            "final_interference": (
+                pulse_snapshot["interference"]
+                if pulse_plan else 0.0),
+            "interference_improvement": (
+                pulse_improvement if pulse_plan else initial_interference),
+            "interference_improvement_ratio": (
+                pulse_improvement_ratio if pulse_plan else 1.0),
+        }
+        return {
+            "steer": target_steer,
+            "score": score,
+            "heading_before": initial_heading_error,
+            "heading_after": final_heading_error,
+            "lateral_before": initial_lateral,
+            "lateral_after": final_lateral,
+            "points": points,
+            "pulse_plan": pulse_plan,
+            "command_duration": (
+                pulse_snapshot["travelled"] / speed
+                if pulse_plan else self._forward_pose_recovery_duration),
+        }
+
+    def _start_forward_pose_recovery(self, pose, now_sec: float) -> bool:
+        if not self._forward_pose_recovery_enabled:
+            return False
+        if self._stuck_recovery_until is not None:
+            self.get_logger().error(
+                "[RecoveryStateConflict] refusing forward recovery because "
+                "a reverse/gear recovery state is already active."
+            )
+            return False
+        if (
+            self._forward_pose_recovery_blocked_pose is not None
+            and self._forward_pose_recovery_blocked_until is not None
+            and now_sec < self._forward_pose_recovery_blocked_until
+        ):
+            blocked_x, blocked_y, blocked_yaw = (
+                self._forward_pose_recovery_blocked_pose)
+            same_pose = bool(
+                math.hypot(pose.x - blocked_x, pose.y - blocked_y)
+                    <= self._reverse_retry_pose_tolerance
+                and absolute_heading_difference(pose.theta, blocked_yaw)
+                    <= self._reverse_retry_heading_tolerance
+            )
+            if same_pose:
+                self.get_logger().warn(
+                    "[ForwardPoseRecoveryRetrySuppressed] the previous "
+                    "forward command made no physical progress at this pose; "
+                    "skipping it so reverse can be evaluated."
+                )
+                return False
+        steer = self._forward_pose_recovery_steer
+        candidates = []
+        diagnostics = []
+        for target_steer in (steer, 0.0, -steer):
+            candidate = self._forward_pose_recovery_candidate(
+                pose, target_steer)
+            diagnostics.append(dict(
+                self._last_forward_pose_candidate_diagnostic))
+            if candidate is not None:
+                candidates.append(candidate)
+        for diagnostic in diagnostics:
+            details = ", ".join(
+                f"{key}={value:.4f}" if isinstance(value, float)
+                else f"{key}={value}"
+                for key, value in diagnostic.items()
+                if key not in ("steer", "accepted", "reason")
+            )
+            self.get_logger().warn(
+                "[ForwardPoseRecoveryCandidate] "
+                f"steer={math.degrees(diagnostic['steer']):+.1f}deg, "
+                f"accepted={diagnostic['accepted']}, "
+                f"reason={diagnostic['reason']}"
+                + (f", {details}" if details else "")
+            )
+        if not candidates:
+            self.get_logger().warn(
+                "[ForwardPoseRecoveryBlocked] no left/straight/right "
+                "low-speed rollout satisfies static boundary and V2X "
+                "envelopes; reverse remains the fallback."
+            )
+            return False
+        selected = max(candidates, key=lambda item: item["score"])
+        command_duration = float(selected["command_duration"])
+        self._forward_pose_recovery_until = now_sec + command_duration
+        self._forward_pose_recovery_steer_command = float(selected["steer"])
+        self._forward_pose_recovery_start_xy = (pose.x, pose.y)
+        # Forward and reverse recovery are mutually exclusive.  No reverse
+        # command, gear transition or reverse acceleration may coexist with
+        # this state.
+        self._recovery_motion_mode = "forward"
+        self._stuck_reverse_drive_active = False
+        self._stuck_since = None
+        self._gnss_history = []
+        self.get_logger().warn(
+            "[ForwardPoseRecoveryStart] safe MPC-independent forward rollout "
+            "selected before reverse: "
+            f"steer={math.degrees(selected['steer']):+.1f}deg, "
+            f"heading={math.degrees(selected['heading_before']):.1f}->"
+            f"{math.degrees(selected['heading_after']):.1f}deg, "
+            f"lateral={selected['lateral_before']:.2f}->"
+            f"{selected['lateral_after']:.2f}m, "
+            f"duration={command_duration:.2f}s, "
+            f"pulse={selected['pulse_plan']}"
+        )
+        return True
+
+    def _same_blocked_reverse_pose(self, pose, now_sec: float) -> bool:
+        if (
+            self._reverse_blocked_pose is None
+            or self._reverse_blocked_until is None
+            or now_sec >= self._reverse_blocked_until
+        ):
+            return False
+        blocked_x, blocked_y, blocked_yaw = self._reverse_blocked_pose
+        return bool(
+            math.hypot(pose.x - blocked_x, pose.y - blocked_y)
+                <= self._reverse_retry_pose_tolerance
+            and absolute_heading_difference(pose.theta, blocked_yaw)
+                <= self._reverse_retry_heading_tolerance
+        )
+
+    def _prepare_mpc_stall_reverse(self, pose, actual_speed: float, now_sec: float) -> bool:
+        """Bound generic MPC-stall reverse by static map and V2X traffic."""
+        scan_distance = (
+            self._adaptive_reverse_max_distance
+            + self._adaptive_reverse_wall_margin)
+        static_clearance = self._static_reverse_clearance(pose, scan_distance)
+        available = max(
+            static_clearance - self._adaptive_reverse_wall_margin, 0.0)
+        target_distance = min(available, self._adaptive_reverse_max_distance)
+        pulse_plan = False
+        diagnostic = self._adaptive_reverse_static_diagnostic
+        initial_interference = float(
+            diagnostic.get("initial_interference") or 0.0)
+        total_improvement = float(
+            diagnostic.get("total_improvement") or 0.0)
+        improvement_ratio = (
+            total_improvement / initial_interference
+            if initial_interference > 1e-9 else 0.0)
+        safe_prefix = float(
+            diagnostic.get("safe_prefix_clearance") or 0.0)
+        pulse_distance = min(
+            self._adaptive_reverse_escape_pulse_distance, safe_prefix)
+        pulse_end_interference = initial_interference
+        if pulse_distance > 0.0:
+            pulse_end_interference = (
+                self._map.static_oriented_box_interference(
+                    pose.x - pulse_distance * math.cos(pose.theta),
+                    pose.y - pulse_distance * math.sin(pose.theta),
+                    pose.theta,
+                    self._forward_pose_recovery_half_length,
+                    self._forward_pose_recovery_half_width,
+                ))
+        pulse_improvement = initial_interference - pulse_end_interference
+        pulse_improvement_ratio = (
+            pulse_improvement / initial_interference
+            if initial_interference > 1e-9 else 0.0)
+        if (
+            target_distance < self._adaptive_reverse_min_clear_distance
+            and self._adaptive_reverse_escape_pulse_enabled
+            and diagnostic.get("reason") == "escape_distance_exceeded"
+            and safe_prefix >= self._adaptive_reverse_escape_pulse_distance
+            and pulse_improvement
+                >= self._adaptive_reverse_escape_pulse_min_improvement
+            and pulse_improvement_ratio
+                >= self._adaptive_reverse_escape_pulse_min_improvement_ratio
+        ):
+            # Use only the already sampled non-worsening prefix.  The normal
+            # reverse distance completion returns to DRIVE, so a subsequent
+            # pulse is always planned again from the newly measured pose.
+            target_distance = pulse_distance
+            pulse_plan = True
+        rear_clear = bool(
+            target_distance >= self._adaptive_reverse_min_clear_distance
+            and self._reverse_rear_is_clear(
+                pose, actual_speed, reverse_distance=target_distance))
+        if not rear_clear:
+            self.get_logger().warn(
+                "[MPCStallReverseBlocked] reverse was not started because "
+                "the rear sweep is unsafe: "
+                f"static_clearance={static_clearance:.2f}m, "
+                f"initial_interference="
+                f"{self._adaptive_reverse_initial_static_interference:.4f}, "
+                f"escaped="
+                f"{self._adaptive_reverse_static_escape_reached_free}, "
+                f"{self._reverse_static_diagnostic_text()}, "
+                f"usable={available:.2f}m, required="
+                f"{self._adaptive_reverse_min_clear_distance:.2f}m, "
+                f"v2x_conflicts={self._reverse_rear_conflict_summary()}"
+            )
+            # A rejected safety plan never issued a reverse command. Do not
+            # classify it as an executed reverse with no progress: occupancy,
+            # V2X samples and localization can change at the next retry.
+            return False
+        self._stuck_reverse_target_distance = target_distance
+        self._adaptive_reverse_static_clearance = static_clearance
+        # This remains separate from stopped-lead AdaptiveReverse: it does not
+        # depend on a latched target or its lane retry logic.
+        self._adaptive_reverse_active = False
+        if pulse_plan:
+            self.get_logger().warn(
+                "[MPCStallReverseEscapePulse] full boundary escape was not "
+                "reachable in one scan, but straight reverse has a clear "
+                "improvement trend; executing one short pulse and then "
+                "re-evaluating: "
+                f"target={target_distance:.2f}m, safe_prefix="
+                f"{safe_prefix:.2f}m, interference="
+                f"{initial_interference:.4f}->"
+                f"{pulse_end_interference:.4f}, "
+                f"pulse_improvement={pulse_improvement:.4f} "
+                f"({100.0 * pulse_improvement_ratio:.1f}%), "
+                f"scan_improvement={total_improvement:.4f} "
+                f"({100.0 * improvement_ratio:.1f}%)"
+            )
+        self.get_logger().warn(
+            "[MPCStallReversePlan] planned wall-bounded generic reverse: "
+            f"target={target_distance:.2f}m, static_clearance="
+            f"{static_clearance:.2f}m, wall_margin="
+            f"{self._adaptive_reverse_wall_margin:.2f}m, "
+            f"initial_interference="
+            f"{self._adaptive_reverse_initial_static_interference:.4f}, "
+            f"{self._reverse_static_diagnostic_text()}"
+        )
+        return True
 
     def _prepare_follow_deadlock_reverse(
         self, *, pose, now_sec: float, ego_speed: float, target_id
@@ -1719,7 +2332,6 @@ class MPCController(Node):
             and self._latched_target_is_primary_v2x_blocker(
                 pose, ego_speed, target_id)
             and self._localization_consistent
-            and self._static_current_footprint_is_free(pose)
             and self._follow_escape_target_prediction_blocked
         )
         if not eligible:
@@ -3636,6 +4248,7 @@ class MPCController(Node):
         self._stuck_wait_for_drive = True
         self._stuck_recovery_until = now_sec + self._stuck_max_shift_wait
         self._stuck_last_drive_request_at = None
+        self._recovery_motion_mode = "reverse"
         self.get_logger().info(
             f"[StuckRecovery] {reason}; starting DRIVE confirmation."
         )
@@ -3645,6 +4258,63 @@ class MPCController(Node):
             return False
 
         now_sec = float(now.nanoseconds) / 1e9
+
+        # MPC-independent pose recovery is owned exclusively by this state.
+        # It is entered only by the generic MPC-stall path, before any gear
+        # transition, so FollowDeadlock and Prepass recovery remain unchanged.
+        if self._forward_pose_recovery_until is not None:
+            if self._recovery_motion_mode != "forward":
+                self.get_logger().error(
+                    "[RecoveryStateConflict] forward timer existed outside "
+                    "the forward recovery state; cancelling it safely."
+                )
+                self._forward_pose_recovery_until = None
+                self._forward_pose_recovery_start_xy = None
+                self._forward_pose_recovery_steer_command = 0.0
+                self._recovery_motion_mode = "idle"
+                u[0] = 0.0
+                u[1] = 0.0
+                return True
+            candidate = self._forward_pose_recovery_candidate(
+                pose, self._forward_pose_recovery_steer_command)
+            if (
+                now_sec < self._forward_pose_recovery_until
+                and candidate is not None
+            ):
+                u[0] = self._forward_pose_recovery_speed
+                u[1] = self._forward_pose_recovery_steer_command
+                return True
+            start_xy = self._forward_pose_recovery_start_xy
+            travelled = (
+                math.hypot(pose.x - start_xy[0], pose.y - start_xy[1])
+                if start_xy is not None else 0.0)
+            reason = "duration_complete" if candidate is not None else "path_became_unsafe"
+            no_progress = bool(
+                travelled
+                    < self._forward_pose_recovery_no_progress_min_distance)
+            if no_progress:
+                self._forward_pose_recovery_blocked_pose = (
+                    pose.x, pose.y, pose.theta)
+                self._forward_pose_recovery_blocked_until = (
+                    now_sec
+                    + self._forward_pose_recovery_retry_suppress_sec)
+                reason += "_no_progress"
+            self.get_logger().info(
+                "[ForwardPoseRecoveryEnd] returning control to full-width "
+                f"MPC: reason={reason}, travelled={travelled:.2f}m"
+            )
+            self._forward_pose_recovery_until = None
+            self._forward_pose_recovery_start_xy = None
+            self._forward_pose_recovery_steer_command = 0.0
+            self._recovery_motion_mode = "idle"
+            self._mpc_safety_recovery_active = True
+            self._mpc_safety_recovery_success_cycles = 0
+            self._stuck_cooldown_until = now_sec + self._stuck_cooldown
+            self._stuck_since = None
+            self._gnss_history = []
+            u[0] = 0.0
+            u[1] = 0.0
+            return True
 
         # Grid waiting is intentional.  Never convert a Grounded/Ready stop or
         # a stale close-obstacle request into a reverse manoeuvre.
@@ -3903,6 +4573,7 @@ class MPCController(Node):
                         and self._stuck_recovery_started_at is None
                     ):
                         self._stuck_recovery_started_at = now_sec
+                        self._reverse_no_progress_checked = False
                         self._prepass_reverse_start_xy = (pose.x, pose.y)
                         self._stuck_reverse_start_heading = pose.theta
                         if self._stuck_reverse_target_distance is not None:
@@ -3959,6 +4630,37 @@ class MPCController(Node):
                                 throttle_duration_sec=1.0,
                             )
                     else:
+                        if (
+                            self._stuck_recovery_started_at is not None
+                            and not self._reverse_no_progress_checked
+                            and now_sec - self._stuck_recovery_started_at
+                                >= self._reverse_no_progress_timeout_sec
+                            and self._prepass_reverse_start_xy is not None
+                        ):
+                            reverse_motion = math.hypot(
+                                pose.x - self._prepass_reverse_start_xy[0],
+                                pose.y - self._prepass_reverse_start_xy[1],
+                            )
+                            self._reverse_no_progress_checked = True
+                            if reverse_motion < self._reverse_no_progress_min_distance:
+                                self._reverse_blocked_pose = (
+                                    float(pose.x), float(pose.y), float(pose.theta))
+                                self._reverse_blocked_until = (
+                                    now_sec + self._reverse_retry_suppress_sec)
+                                u[0] = 0.0
+                                u[1] = 0.0
+                                self.get_logger().warn(
+                                    "[ReverseNoProgressAbort] reverse command "
+                                    "did not produce physical motion; aborting "
+                                    "and suppressing the same reverse pose: "
+                                    f"travelled={reverse_motion:.3f}m/"
+                                    f"{self._reverse_no_progress_min_distance:.3f}m, "
+                                    f"elapsed={now_sec - self._stuck_recovery_started_at:.2f}s, "
+                                    f"suppress={self._reverse_retry_suppress_sec:.1f}s"
+                                )
+                                self._begin_stuck_drive_transition(
+                                    now_sec, "reverse made no physical progress")
+                                return True
                         self._apply_stuck_reverse_command(u)
                         self._publish_stuck_actuation_command(now, self._stuck_actuation_accel_cmd, 0.0, u[1])
                         self._stuck_reverse_drive_active = True
@@ -4001,10 +4703,12 @@ class MPCController(Node):
             self._stuck_last_reverse_request_at = None
             self._stuck_reverse_drive_after = None
             self._stuck_reverse_drive_active = False
+            self._reverse_no_progress_checked = False
             self._stuck_recovery_started_at = None
             self._stuck_pre_reverse_until = None
             self._stuck_pre_drive_until = None
             self._stuck_wait_for_drive = False
+            self._recovery_motion_mode = "idle"
             self._publish_gear_command(now, self._gear_drive_command)
             if reverse_drive_completed:
                 # DRIVE confirmation is only the end of the gear transition.
@@ -4170,12 +4874,47 @@ class MPCController(Node):
                         f"speed={abs(actual_speed):.2f}m/s; "
                         f"mpc_infeasible={self._mpc.infeasibility_counter}."
                     )
+                    if self._start_forward_pose_recovery(pose, now_sec):
+                        u[0] = self._forward_pose_recovery_speed
+                        u[1] = self._forward_pose_recovery_steer_command
+                        return True
+                    if self._same_blocked_reverse_pose(pose, now_sec):
+                        self.get_logger().warn(
+                            "[ReverseRetrySuppressed] forward rollout is "
+                            "blocked and reverse previously made no progress "
+                            "at the same pose; holding DRIVE instead of "
+                            "repeating the futile reverse.",
+                            throttle_duration_sec=1.0,
+                        )
+                        self._stuck_since = None
+                        self._gnss_history = []
+                        self._stuck_cooldown_until = (
+                            now_sec + self._stuck_cooldown)
+                        u[0] = 0.0
+                        u[1] = 0.0
+                        return True
                 if not self._prepass_retry_after_reverse:
                     self._stuck_reverse_target_distance = None
                     self._stuck_reverse_start_heading = None
                     self._adaptive_reverse_active = False
                     self._adaptive_reverse_static_clearance = None
                     self._adaptive_reverse_forward_success_cycles = 0
+                    if (
+                        recover_from_mpc_stall
+                        and not self._prepare_mpc_stall_reverse(
+                            pose, actual_speed, now_sec)
+                    ):
+                        self._stuck_since = None
+                        self._gnss_history = []
+                        self._stuck_cooldown_until = (
+                            now_sec + self._stuck_cooldown)
+                        u[0] = 0.0
+                        u[1] = 0.0
+                        return True
+                # From here until DRIVE confirmation, reverse recovery owns
+                # the command exclusively, regardless of which stall path
+                # requested it.
+                self._recovery_motion_mode = "reverse"
                 self._stuck_recovery_until = now_sec + self._stuck_max_shift_wait
                 self._stuck_reverse_drive_after = now_sec + self._stuck_gear_shift_delay
                 self._stuck_pre_reverse_until = (
@@ -4432,49 +5171,23 @@ class MPCController(Node):
         pred_marker_array = MarkerArray()
         clear_marker = Marker()
         clear_marker.header.frame_id = "map"
-        clear_marker.header.stamp = self.get_clock().now().to_msg()
         clear_marker.ns = "mpc_pred"
         clear_marker.action = Marker.DELETEALL
         pred_marker_array.markers.append(clear_marker)
-
-        # Draw the optimizer's raw world-coordinate prediction.  A LINE_STRIP
-        # makes jumps between samples visible, while SPHERE_LIST preserves the
-        # individual horizon samples used by the controller.  Do not clamp the
-        # points to lane bounds here: an out-of-bounds solution is precisely
-        # what this diagnostic visualization must expose.
-        stamp = clear_marker.header.stamp
-        points = []
-        for x, y in zip(x_pred, y_pred):
-            x = float(x)
-            y = float(y)
-            if not (math.isfinite(x) and math.isfinite(y)):
-                continue
-            points.append(Point(x=x, y=y, z=float(self._map_z) + 0.05))
-
-        if points:
-            line = Marker()
-            line.header.frame_id = "map"
-            line.header.stamp = stamp
-            line.ns = "mpc_pred"
-            line.id = 0
-            line.type = Marker.LINE_STRIP
-            line.action = Marker.ADD
-            line.scale.x = 0.12
-            line.color = copy.deepcopy(self._pred_marker_color)
-            line.points = copy.deepcopy(points)
-            pred_marker_array.markers.append(line)
-
-            samples = Marker()
-            samples.header.frame_id = "map"
-            samples.header.stamp = stamp
-            samples.ns = "mpc_pred"
-            samples.id = 1
-            samples.type = Marker.SPHERE_LIST
-            samples.action = Marker.ADD
-            samples.scale = Vector3(x=0.30, y=0.30, z=0.12)
-            samples.color = copy.deepcopy(self._pred_marker_color)
-            samples.points = points
-            pred_marker_array.markers.append(samples)
+        m_base = Marker()
+        m_base.header.frame_id = "map"
+        m_base.ns = "mpc_pred"
+        m_base.type = Marker.SPHERE
+        m_base.action = Marker.ADD
+        m_base.pose.position.z = 0.0
+        m_base.scale = Vector3(x=0.5, y=0.5, z=0.5)
+        m_base.color = self._pred_marker_color
+        for i in range(len(x_pred)):
+            m = copy.deepcopy(m_base)
+            m.id = i
+            m.pose.position.x = x_pred[i]
+            m.pose.position.y = y_pred[i]
+            pred_marker_array.markers.append(m) # type: ignore
         self._mpc_pred_pub.publish(pred_marker_array)
         self._mpc_pred_pub_dummy.publish(pred_marker_array)
 
@@ -4482,7 +5195,6 @@ class MPCController(Node):
         marker_array = MarkerArray()
         marker = Marker()
         marker.header.frame_id = "map"
-        marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = "mpc_pred"
         marker.action = Marker.DELETEALL
         marker_array.markers.append(marker)
@@ -5459,6 +6171,20 @@ class MPCController(Node):
         # これにより、旧軌道向けに warm-start された状態が新軌道の制約と食い違って
         # infeasible になるリスクを防ぐ。
         if trajectory_switched:
+            # Race用とCenter用は別MPCインスタンスなので、切替前に実制御を
+            # 担当していたMPCの操舵状態だけを保存する。旧CSV基準の制御列・
+            # 予測列・OSQP warm startは新しい経路へ持ち込まない。
+            inherited_steering = float(getattr(
+                self._mpc, "previous_steering", float('nan')))
+            if not np.isfinite(inherited_steering):
+                inherited_steering = float(self._last_u[1])
+            destination_delta_limit = float(
+                self._mpcN.state_constraints['xmax'][3])
+            inherited_steering = float(np.clip(
+                inherited_steering,
+                -destination_delta_limit,
+                destination_delta_limit,
+            ))
             self._trajectory_last_switch_time = now_sec
             label = "Race→Center" if opponent_ahead_detected else "Center→Race"
             center_wp_at_switch = center_wp_temp
@@ -5492,6 +6218,16 @@ class MPCController(Node):
                 switched_mpc.current_control = np.zeros_like(
                     switched_mpc.current_control)
                 switched_mpc.infeasibility_counter = 0
+            # Apply after reset so the destination MPC starts its new QP from
+            # the same physical tire angle as the command active before the
+            # CSV switch. This avoids an artificial 0.60-rad/s catch-up phase.
+            self._mpcN.previous_steering = inherited_steering
+            self.get_logger().info(
+                "[TrajectorySwitchSteeringSync] inherited current steering "
+                f"into the destination MPC: steering="
+                f"{inherited_steering:+.4f}rad, destination="
+                f"{'Center' if opponent_ahead_detected else 'Race'}"
+            )
             self._clear_mpc_pred_markers()
             if opponent_ahead_detected:
                 self._post_overtake_vehicle_id = None
@@ -8215,7 +8951,15 @@ class MPCController(Node):
         #boostモードがONのとき
         if recovering_from_stuck:
             bug_acc_enabled = False
-            if not self._stuck_reverse_drive_active:
+            if self._recovery_motion_mode == "forward":
+                # Forward pose recovery stays in DRIVE and must never inherit
+                # the -8.0 braking command used during reverse gear changes.
+                acc = np.clip(
+                    self.KP * (u[0] - abs(v)),
+                    0.0,
+                    self._mpc_cfg.a_max,
+                )
+            elif not self._stuck_reverse_drive_active:
                 acc = -8.0
             elif self._stuck_reverse_command_mode in ("negative_speed_positive_accel", "awsim_reverse_button"):
                 if self._stuck_reverse_acceleration_positive:
@@ -8225,7 +8969,8 @@ class MPCController(Node):
             else:
                 acc = self._stuck_reverse_acceleration
             self.get_logger().info(
-                f"[StuckRecovery] reverse cmd speed={u[0]:.2f} acc={acc:.2f} "
+                f"[StuckRecovery] mode={self._recovery_motion_mode} "
+                f"cmd speed={u[0]:.2f} acc={acc:.2f} "
                 f"actuation=({self._stuck_actuation_accel_cmd:.2f},"
                 f"{self._stuck_actuation_brake_cmd:.2f}) "
                 f"gear={getattr(self._gear_report, 'report', None)} "
@@ -8326,16 +9071,15 @@ class MPCController(Node):
         self._sim_logger.log(self._car, u, t)
         self._sim_logger.plot_animation(t, self._loop, self._current_laps, self._lap_times, is_colliding, u, self._mpc, self._car)
 
-        # Publish every control cycle so RViz shows the prediction that belongs
-        # to the command being sent now.  The former 4 Hz sampling could hide a
-        # short-lived out-of-bounds prediction between displayed frames.
-        if self._mpc.current_prediction is not None:
-            self._publish_mpc_pred_marker(
-                self._mpc.current_prediction[0],
-                self._mpc.current_prediction[1],
-            )
-        else:
-            self._clear_mpc_pred_markers()
+        # 約 0.25 秒ごとに予測結果を表示
+        if self._loop % (self._mpc_cfg.control_rate // 4) == 0:
+            if self._mpc.current_prediction is not None:
+                self._publish_mpc_pred_marker(
+                    self._mpc.current_prediction[0],
+                    self._mpc.current_prediction[1],
+                )
+            else:
+                self._clear_mpc_pred_markers()
 
         # 約 1 秒ごとに車線境界を表示
         if self._loop % int(self._mpc_cfg.control_rate) == 0:

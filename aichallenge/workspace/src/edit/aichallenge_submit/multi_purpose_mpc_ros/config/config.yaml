@@ -132,12 +132,12 @@ mpc:
   # Q: [e_y(横ずれ), e_psi(ヨー角ずれ), t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [100000.0, 1000.0]
+  R: [100000.0, 500.0]
   R10: [100000.0,100.0]
-  a_min: -1.0 # m/s^2
+  a_min: -2.0 # m/s^2
   a_max: 2.5 # m/s^2
   delta_max_deg: 18.0 # degrees
-  steer_rate_max: 0.6 # rad/s max_steering_rate
+  steer_rate_max: 0.60 # [rad/s] AWSIMで実測した物理タイヤ角速度上限
   # Steering-state MPC: x=[e_y,e_psi,t,delta], u=[v,delta_rate].
   # steer_rate_max is a physical tire-angle rate [rad/s] in both MPC and AWSIM.
   steering_state_weight: 1000000.0
@@ -154,7 +154,7 @@ mpc:
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 0.2
-  steer_low_pass_gain: 1.0
+  steer_low_pass_gain: 0.8
   # 遅延後の姿勢を予測するため、固定Waypoint先読みは重ねない。
   wp_id_offset: 0
   # 送信済み操舵指令がアクチュエータへ到達するまでの姿勢を予測する。
@@ -162,10 +162,11 @@ mpc:
   steering_command_delay: 0.15 # [s]
   delay_prediction_steer_gain: 1.0004
   delay_prediction_steps: 7
-  # Keep these supplementary behaviours disabled while measuring how far
-  # steer_rate_max alone can be lowered from the 3.00 baseline.
+  # 単一点previewではなく、150ms先の曲率要求から0.60rad/sで到達可能な
+  # 操舵ランプを弧長方向へ後方伝播する予約列方式を使用する。
   steering_preview_enabled: false
   steering_preview_max_distance: 6.0
+  steering_reservation_enabled: false
   steering_reachability_speed_enabled: false
   steering_reachability_min_speed: 2.0
   steering_reachability_min_angle: 0.03
@@ -177,10 +178,10 @@ mpc:
   ## Lap1: 53s, Lap2: 47s
 
   v_max: 35.0   # km/h
-  ay_max: 18.0  # m/s^2, maximum lateral acceleration in curves
+  ay_max: 15.0  # m/s^2, maximum lateral acceleration in curves
   # kappa_actual = kappa_cmd / (1 + understeer_coeff * v^2)
   # 0.002 gives about 16% curvature loss at 35 km/h.
-  understeer_coeff: 0.005  # [s^2/m^2]
+  understeer_coeff: 0.002  # [s^2/m^2]
   Q: [3000000.0, 55000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
@@ -295,10 +296,47 @@ stuck_recovery:
   adaptive_reverse_wall_margin: 0.3 # [m] 静的壁まで必ず残す後方余裕
   adaptive_reverse_footprint_radius: 1.13 # [m] 後退掃引で使う保守的な車体包絡半径
   adaptive_reverse_min_clear_distance: 0.3 # [m] これ未満しか下がれなければ停止維持
+  adaptive_reverse_static_escape_max_distance: 2.0 # [m] 境界接触から完全離脱できる通常後退計画の確認距離
+  adaptive_reverse_interference_tolerance: 0.005 # 占有サンプル比の許容誤差。グリッド量子化による単点の微増は許容
+  adaptive_reverse_interference_trend_window: 4 # 連続する複数点で悪化傾向を判定
+  adaptive_reverse_total_improvement_threshold: 0.001 # 開始時からこれ以上改善していれば、許容範囲内の一時的な増加を認める
+  adaptive_reverse_escape_pulse_enabled: true # 完全離脱できなくても明確な改善区間があれば短い直進後退を1回ずつ許可
+  adaptive_reverse_escape_pulse_distance: 0.4 # [m] 各パルス後はDRIVEへ戻して現在姿勢から再評価する
+  adaptive_reverse_escape_pulse_min_improvement: 0.01 # 占有サンプル比の絶対改善量
+  adaptive_reverse_escape_pulse_min_improvement_ratio: 0.10 # 開始時干渉量に対する最低改善率
   adaptive_reverse_localization_max_error: 0.5 # [m] GNSS位置とodom位置の許容差
   adaptive_reverse_localization_fresh_sec: 0.5 # [s] 両位置情報の最大受信経過時間
   adaptive_reverse_localization_confirm_sec: 0.25 # [s] 整合条件の連続確認時間
   adaptive_reverse_forward_success_cycles: 3 # 有効な前進MPCをこの周期数連続確認したら後退終了
+  # 汎用MPC Stallでは、ギアをREVERSEへ変える前にMPC非依存の短い
+  # 左/直進/右rolloutを評価する。静的境界とV2X包絡を満たし、Center姿勢を
+  # 改善する候補がある場合だけ低速前進を優先する。
+  forward_pose_recovery_enabled: true
+  forward_pose_recovery_speed: 0.8 # [m/s]
+  forward_pose_recovery_duration: 1.25 # [s] 1回の前進復旧指令時間
+  forward_pose_recovery_no_progress_min_distance: 0.08 # [m] これ未満しか動かなければ同じ前進候補を一時禁止して後退を評価
+  forward_pose_recovery_retry_suppress_sec: 10.0 # [s] 同一姿勢で動かなかった前進候補の再試行禁止時間
+  forward_pose_recovery_horizon: 2.0 # [s] 候補安全確認時間
+  forward_pose_recovery_dt: 0.10 # [s]
+  forward_pose_recovery_steer_deg: 18.0 # [deg] 左右候補の目標タイヤ角
+  forward_pose_recovery_static_margin: 0.05 # [m] 車体包絡へ追加する静的余裕
+  forward_pose_recovery_half_length: 1.05 # [m] 復旧rollout用の車体半長（前後余裕込み）
+  forward_pose_recovery_half_width: 0.80 # [m] 復旧rollout用の車体半幅（安全幅込み）
+  forward_pose_recovery_static_escape_grace_distance: 2.00 # [m] 境界接触から完全離脱できる通常前進計画の確認距離
+  forward_pose_recovery_escape_pulse_enabled: true # 完全離脱できなくても改善する前進候補を短いパルスに分割して許可
+  forward_pose_recovery_escape_pulse_distance: 0.4 # [m] 各パルス後は停止して現在姿勢から再評価
+  forward_pose_recovery_escape_pulse_min_improvement: 0.01 # 占有サンプル比の絶対改善量
+  forward_pose_recovery_escape_pulse_min_improvement_ratio: 0.10 # 開始時干渉量に対する最低改善率
+  forward_pose_recovery_interference_tolerance: 0.005 # パルス途中で許容する占有率の量子化誤差
+  forward_pose_recovery_v2x_margin: 0.30 # [m] 円形車体包絡間の追加余裕
+  forward_pose_recovery_min_progress: 0.20 # [m] rolloutで要求する最低前進量
+  forward_pose_recovery_heading_improvement_deg: 3.0 # [deg]
+  # 後退指令中に実移動がこの条件を満たさなければ、その場で後退を中止する。
+  reverse_no_progress_timeout_sec: 0.75 # [s]
+  reverse_no_progress_min_distance: 0.08 # [m]
+  reverse_retry_suppress_sec: 10.0 # [s] 同じ姿勢からの同一後退を抑止
+  reverse_retry_pose_tolerance: 0.30 # [m]
+  reverse_retry_heading_tolerance_deg: 12.0 # [deg]
   cooldown: 2.0
   reverse_speed: 1.5
   reverse_acceleration: 2.5
