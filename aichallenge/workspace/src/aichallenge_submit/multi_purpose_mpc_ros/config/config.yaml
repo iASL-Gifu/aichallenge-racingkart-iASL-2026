@@ -196,7 +196,7 @@ mpc:
   ## Lap1: 53s, Lap2: 47s
 
   v_max: 35.0   # km/h
-  ay_max: 15.0  # m/s^2, maximum lateral acceleration in curves
+  ay_max: 11.0  # m/s^2, maximum lateral acceleration in curves
   # kappa_actual = kappa_cmd / (1 + understeer_coeff * v^2)
   # 0.002 gives about 16% curvature loss at 35 km/h.
   understeer_coeff: 0.002  # [s^2/m^2]
@@ -328,10 +328,10 @@ stuck_recovery:
   adaptive_reverse_forward_success_cycles: 3 # 有効な前進MPCをこの周期数連続確認したら後退終了
   # 汎用MPC Stallでは、ギアをREVERSEへ変える前にMPC非依存の短い
   # 左/直進/右rolloutを評価する。静的境界とV2X包絡を満たし、Center姿勢を
-  # 改善する候補がある場合だけ低速前進を優先する。
+  # 改善する候補がある場合は、その操舵をMPC復帰または境界到達まで保持する。
   forward_pose_recovery_enabled: true
-  forward_pose_recovery_speed: 0.8 # [m/s]
-  forward_pose_recovery_duration: 1.25 # [s] 1回の前進復旧指令時間
+  forward_pose_recovery_speed: 5.0 # [m/s] 超低速クリープをやめ、選択方向へ連続前進
+  forward_pose_recovery_duration: 1.25 # [s] 候補選択時の安全確認区間（指令時間ではない）
   forward_pose_recovery_no_progress_min_distance: 0.08 # [m] これ未満しか動かなければ同じ前進候補を一時禁止して後退を評価
   forward_pose_recovery_retry_suppress_sec: 10.0 # [s] 同一姿勢で動かなかった前進候補の再試行禁止時間
   forward_pose_recovery_horizon: 2.0 # [s] 候補安全確認時間
@@ -341,8 +341,8 @@ stuck_recovery:
   forward_pose_recovery_half_length: 1.05 # [m] 復旧rollout用の車体半長（前後余裕込み）
   forward_pose_recovery_half_width: 0.80 # [m] 復旧rollout用の車体半幅（安全幅込み）
   forward_pose_recovery_static_escape_grace_distance: 2.00 # [m] 境界接触から完全離脱できる通常前進計画の確認距離
-  forward_pose_recovery_escape_pulse_enabled: true # 完全離脱できなくても改善する前進候補を短いパルスに分割して許可
-  forward_pose_recovery_escape_pulse_distance: 0.4 # [m] 各パルス後は停止して現在姿勢から再評価
+  forward_pose_recovery_escape_pulse_enabled: true # 境界接触中でも改善方向を選ぶための判定に使用（指令は停止せず継続）
+  forward_pose_recovery_escape_pulse_distance: 0.4 # [m] 改善方向を認定する最短距離
   forward_pose_recovery_escape_pulse_min_improvement: 0.01 # 占有サンプル比の絶対改善量
   forward_pose_recovery_escape_pulse_min_improvement_ratio: 0.10 # 開始時干渉量に対する最低改善率
   forward_pose_recovery_interference_tolerance: 0.005 # パルス途中で許容する占有率の量子化誤差
@@ -365,14 +365,14 @@ stuck_recovery:
   send_gear_command: true
   wait_for_reverse_gear: true
   pre_reverse_gear_command: 22
-  pre_reverse_duration: 1.2
+  pre_reverse_duration: 0.0
   reverse_gear_command: 20
   drive_gear_command: 2
   reverse_gear_reports: "20,21"
   request_control_mode: true
   shift_control_mode_request_value: true
   drive_control_mode_request_value: true
-  gear_shift_delay: 1.0
+  gear_shift_delay: 0.0
   max_shift_wait: 8.0
   drive_request_resend_sec: 0.5 # [s] DRIVE未確認時のギア要求再送周期。確認まで速度ゼロを維持
   reverse_request_resend_sec: 0.5 # [s] REVERSE未確認時のギア要求再送周期。確認まで速度ゼロを維持

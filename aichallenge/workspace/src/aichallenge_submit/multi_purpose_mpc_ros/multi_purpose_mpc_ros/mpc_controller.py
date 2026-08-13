@@ -2220,8 +2220,12 @@ class MPCController(Node):
             )
             return False
         selected = max(candidates, key=lambda item: item["score"])
+        # Keep one selected direction until MPC can take over or that direction
+        # actually becomes unsafe.  The old implementation stopped after each
+        # short rollout/pulse and re-entered the stall timer, which made a
+        # recoverable contact take several seconds of stop-and-go motion.
         command_duration = float(selected["command_duration"])
-        self._forward_pose_recovery_until = now_sec + command_duration
+        self._forward_pose_recovery_until = math.inf
         self._forward_pose_recovery_steer_command = float(selected["steer"])
         self._forward_pose_recovery_start_xy = (pose.x, pose.y)
         # Forward and reverse recovery are mutually exclusive.  No reverse
@@ -2239,8 +2243,8 @@ class MPCController(Node):
             f"{math.degrees(selected['heading_after']):.1f}deg, "
             f"lateral={selected['lateral_before']:.2f}->"
             f"{selected['lateral_after']:.2f}m, "
-            f"duration={command_duration:.2f}s, "
-            f"pulse={selected['pulse_plan']}"
+            f"checked_horizon={command_duration:.2f}s, "
+            "holding_direction_until=MPC_or_boundary"
         )
         return True
 
@@ -4524,12 +4528,18 @@ class MPCController(Node):
                 u[0] = 0.0
                 u[1] = 0.0
                 return True
-            candidate = self._forward_pose_recovery_candidate(
-                pose, self._forward_pose_recovery_steer_command)
-            if (
-                now_sec < self._forward_pose_recovery_until
-                and candidate is not None
-            ):
+            mpc_ready = bool(
+                self._current_gear_is_drive()
+                and self._mpc.infeasibility_counter == 0
+                and self._mpc.current_prediction is not None
+                and not self._mpc.used_prediction_fallback
+                and not self._mpc.recovery_requested
+            )
+            candidate = (
+                None if mpc_ready else self._forward_pose_recovery_candidate(
+                    pose, self._forward_pose_recovery_steer_command)
+            )
+            if not mpc_ready and candidate is not None:
                 u[0] = self._forward_pose_recovery_speed
                 u[1] = self._forward_pose_recovery_steer_command
                 return True
@@ -4537,9 +4547,10 @@ class MPCController(Node):
             travelled = (
                 math.hypot(pose.x - start_xy[0], pose.y - start_xy[1])
                 if start_xy is not None else 0.0)
-            reason = "duration_complete" if candidate is not None else "path_became_unsafe"
+            reason = "mpc_ready" if mpc_ready else "path_became_unsafe"
             no_progress = bool(
-                travelled
+                not mpc_ready
+                and travelled
                     < self._forward_pose_recovery_no_progress_min_distance)
             if no_progress:
                 self._forward_pose_recovery_blocked_pose = (
@@ -4556,11 +4567,15 @@ class MPCController(Node):
             self._forward_pose_recovery_start_xy = None
             self._forward_pose_recovery_steer_command = 0.0
             self._recovery_motion_mode = "idle"
-            self._mpc_safety_recovery_active = True
+            self._mpc_safety_recovery_active = not mpc_ready
             self._mpc_safety_recovery_success_cycles = 0
-            self._stuck_cooldown_until = now_sec + self._stuck_cooldown
+            self._stuck_cooldown_until = now_sec
             self._stuck_since = None
             self._gnss_history = []
+            if mpc_ready:
+                # The command already contains this cycle's fresh MPC result;
+                # hand it through without an extra zero-speed transition.
+                return False
             u[0] = 0.0
             u[1] = 0.0
             return True
@@ -4966,13 +4981,16 @@ class MPCController(Node):
                 # recovery duration.
                 self._post_reverse_full_width_recovery_active = True
                 self._mpc_safety_recovery_active = True
-                self._mpc_safety_recovery_success_cycles = 0
+                # A single fresh solution after DRIVE confirmation is enough.
+                # Gear confirmation remains mandatory, but there is no longer
+                # an additional low-speed dwell after the shift completes.
+                self._mpc_safety_recovery_success_cycles = max(
+                    self._mpc_safety_recovery_success_required_cycles - 1, 0)
                 self._stuck_since = None
                 self._gnss_history = []
                 self.get_logger().info(
                     "[PostReverseFullWidthRecovery] DRIVE confirmed; holding "
-                    "full width until fresh MPC predictions recover "
-                    f"continuously for {self._mpc_safety_recovery_success_sec:.2f}s."
+                    "full width until the first fresh MPC prediction."
                 )
             if self._prepass_retry_after_reverse:
                 requested_lane_idx = self._prepass_retry_lane_idx
