@@ -1,0 +1,9 @@
+image: occupancy_grid_map.pgm
+resolution: 0.1
+origin:
+- 89606.62435852736
+- 43114.311224134006
+- 0.0
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196

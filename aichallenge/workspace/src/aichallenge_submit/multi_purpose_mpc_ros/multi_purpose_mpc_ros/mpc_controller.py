@@ -520,6 +520,8 @@ class MPCController(Node):
                     cfg_mpc, "steering_command_delay", 0.15)),
                 steering_preview_max_distance=float(getattr(
                     cfg_mpc, "steering_preview_max_distance", 6.0)),
+                steering_reservation_enabled=bool(getattr(
+                    cfg_mpc, "steering_reservation_enabled", False)),
                 steering_reachability_speed_enabled=bool(getattr(
                     cfg_mpc, "steering_reachability_speed_enabled", False)),
                 steering_reachability_min_speed=float(getattr(
@@ -5432,6 +5434,20 @@ class MPCController(Node):
         # これにより、旧軌道向けに warm-start された状態が新軌道の制約と食い違って
         # infeasible になるリスクを防ぐ。
         if trajectory_switched:
+            # Race用とCenter用は別MPCインスタンスなので、切替前に実制御を
+            # 担当していたMPCの操舵状態だけを保存する。旧CSV基準の制御列・
+            # 予測列・OSQP warm startは新しい経路へ持ち込まない。
+            inherited_steering = float(getattr(
+                self._mpc, "previous_steering", float('nan')))
+            if not np.isfinite(inherited_steering):
+                inherited_steering = float(self._last_u[1])
+            destination_delta_limit = float(
+                self._mpcN.state_constraints['xmax'][3])
+            inherited_steering = float(np.clip(
+                inherited_steering,
+                -destination_delta_limit,
+                destination_delta_limit,
+            ))
             self._trajectory_last_switch_time = now_sec
             label = "Race→Center" if opponent_ahead_detected else "Center→Race"
             center_wp_at_switch = center_wp_temp
@@ -5465,6 +5481,16 @@ class MPCController(Node):
                 switched_mpc.current_control = np.zeros_like(
                     switched_mpc.current_control)
                 switched_mpc.infeasibility_counter = 0
+            # Apply after reset so the destination MPC starts its new QP from
+            # the same physical tire angle as the command active before the
+            # CSV switch. This avoids an artificial 0.60-rad/s catch-up phase.
+            self._mpcN.previous_steering = inherited_steering
+            self.get_logger().info(
+                "[TrajectorySwitchSteeringSync] inherited current steering "
+                f"into the destination MPC: steering="
+                f"{inherited_steering:+.4f}rad, destination="
+                f"{'Center' if opponent_ahead_detected else 'Race'}"
+            )
             self._clear_mpc_pred_markers()
             if opponent_ahead_detected:
                 self._post_overtake_vehicle_id = None

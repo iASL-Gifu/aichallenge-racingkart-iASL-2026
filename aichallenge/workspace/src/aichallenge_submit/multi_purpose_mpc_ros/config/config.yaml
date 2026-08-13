@@ -51,7 +51,7 @@ reference_path:
 trajectory_switch:
   enter_center_wps: 20   # 前方車がこのWaypoint差未満ならCenterへ切り替え
   exit_center_wps: 25    # Center中はこのWaypoint差を超えるまで維持
-  overtake_latch_max_distance: 15.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
+  overtake_latch_max_distance: 18.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
   center_lane_rejoin_behind_wps: 6 # 追い越した車が後方へこの差以上 離れたらCenter軌道のL1へ戻る
   behind_release_wps: 12 # 追い越した車が後方へこの差以上離れるまで維持
   min_hold_sec: 1.0      # 切り替え直後の再切り替え禁止時間
@@ -72,7 +72,7 @@ prepass_lane_fallback:
   recovery_stable_sec: 0.5 # 全幅解除後、MPC正常かつ候補車線基準の車両安定条件がこの時間続いてから代替車線を選択
   recovery_timeout_sec: 5.0 # 全幅回復がこの時間成立しなければラッチ対象を再評価。通過不可/後方危険なら追従、近すぎて通過可能なら後退後に再評価
   follow_retry_sec: 2.0 # [s] 追従へ移行後も、この周期で外側車線の通過幅とV2X競合を再評価する
-  follow_retry_max_distance: 15.0 # [m] 追従から追い越しを再評価する最大距離（この値未満のみ）
+  follow_retry_max_distance: 18.0 # [m] 追従から追い越しを再評価する最大距離（この値未満のみ）
   behind_release_longitudinal: 0.5 # [m] 対象がこの距離より後方にいる状態が継続したらPrepassを解除
   behind_release_confirm_sec: 0.25 # [s] V2X位置揺れで誤解除しないための後方判定継続時間
   max_heading_error_deg: 10.0 # [deg] 候補車線中心軌道に対するPrepass回復時の許容方位誤差
@@ -134,10 +134,10 @@ mpc:
   # QN: [e_y, e_psi, t]
   R: [100000.0, 500.0]
   R10: [100000.0,100.0]
-  a_min: -1.0 # m/s^2
+  a_min: -2.0 # m/s^2
   a_max: 2.5 # m/s^2
   delta_max_deg: 18.0 # degrees
-  steer_rate_max: 0.6 # rad/s max_steering_rate
+  steer_rate_max: 0.60 # [rad/s] AWSIMで実測した物理タイヤ角速度上限
   # Steering-state MPC: x=[e_y,e_psi,t,delta], u=[v,delta_rate].
   # steer_rate_max is a physical tire-angle rate [rad/s] in both MPC and AWSIM.
   steering_state_weight: 1000000.0
@@ -154,7 +154,7 @@ mpc:
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
   accel_low_pass_gain: 0.2
-  steer_low_pass_gain: 0.5
+  steer_low_pass_gain: 0.8
   # 遅延後の姿勢を予測するため、固定Waypoint先読みは重ねない。
   wp_id_offset: 0
   # 送信済み操舵指令がアクチュエータへ到達するまでの姿勢を予測する。
@@ -162,10 +162,11 @@ mpc:
   steering_command_delay: 0.15 # [s]
   delay_prediction_steer_gain: 1.0004
   delay_prediction_steps: 7
-  # Keep these supplementary behaviours disabled while measuring how far
-  # steer_rate_max alone can be lowered from the 3.00 baseline.
+  # 単一点previewではなく、150ms先の曲率要求から0.60rad/sで到達可能な
+  # 操舵ランプを弧長方向へ後方伝播する予約列方式を使用する。
   steering_preview_enabled: false
   steering_preview_max_distance: 6.0
+  steering_reservation_enabled: false
   steering_reachability_speed_enabled: false
   steering_reachability_min_speed: 2.0
   steering_reachability_min_angle: 0.03
@@ -176,11 +177,11 @@ mpc:
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  v_max: 40.0   # km/h
-  ay_max: 18.0  # m/s^2, maximum lateral acceleration in curves
+  v_max: 35.0   # km/h
+  ay_max: 15.0  # m/s^2, maximum lateral acceleration in curves
   # kappa_actual = kappa_cmd / (1 + understeer_coeff * v^2)
   # 0.002 gives about 16% curvature loss at 35 km/h.
-  understeer_coeff: 0.005  # [s^2/m^2]
+  understeer_coeff: 0.002  # [s^2/m^2]
   Q: [3000000.0, 55000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 

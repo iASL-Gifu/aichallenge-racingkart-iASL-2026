@@ -106,6 +106,71 @@ def steering_reachability_speed_cap(
     return float(distance) / max(required_time, 1e-6)
 
 
+def build_arc_length_steering_reservation(
+    distances,
+    steering_refs,
+    speeds,
+    delay_sec,
+    steering_rate,
+    current_steering,
+    command_period,
+):
+    """Build a delayed, rate-feasible steering schedule along arc length."""
+    distance_array = np.asarray(distances, dtype=float)
+    reference_array = np.asarray(steering_refs, dtype=float)
+    speed_array = np.asarray(speeds, dtype=float)
+    if (
+        distance_array.size == 0
+        or distance_array.size != reference_array.size
+        or distance_array.size != speed_array.size
+        or steering_rate <= 0.0
+    ):
+        return reference_array.copy()
+
+    count = distance_array.size
+    delayed = reference_array.copy()
+    for index in range(count):
+        target_distance = (
+            distance_array[index]
+            + max(float(speed_array[index]), 0.0)
+            * max(float(delay_sec), 0.0)
+        )
+        target_index = int(np.searchsorted(
+            distance_array, target_distance, side='left'))
+        target_index = min(max(target_index, index), count - 1)
+        delayed[index] = reference_array[target_index]
+
+    # Backward propagation reserves the latest feasible start of each future
+    # steering change instead of waiting for lateral error at the corner.
+    reserved = delayed.copy()
+    for index in range(count - 2, -1, -1):
+        ds = max(float(distance_array[index + 1] - distance_array[index]), 0.0)
+        speed = max(float(speed_array[index]), 0.5)
+        max_change = float(steering_rate) * ds / speed
+        reserved[index] = float(np.clip(
+            reserved[index],
+            reserved[index + 1] - max_change,
+            reserved[index + 1] + max_change,
+        ))
+
+    # Anchor the first scheduled command to the command actually owned by the
+    # actuator, then keep the complete schedule rate-feasible going forward.
+    previous = float(current_steering)
+    for index in range(count):
+        if index == 0:
+            max_change = (
+                float(steering_rate) * max(float(command_period), 0.0))
+        else:
+            ds = max(float(
+                distance_array[index] - distance_array[index - 1]), 0.0)
+            speed = max(float(speed_array[index - 1]), 0.5)
+            max_change = float(steering_rate) * ds / speed
+        reserved[index] = float(np.clip(
+            reserved[index], previous - max_change, previous + max_change))
+        previous = reserved[index]
+    return reserved
+
+
 def is_valid_osqp_solution(result) -> bool:
     """Return whether OSQP produced a usable optimal solution."""
     return (
@@ -275,6 +340,7 @@ class MPC:
                  steering_preview_enabled=True,
                  steering_command_delay=0.15,
                  steering_preview_max_distance=6.0,
+                 steering_reservation_enabled=False,
                  steering_reachability_speed_enabled=True,
                  steering_reachability_min_speed=2.0,
                  steering_reachability_min_angle=0.03):
@@ -423,6 +489,8 @@ class MPC:
         self.steering_command_delay = max(float(steering_command_delay), 0.0)
         self.steering_preview_max_distance = max(
             float(steering_preview_max_distance), 0.0)
+        self.steering_reservation_enabled = bool(
+            steering_reservation_enabled)
         self.steering_reachability_speed_enabled = bool(
             steering_reachability_speed_enabled)
         self.steering_reachability_min_speed = max(
@@ -635,7 +703,22 @@ class MPC:
                     )
 
             preview_reference = steering_reference.copy()
-            if self.steering_preview_enabled:
+            if self.steering_reservation_enabled:
+                reservation_speeds = np.asarray([
+                    max(float(self.model.reference_path.get_waypoint(
+                        self.model.wp_id + index).v_ref), 0.0)
+                    for index in range(N + 1)
+                ], dtype=float)
+                preview_reference = build_arc_length_steering_reservation(
+                    horizon_distance,
+                    steering_reference,
+                    reservation_speeds,
+                    self.steering_command_delay,
+                    self.max_steering_rate,
+                    self.previous_steering,
+                    self.model.Ts,
+                )
+            elif self.steering_preview_enabled:
                 for index in range(N + 1):
                     waypoint = self.model.reference_path.get_waypoint(
                         self.model.wp_id + index)
