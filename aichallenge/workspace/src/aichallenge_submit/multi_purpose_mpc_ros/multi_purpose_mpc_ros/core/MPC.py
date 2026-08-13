@@ -189,7 +189,7 @@ def is_primal_infeasible(result) -> bool:
     )
 
 
-def is_plausible_mpc_prediction(
+def diagnose_mpc_prediction(
     spatial_states,
     world_prediction,
     current_position,
@@ -198,31 +198,143 @@ def is_plausible_mpc_prediction(
     lateral_tolerance=0.5,
     max_start_distance=8.0,
     max_step_distance=5.0,
-) -> bool:
-    """Reject finite but physically implausible solver predictions."""
+) -> dict:
+    """Return a structured explanation of prediction plausibility."""
+    diagnostic = {
+        "valid": False,
+        "reason": "unknown",
+        "point_index": None,
+        "lateral": np.nan,
+        "lower": np.nan,
+        "upper": np.nan,
+        "violation": np.nan,
+        "start_distance": np.nan,
+        "max_step_distance": np.nan,
+        "max_step_index": None,
+    }
     states = np.asarray(spatial_states)
     if states.ndim != 2 or states.shape[0] < 3 or states.shape[1] < 2:
-        return False
+        diagnostic["reason"] = "invalid_spatial_shape"
+        diagnostic["shape"] = tuple(states.shape)
+        return diagnostic
     if not np.all(np.isfinite(states)):
-        return False
+        invalid = np.argwhere(~np.isfinite(states))[0]
+        diagnostic.update(
+            reason="non_finite_spatial_state",
+            point_index=int(invalid[0]),
+            state_index=int(invalid[1]),
+        )
+        return diagnostic
 
     lower = np.asarray(lower_bounds).reshape(-1)
     upper = np.asarray(upper_bounds).reshape(-1)
     n_bounds = min(states.shape[0] - 1, lower.size, upper.size)
     if n_bounds == 0:
-        return False
+        diagnostic["reason"] = "missing_bounds"
+        return diagnostic
     lateral = states[1:n_bounds + 1, 0]
-    if np.any(lateral < lower[:n_bounds] - lateral_tolerance):
-        return False
-    if np.any(lateral > upper[:n_bounds] + lateral_tolerance):
-        return False
+    lower_violation = lower[:n_bounds] - lateral
+    upper_violation = lateral - upper[:n_bounds]
+    worst_lower = int(np.argmax(lower_violation))
+    worst_upper = int(np.argmax(upper_violation))
+    if lower_violation[worst_lower] > lateral_tolerance:
+        diagnostic.update(
+            reason="lateral_below_lower",
+            point_index=worst_lower + 1,
+            lateral=float(lateral[worst_lower]),
+            lower=float(lower[worst_lower]),
+            upper=float(upper[worst_lower]),
+            violation=float(lower_violation[worst_lower]),
+        )
+        return diagnostic
+    if upper_violation[worst_upper] > lateral_tolerance:
+        diagnostic.update(
+            reason="lateral_above_upper",
+            point_index=worst_upper + 1,
+            lateral=float(lateral[worst_upper]),
+            lower=float(lower[worst_upper]),
+            upper=float(upper[worst_upper]),
+            violation=float(upper_violation[worst_upper]),
+        )
+        return diagnostic
 
-    return is_plausible_world_prediction(
+    x_pred, y_pred = world_prediction
+    points = np.column_stack((x_pred, y_pred))
+    if points.shape[0] == 0:
+        diagnostic["reason"] = "empty_world_prediction"
+        return diagnostic
+    if not np.all(np.isfinite(points)):
+        invalid = np.argwhere(~np.isfinite(points))[0]
+        diagnostic.update(
+            reason="non_finite_world_prediction",
+            point_index=int(invalid[0]),
+            coordinate_index=int(invalid[1]),
+        )
+        return diagnostic
+    current_xy = np.asarray(current_position, dtype=float)
+    if current_xy.shape != (2,) or not np.all(np.isfinite(current_xy)):
+        diagnostic["reason"] = "invalid_current_position"
+        return diagnostic
+    start_distance = float(np.linalg.norm(points[0] - current_xy))
+    diagnostic["start_distance"] = start_distance
+    if start_distance > max_start_distance:
+        diagnostic.update(
+            reason="prediction_start_too_far",
+            violation=start_distance - max_start_distance,
+        )
+        return diagnostic
+    if len(points) > 1:
+        step_distances = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        max_step_index = int(np.argmax(step_distances))
+        measured_max_step = float(step_distances[max_step_index])
+        diagnostic.update(
+            max_step_distance=measured_max_step,
+            max_step_index=max_step_index,
+        )
+        if measured_max_step > max_step_distance:
+            diagnostic.update(
+                reason="prediction_step_too_far",
+                point_index=max_step_index + 1,
+                violation=measured_max_step - max_step_distance,
+            )
+            return diagnostic
+    diagnostic.update(valid=True, reason="ok")
+    return diagnostic
+
+
+def format_prediction_diagnostic(diagnostic) -> str:
+    """Format a stable single-line diagnostic suitable for ROS logs."""
+    fields = [
+        f"reason={diagnostic.get('reason', 'unknown')}",
+        f"point={diagnostic.get('point_index')}",
+    ]
+    for key in (
+        "lateral", "lower", "upper", "violation",
+        "start_distance", "max_step_distance", "max_step_index",
+    ):
+        value = diagnostic.get(key)
+        if isinstance(value, (float, np.floating)):
+            value = f"{float(value):.4f}" if np.isfinite(value) else "nan"
+        fields.append(f"{key}={value}")
+    return ", ".join(fields)
+
+
+def is_plausible_mpc_prediction(
+    spatial_states, world_prediction, current_position, lower_bounds,
+    upper_bounds, lateral_tolerance=0.5, max_start_distance=8.0,
+    max_step_distance=5.0,
+) -> bool:
+    """Reject finite but physically implausible solver predictions."""
+    return bool(diagnose_mpc_prediction(
+        spatial_states,
         world_prediction,
         current_position,
+        lower_bounds,
+        upper_bounds,
+        lateral_tolerance=lateral_tolerance,
         max_start_distance=max_start_distance,
         max_step_distance=max_step_distance,
-    )
+    )["valid"])
 
 
 def apply_outer_boundary_guard(
@@ -1268,15 +1380,24 @@ class MPC:
             optimizer_controls = np.array(dec.x[-N*nu:])
             x = np.reshape(dec.x[:(N+1)*nx], (N+1, nx))
             candidate_prediction = self.update_prediction(x, N)
-            if not is_plausible_mpc_prediction(
+            prediction_diagnostic = diagnose_mpc_prediction(
                 x,
                 candidate_prediction,
                 (self.model.temporal_state.x, self.model.temporal_state.y),
                 self._prediction_lower_bounds,
                 self._prediction_upper_bounds,
                 lateral_tolerance=self.prediction_lateral_tolerance,
-            ):
-                raise ValueError("OSQP returned an implausible prediction")
+            )
+            if not prediction_diagnostic["valid"]:
+                diagnostic_text = format_prediction_diagnostic(
+                    prediction_diagnostic)
+                print(
+                    "[MPCPredictionReject] " + diagnostic_text,
+                    flush=True,
+                )
+                raise ValueError(
+                    "OSQP returned an implausible prediction: "
+                    + diagnostic_text)
 
             if self.uses_steering_state:
                 # Expose [v, delta] to the existing controller/fallback code.
