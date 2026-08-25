@@ -15,6 +15,9 @@
   <depend>rclcpp</depend>
   <depend>multi_purpose_mpc_ros_msgs</depend>
   <depend>autoware_auto_control_msgs</depend>
+  <depend>autoware_auto_vehicle_msgs</depend>
+  <depend>tier4_vehicle_msgs</depend>
+  <depend>sensor_msgs</depend>
   <depend>v2x_msgs</depend>
 
   <export>

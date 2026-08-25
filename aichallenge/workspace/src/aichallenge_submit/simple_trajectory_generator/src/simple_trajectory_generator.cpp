@@ -134,13 +134,12 @@ private:
         if (param.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
           std::string new_csv_path = param.as_string();
           // new_csv_pathがFileSystemのパスであることを確認
-          if (!std::filesystem::exists(new_csv_path)) {
-            RCLCPP_ERROR(get_logger(), "File does not exist: '%s'", new_csv_path.c_str());
+          if (new_csv_path.empty()) {
+            RCLCPP_ERROR(get_logger(), "New csv_path parameter is empty. Keeping old trajectory.");
             result.successful = false;
-            result.reason = "File does not exist.";
+            result.reason = "New csv_path parameter is empty.";
             continue;
           }
-
           if (new_csv_path != current_csv_path_) {
             RCLCPP_INFO(get_logger(), "csv_path parameter changed from '%s' to '%s'", 
                         current_csv_path_.c_str(), new_csv_path.c_str());
@@ -165,6 +164,8 @@ private:
         if (param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE || param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
           z_ = static_cast<float>(param.as_double());
           RCLCPP_INFO(get_logger(), "z parameter changed to %f", z_);
+          // Z値が変更された場合、既存の軌道点のZ値を更新することも可能ですが、
+          // 今回はCSV読み込み時に適用されるため、再読み込みは不要です。
         } else {
           RCLCPP_WARN(get_logger(), "Parameter 'z' received with wrong type. Expected float/double.");
           result.successful = false;

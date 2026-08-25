@@ -5,7 +5,10 @@ from typing import List
 
 import pytest
 
-from multi_purpose_mpc_ros.v2x_vehicle_tracker import V2XVehicleTracker
+from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
+    V2XVehicleTracker,
+    resolve_applied_corridor,
+)
 
 
 # Lightweight stand-ins for v2x_msgs / std_msgs / geometry_msgs so tests
@@ -73,6 +76,7 @@ def test_single_sample_yields_zero_velocity():
     tracker.update(_msg(0.0, [("d2", 1.0, 2.0)]))
 
     assert tracker.velocity("d2") == (0.0, 0.0)
+    assert tracker.has_velocity_estimate("d2") is False
 
 
 def test_unknown_vehicle_velocity_is_zero():
@@ -116,10 +120,12 @@ def test_velocity_above_safety_cap_is_zeroed():
 def test_two_vehicles_tracked_independently():
     tracker = V2XVehicleTracker(v_max_safety=30.0, position_jump_threshold=20.0)
     tracker.update(_msg(0.0, [("d2", 0.0, 0.0), ("d3", 10.0, 10.0)]))
-    tracker.update(_msg(0.5, [("d2", 5.0, 0.0), ("d3", 10.0, 12.5)]))
+    tracker.update(_msg(0.5, [("d2", 5.0, 0.0), ("d3", 10.0, 11.1)]))
 
     assert tracker.velocity("d2") == pytest.approx((10.0, 0.0))
     assert tracker.velocity("d3") == pytest.approx((0.0, 5.0))
+    assert tracker.has_velocity_estimate("d2") is True
+    assert tracker.has_velocity_estimate("d3") is True
 
 
 def test_active_ids_reflect_latest_message_only():
@@ -209,3 +215,39 @@ def test_warn_callback_optional_default_is_silent():
     tracker.update(_msg(0.1, [("d2", 100.0, 0.0)]))  # would warn if a callback existed
 
     assert tracker.velocity("d2") == (0.0, 0.0)  # clamp still fires
+
+
+def test_snapshot_is_detached_from_later_callback_updates():
+    tracker = V2XVehicleTracker(v_max_safety=30.0, position_jump_threshold=20.0)
+    tracker.update(_msg(0.0, [("d2", 0.0, 0.0)]))
+    snapshot = tracker.snapshot()
+    snapshot_generation = snapshot.generation
+
+    tracker.update(_msg(1.0, [("d2", 5.0, 0.0), ("d3", 8.0, 1.0)]))
+
+    assert snapshot.active_vehicle_ids() == ["d2"]
+    assert snapshot.predict_positions("d2", [0.0])[0] == (0.0, 0.0)
+    assert snapshot.predict_positions("d3", [0.0]) == []
+    assert snapshot.generation == snapshot_generation
+    assert tracker.generation == snapshot_generation + 1
+
+
+@pytest.mark.parametrize(
+    "requested,prohibited,recovery,transition,expected",
+    [
+        (0, True, True, True, (1, "l0_prohibited")),
+        (2, True, True, True, (2, "l0_prohibited")),
+        (0, False, True, True, (None, "full_width_recovery")),
+        (0, False, False, True, (None, "lane_transition")),
+        (0, False, False, False, (0, "requested_lane")),
+    ],
+)
+def test_applied_corridor_has_one_explicit_owner(
+    requested, prohibited, recovery, transition, expected,
+):
+    assert resolve_applied_corridor(
+        requested_lane=requested,
+        l0_prohibited=prohibited,
+        full_width_recovery=recovery,
+        transition_active=transition,
+    ) == expected

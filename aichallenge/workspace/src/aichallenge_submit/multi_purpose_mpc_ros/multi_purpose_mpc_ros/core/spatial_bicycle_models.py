@@ -19,6 +19,12 @@ CAR_COLLIDING = '#FF0000'
 CAR_OUTLINE = '#B7950B'
 
 
+def understeer_curvature_gain(speed, understeer_coeff):
+    """Return the achieved/commanded curvature ratio of the simple model."""
+    coeff = max(float(understeer_coeff), 0.0)
+    return 1.0 / (1.0 + coeff * float(speed) ** 2)
+
+
 #########################
 # Temporal State Vector #
 #########################
@@ -256,7 +262,8 @@ class SpatialBicycleModel(ABC):
         # safety_margin = self.width / np.sqrt(2) / 2.0
         # safety_margin = 0.0
 
-        return safety_margin
+        #return safety_margin
+        return 0.0
 
     def get_current_waypoint(self):
         """
@@ -297,14 +304,15 @@ class SpatialBicycleModel(ABC):
         :param y: y coordinate
         :return: Index of the closest waypoint
         """
-        # Compute distances from the point to all waypoints
-        distances = np.sqrt((np.array([wp.x for wp in self.reference_path.waypoints]) - x)**2 +
-                            (np.array([wp.y for wp in self.reference_path.waypoints]) - y)**2)
+        # キャッシュ済みの np.array を使用して高速化。
+        # キャッシュがない場合（内部初期化前等）はフォールバックとして生成する。
+        if not hasattr(self, '_wp_xy') or self._wp_xy is None:
+            self._wp_xy = np.array([[wp.x, wp.y] for wp in self.reference_path.waypoints], dtype=np.float64)
 
-        # Get the index of the closest waypoint
-        closest_wp_id = np.argmin(distances)
-
-        return closest_wp_id
+        diff = self._wp_xy - np.array([x, y], dtype=np.float64)
+        # einsum は sqrt を省いて squared distance で argmin を取る
+        sq_dists = np.einsum('ij,ij->i', diff, diff)
+        return int(np.argmin(sq_dists))
 
     def get_s_at_waypoint(self, wp_id):
         """
@@ -357,7 +365,7 @@ class SpatialBicycleModel(ABC):
         pass
 
     @abstractmethod
-    def linearize(self, v_ref, kappa_ref, delta_s):
+    def linearize(self, v_ref, kappa_ref, delta_s, understeer_coeff=0.0):
         pass
 
 
@@ -390,9 +398,15 @@ class BicycleModel(SpatialBicycleModel):
         self.temporal_state = self.s2t(reference_state=self.spatial_state,
                                        reference_waypoint=self.current_waypoint)
 
+        # ウェイポイント座標を np.array でキャッシュ（get_closest_waypoint の高速化）
+        self._wp_xy = np.array([[wp.x, wp.y] for wp in reference_path.waypoints], dtype=np.float64)
+
     def update_reference_path(self, reference_path):
         # Update Reference Path
         self.reference_path = reference_path
+
+        # ウェイポイント座標を np.array でキャッシュ（get_closest_waypoint の高速化）
+        self._wp_xy = np.array([[wp.x, wp.y] for wp in reference_path.waypoints], dtype=np.float64)
 
         # Update the current waypoint based on the new reference path
         self.wp_id = self.get_closest_waypoint(self.temporal_state.x, self.temporal_state.y)
@@ -406,7 +420,7 @@ class BicycleModel(SpatialBicycleModel):
         self.temporal_state.psi = psi
 
         # Update the current waypoint based on the new reference path
-        self.wp_id = self.get_closest_waypoint(self.temporal_state.x, self.temporal_state.y)
+        self.wp_id = self.get_closest_waypoint(x, y)
 
         # Update the distance s along the reference path based on the closest waypoint
         self.s = self.get_s_at_waypoint(self.wp_id)
@@ -455,12 +469,15 @@ class BicycleModel(SpatialBicycleModel):
 
         return np.array([d_e_y_d_s, d_e_psi_d_s, d_t_d_s])
 
-    def linearize(self, v_ref, kappa_ref, delta_s):
+    def linearize(self, v_ref, kappa_ref, delta_s, understeer_coeff=0.0):
         """
         Linearize the system equations around provided reference values.
         :param v_ref: velocity reference around which to linearize
         :param kappa_ref: kappa of waypoint around which to linearize
         :param delta_s: distance between current waypoint and next waypoint
+        :param understeer_coeff: speed-dependent curvature loss coefficient
+            in s^2/m^2. The achieved curvature is approximated as
+            kappa_actual = kappa_cmd / (1 + understeer_coeff * v_ref^2).
          """
 
         ###################
@@ -472,7 +489,11 @@ class BicycleModel(SpatialBicycleModel):
         a_2 = np.array([-kappa_ref ** 2 * delta_s, 1, 0])
 
         b_1 = np.array([0, 0])
-        b_2 = np.array([0, delta_s])
+        # At higher speed the vehicle achieves less curvature than the
+        # kinematic model predicts.  Keeping the MPC input as commanded
+        # curvature makes this a simple input-gain correction.
+        curvature_gain = understeer_curvature_gain(v_ref, understeer_coeff)
+        b_2 = np.array([0, curvature_gain * delta_s])
 
         # Handle v_ref == 0 case
         if v_ref == 0:

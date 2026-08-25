@@ -7,6 +7,7 @@ from PIL import Image
 from skimage.morphology import remove_small_holes
 from skimage.draw import line_aa
 import matplotlib.patches as plt_patches
+import math
 
 # Colors
 OBSTACLE = '#2E4053'
@@ -121,6 +122,64 @@ class Map:
         y = (self.height - 1 - int(dy + 0.5)) * self.resolution + self.origin[1]
 
         return x, y
+
+    def static_disk_is_free(self, x, y, radius):
+        """Return whether a world-space disk is inside static free space.
+
+        Out-of-map samples are occupied. ``data_backup`` excludes dynamic V2X
+        obstacles, which are checked separately by the rear-traffic logic.
+        """
+        radius = max(float(radius), 0.0)
+        resolution = float(self.resolution)
+        center_x = (float(x) - self.origin[0]) / resolution
+        center_y_from_bottom = (float(y) - self.origin[1]) / resolution
+        center_y = (self.height - 1) - center_y_from_bottom
+        radius_px = int(math.ceil(radius / resolution))
+        min_x = int(math.floor(center_x - radius_px))
+        max_x = int(math.ceil(center_x + radius_px))
+        min_y = int(math.floor(center_y - radius_px))
+        max_y = int(math.ceil(center_y + radius_px))
+        if (
+            min_x < 0 or min_y < 0
+            or max_x >= self.width or max_y >= self.height
+        ):
+            return False
+
+        radius_sq = (radius / resolution) ** 2
+        map_y, map_x = np.ogrid[min_y:max_y + 1, min_x:max_x + 1]
+        disk = (
+            (map_x - center_x) ** 2 + (map_y - center_y) ** 2
+            <= radius_sq
+        )
+        cells = self.data_backup[min_y:max_y + 1, min_x:max_x + 1]
+        return bool(np.all(cells[disk] != 0))
+
+    def static_straight_path_clearance(
+        self, x, y, heading, max_distance, footprint_radius, step=None
+    ):
+        """Measure collision-free straight reverse travel on the static map."""
+        max_distance = max(float(max_distance), 0.0)
+        if step is None:
+            step = min(max(float(self.resolution) * 0.5, 0.02), 0.10)
+        step = max(float(step), 0.01)
+        if not self.static_disk_is_free(x, y, footprint_radius):
+            return 0.0
+
+        clearance = 0.0
+        distance = step
+        while distance <= max_distance + 1e-9:
+            sample_distance = min(distance, max_distance)
+            sample_x = float(x) - sample_distance * math.cos(float(heading))
+            sample_y = float(y) - sample_distance * math.sin(float(heading))
+            if not self.static_disk_is_free(
+                sample_x, sample_y, footprint_radius
+            ):
+                break
+            clearance = sample_distance
+            if sample_distance >= max_distance:
+                break
+            distance += step
+        return clearance
 
     def process_map(self):
         """
