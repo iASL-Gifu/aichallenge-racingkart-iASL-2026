@@ -1019,3 +1019,78 @@ def should_hold_generic_reverse_for_minimum_distance(
         and localization_consistent
         and boundary_has_remaining_clearance
     )
+
+
+def evaluate_lane_width_samples(
+    widths, *, required_width, tolerance, max_consecutive_tolerated
+):
+    """Evaluate a lane horizon while tolerating only short, minor CSV noise.
+
+    A deficit larger than ``tolerance`` is always blocking.  Smaller deficits
+    are accepted only while their consecutive run does not exceed the
+    configured point count.  The returned details are intended for passage
+    diagnostics as well as tests.
+    """
+    required = max(float(required_width), 0.0)
+    allowed_deficit = max(float(tolerance), 0.0)
+    allowed_run = max(int(max_consecutive_tolerated), 0)
+    minimum_width = float("inf")
+    current_minor_run = 0
+    longest_minor_run = 0
+    first_failed_index = None
+    failure_reason = None
+
+    for index, raw_width in enumerate(widths):
+        width = float(raw_width)
+        minimum_width = min(minimum_width, width)
+        deficit = required - width
+        if deficit <= 0.0:
+            current_minor_run = 0
+            continue
+        if deficit > allowed_deficit:
+            first_failed_index = index
+            failure_reason = "lane_width_deficit_exceeds_tolerance"
+            break
+        current_minor_run += 1
+        longest_minor_run = max(longest_minor_run, current_minor_run)
+        if current_minor_run > allowed_run:
+            first_failed_index = index
+            failure_reason = "lane_width_minor_deficit_run_too_long"
+            break
+
+    return {
+        "passable": first_failed_index is None,
+        "minimum_width": minimum_width,
+        "longest_minor_run": longest_minor_run,
+        "first_failed_index": first_failed_index,
+        "failure_reason": failure_reason,
+    }
+
+
+def evaluate_overtake_commit_gate(
+    *, target_lane, target_distance, preview_curvatures,
+    minimum_distance, maximum_distance, outside_curvature_threshold,
+):
+    """Gate only the curve-outside direction of a new L0/L2 commitment."""
+    lane = int(target_lane) if target_lane in (0, 2) else None
+    distance = float(target_distance)
+    curvatures = [float(value) for value in preview_curvatures]
+    # Positive curvature is a left turn: L0 (right) is outside. Negative
+    # curvature is a right turn: L2 (left) is outside.
+    outside_curvature = (
+        max([value for value in curvatures if value > 0.0], default=0.0)
+        if lane == 0
+        else max([-value for value in curvatures if value < 0.0], default=0.0)
+        if lane == 2
+        else float("inf")
+    )
+    distance_ready = bool(
+        float(minimum_distance) <= distance <= float(maximum_distance))
+    curvature_ready = bool(
+        outside_curvature <= float(outside_curvature_threshold))
+    return {
+        "allowed": bool(lane is not None and distance_ready and curvature_ready),
+        "distance_ready": distance_ready,
+        "curvature_ready": curvature_ready,
+        "outside_curvature": outside_curvature,
+    }

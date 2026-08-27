@@ -53,24 +53,32 @@ reference_path:
 trajectory_switch:
   enter_center_wps: 18   # 前方車がこのWaypoint差未満ならCenterへ切り替え
   exit_center_wps: 20    # Center中はこのWaypoint差を超えるまで維持
-  overtake_latch_max_distance: 18.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
-  slow_lead_overtake_speed_kmh: 10.0 # [km/h] 停止車とは分離して特別追越しする低速前方車の上限
+  overtake_latch_max_distance: 15.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
+  overtake_commit_min_distance: 8.0 # [m] 姿勢を崩しやすい過近距離では新規車線変更を開始しない
+  overtake_commit_preview_distance: 12.0 # [m] 外側カーブ曲率を確認する前方距離
+  overtake_outside_curvature_threshold: 0.12 # [1/m] 選択レーンがカーブ外側になる場合の開始上限
+  slow_lead_overtake_speed_kmh: 16.0 # [km/h] 停止車とは分離して特別追越しする低速前方車の上限
   slow_lead_overtake_speed_margin: 0.5 # [m/s] 車線分離まで対象速度に加える接近余裕
   slow_lead_overtake_committed_speed_margin: 1.5 # [m/s] 外側車線適用後、車体分離までの速度差
   slow_lead_speed_match_release_lateral_error: 0.45 # [m] 外側車線中心へ到達後は低速車への速度合わせを解除
   slow_lead_overtake_infeasible_cycles: 8 # 低速車追越し中に古い予測を安全に再利用する最大失敗周期
-  slow_lead_overtake_prepare_distance: 25.0 # [m] Center移行・速度合わせ・通過車線評価の開始距離
-  slow_lead_overtake_commit_distance: 18.0 # [m] 外側車線を確定して追越しを開始する距離
+  slow_lead_overtake_prepare_distance: 25.0 # [m] Center移行・通過車線評価の開始距離（安全車線があれば速度合わせはしない）
+  slow_lead_overtake_commit_distance: 13.0 # [m] 外側車線を確定して追越しを開始する距離
   slow_lead_overtake_retry_sec: 0.25 # [s] 低速車追従中の通過車線再評価周期
   overtake_release_distance: 22.0 # [m] ラッチ後は20m以上で解除し、15m開始とのヒステリシスを持たせる
   overtake_target_switch_margin_m: 3.0 # [m] 現在対象よりこの距離以上近い候補にだけ切り替える
   overtake_target_switch_confirm_sec: 0.5 # [s] ACQUIRE中に新候補が継続して近い場合だけ対象変更
+  overtake_target_immediate_switch_distance: 5.0 # [m] 現対象より明確に近い前方車なら確認待ちなしで対象変更
   center_lane_rejoin_behind_wps: 6 # 追い越した車が後方へこの差以上 離れたらCenter軌道のL1へ戻る
   behind_release_wps: 12 # 追い越した車が後方へこの差以上離れるまで維持
   min_hold_sec: 1.0      # 切り替え直後の再切り替え禁止時間
   lane_change_cooldown_sec: 2.0 # L0/L1/L2の目標変更後、次の車線変更を禁止する時間
   l0_entry_prohibited_zones: # Center WP基準。区間内ではL0/全幅要求をL1へ置換
     - {start_wp: 230, end_wp: 255}
+  outer_lane_mpc_problem_zones: # physical passage=Trueでも外側固定MPCが継続失敗した局所区間
+    - {start_wp: 238, end_wp: 265} # N=15の予測がWP263へ届く前から全幅化し、通過後まで保持
+  outer_lane_mpc_problem_override_speed_kmh: 5.0 # [km/h] 停止・超低速車は問題区間でも検証済み外側通過を許可
+  outer_lane_mpc_problem_override_release_speed_kmh: 6.0 # [km/h] 例外解除速度。5km/h付近の測定揺れで全幅/固定車線を往復させない
   exit_confirm_sec: 0.5  # Race復帰条件の継続確認時間
   race_rejoin_max_heading_deg: 10.0 # Race/Centerの方位差がこれ以下の地点でRaceへ復帰
   race_rejoin_probe_start_heading_deg: 12.0 # [deg] この方位差以内でRace shadow probeを開始
@@ -108,9 +116,9 @@ prepass_lane_fallback:
 
 follow_control:
   follow_only: false       # true: L0/L2へ追い越さず、Center軌道のL1で追従する
-  engage_distance: 12.0  # [m] この距離未満で車間制御を有効化
-  desired_distance: 6.5  # [m] 目標車間距離
-  lateral_distance: 1.2  # [m] 同一車線とみなす横方向距離
+  engage_distance: 16.0  # [m] この距離未満で車間制御を有効化
+  desired_distance: 7.0  # [m] 目標車間距離
+  lateral_distance: 1.3  # [m] 同一車線とみなす横方向距離
   spacing_kp: 1.0        # [1/s] target=front_speed+Kp*(distance-desired_distance)
   deadlock_escape_enabled: true # 追従対象と自車が停止した際に安全な前進probe/後退で脱出
   deadlock_ego_speed_threshold: 0.15 # [m/s]
@@ -150,13 +158,13 @@ bicycle_model:
   width: 1.6   # +safety margin
 
 mpc:
-  N: 22
+  N: 15
   # Q: [e_y(横ずれ), e_psi(ヨー角ずれ), t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
   R: [100000.0, 1000.0]
   R10: [100000.0,100.0]
-  a_min: -2.0 # m/s^2
+  a_min: -2.5 # m/s^2
   a_max: 2.5 # m/s^2
   delta_max_deg: 18.0 # degrees
   steer_rate_max: 2.25 # rad/s max_steering_rate
@@ -269,11 +277,16 @@ v2x_obstacle_avoidance:
   vehicle_radius: 0.725          # [m]
   v_max_safety: 35.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
+  moving_emergency_desired_distance: 3.0 # [m] 移動車EmergencyBrakeの目標車間。停止車の5.5m式とは分離
+  moving_emergency_spacing_kp: 0.5 # [1/s] 移動車への穏やかな車間補正
+  moving_emergency_max_speed_deficit: 0.5 # [m/s] 2m超では相手速度より過度に低い速度を要求しない
+  moving_emergency_critical_distance: 2.0 # [m] これ以下は移動車でも従来の強い非常制動
   parallel_vehicle_half_width: 0.725 # [m] 並走横クリアランス用の相手車両半幅
   parallel_ego_half_length: 1.0     # [m] 自車の全長2.0mに対する半長
   parallel_vehicle_half_length: 1.0 # [m] 相手車の全長2.0mに対する半長
   parallel_critical_clearance: 0.30  # [m] 車両包絡間の実空きがこれ以下なら強減速
   parallel_warning_clearance: 1.30   # [m] 車両包絡間の実空きがこれ以下なら並走減速
+  parallel_overtake_speed_margin: 0.50 # [m/s] 安全な追い越し中は相手速度+この値を並走減速の下限にする
   parallel_safety_longitudinal_clearance: 0.50 # [m] Safetyを許可する縦包絡間の最大空き
   parallel_abort_longitudinal_clearance: 0.50  # [m] Abortを許可する縦包絡間の最大空き
   parallel_safety_lon_behind: 2.0    # [m] Safetyは後方車体の重なりも確認
@@ -291,6 +304,9 @@ stopped_vehicle_overtake:
   max_speed: 10.0          # [m/s] 強制追い越し中の上限速度
   reverse_distance: 3.0    # [m] 安全な追い越しが解けない場合に後退を待つ車間
   infeasible_cycles: 4     # 後退待機へ入るMPC infeasible連続回数
+  passage_clearance: 0.30  # [m] 自車半幅+相手車半幅に加える追越し通過余裕
+  lane_width_tolerance: 0.05 # [m] 境界CSVの局所的な幅不足として許容する最大値
+  lane_width_tolerance_points: 2 # 軽微な幅不足を連続して許容する最大Waypoint数
 
 follow_restart:
   lead_moving_speed: 0.5   # [m/s] 停止していた前方車が動き出したと判定する速度

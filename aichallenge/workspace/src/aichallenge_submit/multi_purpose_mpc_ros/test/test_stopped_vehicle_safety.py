@@ -10,6 +10,8 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     circular_forward_progress,
     continuous_condition_confirmed,
     evaluate_stopped_lead_overtake,
+    evaluate_lane_width_samples,
+    evaluate_overtake_commit_gate,
     follow_stop_deadlock_conditions_met,
     is_follow_target_ahead,
     is_follow_retry_within_distance,
@@ -54,6 +56,66 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
 
 
 class StoppedVehicleSafetyTest(unittest.TestCase):
+    def test_overtake_commit_blocks_only_outside_curve_direction(self):
+        left_curve = [0.02, 0.08, 0.13]
+        l0 = evaluate_overtake_commit_gate(
+            target_lane=0, target_distance=10.0,
+            preview_curvatures=left_curve,
+            minimum_distance=8.0, maximum_distance=13.0,
+            outside_curvature_threshold=0.12,
+        )
+        l2 = evaluate_overtake_commit_gate(
+            target_lane=2, target_distance=10.0,
+            preview_curvatures=left_curve,
+            minimum_distance=8.0, maximum_distance=13.0,
+            outside_curvature_threshold=0.12,
+        )
+        self.assertFalse(l0["allowed"])
+        self.assertTrue(l2["allowed"])
+
+    def test_overtake_commit_requires_distance_band(self):
+        for distance in (7.9, 13.1):
+            result = evaluate_overtake_commit_gate(
+                target_lane=0, target_distance=distance,
+                preview_curvatures=[0.0],
+                minimum_distance=8.0, maximum_distance=13.0,
+                outside_curvature_threshold=0.12,
+            )
+            self.assertFalse(result["allowed"])
+
+    def test_lane_width_allows_two_minor_deficit_points(self):
+        result = evaluate_lane_width_samples(
+            [1.70, 1.58, 1.57, 1.70],
+            required_width=1.60,
+            tolerance=0.05,
+            max_consecutive_tolerated=2,
+        )
+        self.assertTrue(result["passable"])
+        self.assertEqual(result["longest_minor_run"], 2)
+
+    def test_lane_width_rejects_long_minor_deficit_run(self):
+        result = evaluate_lane_width_samples(
+            [1.58, 1.57, 1.59],
+            required_width=1.60,
+            tolerance=0.05,
+            max_consecutive_tolerated=2,
+        )
+        self.assertFalse(result["passable"])
+        self.assertEqual(
+            result["failure_reason"],
+            "lane_width_minor_deficit_run_too_long",
+        )
+
+    def test_lane_width_rejects_deficit_beyond_tolerance(self):
+        result = evaluate_lane_width_samples(
+            [1.70, 1.54, 1.70],
+            required_width=1.60,
+            tolerance=0.05,
+            max_consecutive_tolerated=2,
+        )
+        self.assertFalse(result["passable"])
+        self.assertEqual(result["first_failed_index"], 1)
+
     def test_reverse_corridor_ignores_adjacent_lane_vehicle(self):
         self.assertFalse(reverse_path_has_vehicle_conflict(
             ego_x=0.0, ego_y=0.0, ego_heading=0.0,
