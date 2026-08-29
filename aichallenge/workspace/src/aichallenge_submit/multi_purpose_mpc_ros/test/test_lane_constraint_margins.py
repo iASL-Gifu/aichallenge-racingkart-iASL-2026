@@ -2,11 +2,13 @@ import pytest
 
 from multi_purpose_mpc_ros.core.reference_path import (
     OUTER_COURSE_MARGIN,
+    collapsed_constraint_snapshot,
     lane_constraint_margins,
     lane_minimum_free_segment_width,
     lane_relaxation_profile,
     relaxed_lane_bounds,
     intersect_constraint_bounds,
+    retain_first_collapsed_constraint,
 )
 
 
@@ -61,3 +63,31 @@ def test_l1_uses_center_corridor_width_instead_of_full_vehicle_width():
 @pytest.mark.parametrize("lane", [None, 0, 2])
 def test_non_l1_corridors_keep_full_vehicle_width(lane):
     assert lane_minimum_free_segment_width(lane, 1.6, 0.5) == pytest.approx(1.6)
+
+
+def test_outer_lane_zero_width_snapshot_is_collapsed():
+    detail = collapsed_constraint_snapshot(
+        [2.0, 0.0, 1.8], [0.5, 0.0, 0.6], [312, 313, 314])
+
+    assert detail == {
+        "index": 1,
+        "wp": 313,
+        "width": pytest.approx(0.0),
+        "lower": pytest.approx(0.0),
+        "upper": pytest.approx(0.0),
+    }
+
+
+def test_outer_lane_positive_width_snapshot_is_not_collapsed():
+    assert collapsed_constraint_snapshot(
+        [-0.2, -0.1], [-1.8, -1.7], [220, 221]) is None
+
+
+def test_first_constraint_collapse_survives_later_retry():
+    first = retain_first_collapsed_constraint(
+        None, [1.0, 0.0], [-1.0, 0.0], [10, 11])
+    retained = retain_first_collapsed_constraint(
+        first, [1.0, 1.0], [-1.0, -1.0], [10, 11])
+    assert retained == first
+    assert retained["wp"] == 11
+    assert retained["width"] == pytest.approx(0.0)

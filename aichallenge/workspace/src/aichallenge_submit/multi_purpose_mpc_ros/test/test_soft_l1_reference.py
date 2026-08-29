@@ -76,3 +76,34 @@ def test_clearing_soft_lane_reference_clears_offset():
 
     assert mpc.soft_target_lane_idx is None
     assert mpc.soft_target_lateral_offset == pytest.approx(0.0)
+
+
+def test_target_lane_offsets_are_independent_from_soft_reference():
+    mpc = MPC.__new__(MPC)
+    mpc.target_lane_lateral_offsets = None
+
+    mpc.set_target_lane_lateral_offsets([0.0, -0.3, -0.3])
+    mpc.set_soft_lateral_reference()
+
+    assert mpc.target_lane_lateral_offsets.tolist() == pytest.approx(
+        [0.0, -0.3, -0.3])
+
+
+def test_target_lane_offsets_can_be_cleared():
+    mpc = MPC.__new__(MPC)
+    mpc.set_target_lane_lateral_offsets([-0.3])
+    mpc.set_target_lane_lateral_offsets()
+
+    assert mpc.target_lane_lateral_offsets is None
+
+
+def test_full_width_l1_offset_limits_can_be_set_and_cleared():
+    mpc = MPC.__new__(MPC)
+    mpc.full_width_l1_offset_limits = None
+
+    mpc.set_full_width_l1_offset_limits([0.0, 0.35, 0.35])
+    assert mpc.full_width_l1_offset_limits.tolist() == pytest.approx(
+        [0.0, 0.35, 0.35])
+
+    mpc.set_full_width_l1_offset_limits()
+    assert mpc.full_width_l1_offset_limits is None

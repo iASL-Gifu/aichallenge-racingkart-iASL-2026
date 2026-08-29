@@ -57,6 +57,11 @@ trajectory_switch:
   overtake_commit_min_distance: 8.0 # [m] 姿勢を崩しやすい過近距離では新規車線変更を開始しない
   overtake_commit_preview_distance: 12.0 # [m] 外側カーブ曲率を確認する前方距離
   overtake_outside_curvature_threshold: 0.12 # [1/m] 選択レーンがカーブ外側になる場合の開始上限
+  overtake_commit_probe_success_cycles: 2 # 新規L0/L2確定前のshadow MPC正確解の連続回数
+  overtake_commit_max_relaxation_m: 0.20 # [m] shadow MPCで許可する人工車線境界の最大緩和量
+  overtake_commit_valid_width_distance_m: 20.0 # [m] MPC horizonとは別に候補車線の有効幅を確認する前方距離
+  outer_lane_progress_timeout_sec: 2.5 # [s] 外側車線中心到達後、追越し距離が縮まらなければL1復帰を評価
+  outer_lane_min_progress_m: 0.5 # [m] 追越し進捗タイマーを更新する相対距離の最小減少量
   slow_lead_overtake_speed_kmh: 16.0 # [km/h] 停止車とは分離して特別追越しする低速前方車の上限
   slow_lead_overtake_speed_margin: 0.5 # [m/s] 車線分離まで対象速度に加える接近余裕
   slow_lead_overtake_committed_speed_margin: 1.5 # [m/s] 外側車線適用後、車体分離までの速度差
@@ -75,8 +80,22 @@ trajectory_switch:
   lane_change_cooldown_sec: 2.0 # L0/L1/L2の目標変更後、次の車線変更を禁止する時間
   l0_entry_prohibited_zones: # Center WP基準。区間内ではL0/全幅要求をL1へ置換
     - {start_wp: 230, end_wp: 255}
+  # Center WP基準。周回境界前後では通常車への新規L2追越しを禁止し、
+  # L0（rear-onlyは無視、front-onlyは追従）→L1の順で選択する。
+  l2_entry_restricted_zones:
+    - {start_wp: 315, end_wp: 10}
+  l2_entry_restricted_override_speed_kmh: 10.0
+  # hard boundsは変えず、目的参照だけをL1方向へ寄せる。
+  l2_inward_offset_zones:
+    - {start_wp: 200, end_wp: 220, offset_m: 0.30}
+  full_width_l1_offset_zones:
+    - {start_wp: 220, end_wp: 260, offset_m: 0.35}
   outer_lane_mpc_problem_zones: # physical passage=Trueでも外側固定MPCが継続失敗した局所区間
     - {start_wp: 238, end_wp: 265} # N=15の予測がWP263へ届く前から全幅化し、通過後まで保持
+  # 通常速度の前方車に対し、安全なPure Pursuitが利用できる間は
+  # WP220～265の一時的なMPC失敗を低速Safety Recoveryへ直結させない。
+  pp_safe_recovery_fast_zones:
+    - {start_wp: 220, end_wp: 265}
   outer_lane_mpc_problem_override_speed_kmh: 5.0 # [km/h] 停止・超低速車は問題区間でも検証済み外側通過を許可
   outer_lane_mpc_problem_override_release_speed_kmh: 6.0 # [km/h] 例外解除速度。5km/h付近の測定揺れで全幅/固定車線を往復させない
   exit_confirm_sec: 0.5  # Race復帰条件の継続確認時間
@@ -100,6 +119,7 @@ prepass_lane_fallback:
   infeasible_cycles: 20 # 追越し前、固定車線がこの回数連続失敗したら代替車線を評価
   recovery_stable_sec: 0.5 # 全幅解除後、MPC正常かつ候補車線基準の車両安定条件がこの時間続いてから代替車線を選択
   recovery_timeout_sec: 5.0 # 全幅回復がこの時間成立しなければラッチ対象を再評価。通過不可/後方危険なら追従、近すぎて通過可能なら後退後に再評価
+  soft_guidance_timeout_sec: 10.0 # [s] 全幅soft guidanceを無期限に保持しない絶対上限
   follow_retry_sec: 2.0 # [s] 追従へ移行後も、この周期で外側車線の通過幅とV2X競合を再評価する
   follow_retry_max_distance: 12.0 # [m] 追従から追い越しを再評価する最大距離（この値未満のみ）
   behind_release_longitudinal: 0.5 # [m] 対象がこの距離より後方にいる状態が継続したらPrepassを解除
@@ -112,6 +132,7 @@ prepass_lane_fallback:
   rear_distance: 5.0   # [m] 候補車線の後方確認距離
   prediction_sec: 1.0  # [s] 相対速度による将来位置も確認
   follow_target_lost_hold_sec: 1.0 # [s] 追従中にラッチ対象が消えても最終位置を使って安全側に保持する時間
+  follow_emergency_reacquire_sec: 1.0 # [s] Follow解除直後に同じEmergency対象を再ラッチしない
   follow_target_lost_max_speed: 1.0 # [m/s] 消失保持中の速度上限（保持期限後は一度停止して全車両再評価）
 
 follow_control:
@@ -173,6 +194,7 @@ mpc:
   max_prediction_fallback_cycles: 3 # 古い予測・制御列を再利用できる最大連続失敗周期
   safety_recovery_confirm_cycles: 2 # 通常時は単発失敗で全幅Safety Recoveryへ入らない
   pp_safe_safety_recovery_confirm_cycles: 6 # Pure Pursuitが安全な間は連続6周期まで回復遷移を猶予
+  pp_safe_zone_safety_recovery_confirm_cycles: 20 # 40Hzで0.5秒。指定区間・通常速度車のみ
   race_to_center_failure_grace_sec: 0.6 # Race→Center直後は外側車線失敗として数えない
   active_path_steering_fallback_enabled: true # MPC失敗時はPure Pursuit、算出不能時は旧フィードバックへ移行
   # 安全なPure Pursuitを長時間ラッチして18km/hに固定しない。40Hzで0.20秒の
@@ -192,6 +214,7 @@ mpc:
   # MPCが姿勢制約で解けなくても、壁・車両予測を通過したPure Pursuitなら
   # 低速前進で姿勢を戻す。動けない場合は従来どおり後退へ移行する。
   safety_recovery_pure_pursuit_creep_speed: 1.5 # [m/s]
+  safety_recovery_pure_pursuit_fast_creep_speed: 4.0 # [m/s] 指定区間・通常速度車のみ
   safety_recovery_success_sec: 0.5 # [s] 全幅MPCが連続成功してから通常車線選択へ戻す時間
   #steering_tire_angle_gain_var: 1.639
   steering_tire_angle_gain_var: 1.68
@@ -363,6 +386,7 @@ stuck_recovery:
   straight_reentry_probe_distance: 2.0 # [m] DRIVE/REVERSE直進方向の比較距離
   straight_reentry_min_improvement: 0.20 # [m] 採用方向に必要な境界超過量の改善
   straight_reentry_timeout: 8.0 # [s] 一度の連続直進復帰の上限
+  straight_reentry_localization_wait_sec: 1.0 # [s] 開始直後は停止保持してGNSS/odom整合を待つ
   straight_reentry_success_cycles: 8 # 境界内かつMPC正常を連続確認して終了
   cooldown: 2.0
   reverse_speed: 1.5

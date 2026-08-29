@@ -119,18 +119,81 @@ def resolve_applied_corridor(
 ):
     """Resolve the one corridor that owns the next MPC solve.
 
-    Priority is geographic safety, solver/reverse recovery, ordinary transition,
+    Priority is solver/reverse recovery, geographic safety, ordinary transition,
     then the requested lane.  Keeping this decision in one function prevents
     several independent flags from overwriting the applied constraint.
     """
+    if full_width_recovery:
+        return None, "full_width_recovery"
     if l0_prohibited:
         lane = 2 if requested_lane == 2 else 1
         return lane, "l0_prohibited"
-    if full_width_recovery:
-        return None, "full_width_recovery"
     if transition_active:
         return None, "lane_transition"
     return requested_lane, "requested_lane"
+
+
+def prepass_recovery_timeout_expired(
+    *, elapsed: float, recovery_timeout: float,
+    soft_guidance_timeout: float, full_width_prediction_safe: bool,
+) -> tuple[bool, bool]:
+    """Return ordinary/watchdog expiry without allowing an infinite soft hold."""
+    ordinary_expired = bool(
+        recovery_timeout > 0.0
+        and elapsed >= recovery_timeout
+        and not full_width_prediction_safe
+    )
+    watchdog_expired = bool(
+        soft_guidance_timeout > 0.0
+        and elapsed >= soft_guidance_timeout
+    )
+    return ordinary_expired, watchdog_expired
+
+
+def outer_lane_problem_slow_override_active(
+    *, latched_target_id, opponent_vehicle_id, velocity_valid: bool,
+) -> bool:
+    """Require a real, velocity-qualified target for the local exception."""
+    return bool(
+        opponent_vehicle_id is not None
+        and velocity_valid
+        and latched_target_id is not None
+        and latched_target_id == opponent_vehicle_id
+    )
+
+
+def follow_emergency_reacquire_blocked(
+    *, vehicle_id, released_vehicle_id, released_at,
+    now_sec: float, hysteresis_sec: float,
+) -> bool:
+    """Prevent release/re-latch oscillation for the same emergency blocker."""
+    return bool(
+        vehicle_id is not None
+        and vehicle_id == released_vehicle_id
+        and released_at is not None
+        and now_sec - released_at < hysteresis_sec
+    )
+
+
+def overtake_shadow_solution_acceptable(
+    *, accurate: bool, used_prediction_fallback: bool,
+    time_budget_exceeded: bool, recovery_requested: bool,
+    infeasibility_counter: int, has_prediction: bool,
+    constraint_collapsed: bool, lane_relaxation: float,
+    max_lane_relaxation: float, forward_width_valid: bool,
+) -> bool:
+    """Apply every mandatory gate for a new outer-lane commitment."""
+    return bool(
+        accurate
+        and not used_prediction_fallback
+        and not time_budget_exceeded
+        and not recovery_requested
+        and int(infeasibility_counter) == 0
+        and has_prediction
+        and not constraint_collapsed
+        and float(lane_relaxation) <= float(max_lane_relaxation) + 1e-9
+        and forward_width_valid
+    )
 
 
 def update_motion_latch(
@@ -716,6 +779,29 @@ def classify_lane_conflicts(
 
 def lane_conflicts_are_clear(conflicts) -> bool:
     return not any(conflicts.get(group) for group in ("front", "side", "rear"))
+
+
+def select_l2_restricted_zone_lane(
+    candidate_lane_idx,
+    *,
+    restriction_active,
+    slow_lead_override,
+    l0_physically_passable,
+    l0_conflicts,
+):
+    """Apply the local L0 -> L1 policy without yielding to rear-only traffic.
+
+    A front-only L0 conflict is a follow target, not a reason to select L2.
+    Side traffic still blocks L0. A physical-passage failure is accepted only
+    with a front target because following it does not require passing width.
+    """
+    if not restriction_active or slow_lead_override:
+        return candidate_lane_idx
+    l0_front_occupied = bool(l0_conflicts.get("front"))
+    l0_side_clear = not bool(l0_conflicts.get("side"))
+    if l0_side_clear and (l0_physically_passable or l0_front_occupied):
+        return 0
+    return 1
 
 
 def select_safe_outer_lane(

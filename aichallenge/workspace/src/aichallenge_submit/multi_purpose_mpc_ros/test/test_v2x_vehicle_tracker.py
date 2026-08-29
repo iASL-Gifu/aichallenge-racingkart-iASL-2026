@@ -7,8 +7,76 @@ import pytest
 
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     V2XVehicleTracker,
+    follow_emergency_reacquire_blocked,
+    outer_lane_problem_slow_override_active,
+    overtake_shadow_solution_acceptable,
+    prepass_recovery_timeout_expired,
     resolve_applied_corridor,
+    select_l2_restricted_zone_lane,
 )
+
+
+def test_problem_zone_slow_override_rejects_missing_target():
+    assert not outer_lane_problem_slow_override_active(
+        latched_target_id=None,
+        opponent_vehicle_id=None,
+        velocity_valid=False,
+    )
+    assert not outer_lane_problem_slow_override_active(
+        latched_target_id=None,
+        opponent_vehicle_id="d2",
+        velocity_valid=True,
+    )
+    assert not outer_lane_problem_slow_override_active(
+        latched_target_id="d2",
+        opponent_vehicle_id="d2",
+        velocity_valid=False,
+    )
+    assert outer_lane_problem_slow_override_active(
+        latched_target_id="d2",
+        opponent_vehicle_id="d2",
+        velocity_valid=True,
+    )
+
+
+def test_l2_restricted_zone_prefers_l0_and_ignores_rear_vehicle():
+    assert select_l2_restricted_zone_lane(
+        2,
+        restriction_active=True,
+        slow_lead_override=False,
+        l0_physically_passable=True,
+        l0_conflicts={"front": [], "side": [], "rear": ["d3"]},
+    ) == 0
+
+
+def test_l2_restricted_zone_follows_l0_front_vehicle():
+    assert select_l2_restricted_zone_lane(
+        2,
+        restriction_active=True,
+        slow_lead_override=False,
+        l0_physically_passable=False,
+        l0_conflicts={"front": ["d2"], "side": [], "rear": ["d3"]},
+    ) == 0
+
+
+def test_l2_restricted_zone_uses_l1_when_l0_side_is_unsafe():
+    assert select_l2_restricted_zone_lane(
+        2,
+        restriction_active=True,
+        slow_lead_override=False,
+        l0_physically_passable=True,
+        l0_conflicts={"front": [], "side": ["d3"], "rear": []},
+    ) == 1
+
+
+def test_l2_restricted_zone_slow_override_preserves_candidate():
+    assert select_l2_restricted_zone_lane(
+        2,
+        restriction_active=True,
+        slow_lead_override=True,
+        l0_physically_passable=False,
+        l0_conflicts={"front": [], "side": ["d3"], "rear": []},
+    ) == 2
 
 
 # Lightweight stand-ins for v2x_msgs / std_msgs / geometry_msgs so tests
@@ -235,8 +303,8 @@ def test_snapshot_is_detached_from_later_callback_updates():
 @pytest.mark.parametrize(
     "requested,prohibited,recovery,transition,expected",
     [
-        (0, True, True, True, (1, "l0_prohibited")),
-        (2, True, True, True, (2, "l0_prohibited")),
+        (0, True, True, True, (None, "full_width_recovery")),
+        (2, True, True, True, (None, "full_width_recovery")),
         (0, False, True, True, (None, "full_width_recovery")),
         (0, False, False, True, (None, "lane_transition")),
         (0, False, False, False, (0, "requested_lane")),
@@ -251,3 +319,59 @@ def test_applied_corridor_has_one_explicit_owner(
         full_width_recovery=recovery,
         transition_active=transition,
     ) == expected
+
+
+def test_soft_guidance_has_absolute_watchdog_when_prediction_is_safe():
+    assert prepass_recovery_timeout_expired(
+        elapsed=6.0, recovery_timeout=5.0,
+        soft_guidance_timeout=10.0, full_width_prediction_safe=True,
+    ) == (False, False)
+    assert prepass_recovery_timeout_expired(
+        elapsed=10.0, recovery_timeout=5.0,
+        soft_guidance_timeout=10.0, full_width_prediction_safe=True,
+    ) == (False, True)
+
+
+def test_follow_emergency_reacquire_hysteresis_only_blocks_same_target():
+    assert follow_emergency_reacquire_blocked(
+        vehicle_id="d2", released_vehicle_id="d2", released_at=10.0,
+        now_sec=10.5, hysteresis_sec=1.0) is True
+    assert follow_emergency_reacquire_blocked(
+        vehicle_id="d3", released_vehicle_id="d2", released_at=10.0,
+        now_sec=10.5, hysteresis_sec=1.0) is False
+    assert follow_emergency_reacquire_blocked(
+        vehicle_id="d2", released_vehicle_id="d2", released_at=10.0,
+        now_sec=11.0, hysteresis_sec=1.0) is False
+
+
+def _valid_shadow_kwargs():
+    return dict(
+        accurate=True,
+        used_prediction_fallback=False,
+        time_budget_exceeded=False,
+        recovery_requested=False,
+        infeasibility_counter=0,
+        has_prediction=True,
+        constraint_collapsed=False,
+        lane_relaxation=0.2,
+        max_lane_relaxation=0.2,
+        forward_width_valid=True,
+    )
+
+
+def test_shadow_accepts_exact_solution_at_relaxation_limit():
+    assert overtake_shadow_solution_acceptable(**_valid_shadow_kwargs())
+
+
+@pytest.mark.parametrize("override", [
+    {"accurate": False},
+    {"used_prediction_fallback": True},
+    {"time_budget_exceeded": True},
+    {"constraint_collapsed": True},
+    {"lane_relaxation": 0.2001},
+    {"forward_width_valid": False},
+])
+def test_shadow_rejects_any_failed_commit_gate(override):
+    values = _valid_shadow_kwargs()
+    values.update(override)
+    assert not overtake_shadow_solution_acceptable(**values)

@@ -13,6 +13,9 @@ from datetime import datetime
 from multi_purpose_mpc_ros.core.spatial_bicycle_models import (
     understeer_curvature_gain,
 )
+from multi_purpose_mpc_ros.core.reference_path import (
+    retain_first_collapsed_constraint,
+)
 
 # Colors
 PREDICTION = '#BA4A00'
@@ -298,6 +301,10 @@ class MPC:
         self.soft_target_alpha = 0.0
         self.soft_target_lateral_offset = 0.0
         self.soft_lateral_targets = None
+        # Per-horizon objective offsets. These alter xr only; hard lane and
+        # physical-course bounds remain unchanged.
+        self.target_lane_lateral_offsets = None
+        self.full_width_l1_offset_limits = None
 
         # setupが済んでいるかどうか
         self.osqp_initialized = False
@@ -395,6 +402,8 @@ class MPC:
         self.soft_target_alpha = 0.0
         self.soft_target_lateral_offset = 0.0
         self.soft_lateral_targets = None
+        self.target_lane_lateral_offsets = None
+        self.full_width_l1_offset_limits = None
         # Snapshot of the exact corridor used by the latest solve attempt.
         # These values remain available after an infeasible solve so the
         # controller can diagnose lane-bound and obstacle-induced failures.
@@ -402,6 +411,10 @@ class MPC:
         self._constraint_target_lane = None
         self._constraint_safety_margin = 0.0
         self._constraint_lane_relaxation = 0.0
+        # Preserve the first invalid corridor seen in the initial solve or
+        # any retry. A later relaxed solution must not hide the collapse.
+        self._constraint_collapse_detected = False
+        self._constraint_collapse_detail = None
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
         self.optimizer = osqp.OSQP()
@@ -460,6 +473,24 @@ class MPC:
         )
         self.soft_lateral_targets = (
             targets if targets is not None and targets.size else None)
+
+    def set_target_lane_lateral_offsets(self, offsets=None) -> None:
+        """Offset a hard target lane's objective without changing bounds."""
+        values = (
+            None if offsets is None
+            else np.asarray(offsets, dtype=float).reshape(-1).copy()
+        )
+        self.target_lane_lateral_offsets = (
+            values if values is not None and values.size else None)
+
+    def set_full_width_l1_offset_limits(self, offsets=None) -> None:
+        """Cap objective-only motion from full-width midpoint toward L1."""
+        values = (
+            None if offsets is None
+            else np.asarray(offsets, dtype=float).reshape(-1).copy()
+        )
+        self.full_width_l1_offset_limits = (
+            values if values is not None and values.size else None)
 
     def _compute_lane_center(self, wp_id: int, target_lane: int) -> float:
         lanes = self.model.reference_path.get_lane_bounds(wp_id)
@@ -695,14 +726,40 @@ class MPC:
         xr[self.nx::self.nx] = (lb + ub) / 2
         self._prediction_lower_bounds = np.array(lb, copy=True)
         self._prediction_upper_bounds = np.array(ub, copy=True)
+        if self._constraint_target_lane in (0, 2):
+            self._constraint_collapse_detail = retain_first_collapsed_constraint(
+                self._constraint_collapse_detail,
+                self._prediction_upper_bounds,
+                self._prediction_lower_bounds,
+                self._constraint_wp_ids,
+            )
+            self._constraint_collapse_detected = bool(
+                self._constraint_collapse_detail is not None)
 
         # If a target lane is active, preserve lane-center targets for the e_y references.
         target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
         if target_lane is not None:
             lane_centers = []
             for n in range(N):
-                lane_centers.append(self._compute_lane_center(self.model.wp_id + n, target_lane))
+                lane_center = self._compute_lane_center(
+                    self.model.wp_id + n, target_lane)
+                if (
+                    target_lane == 2
+                    and self.target_lane_lateral_offsets is not None
+                ):
+                    lane_center += self.target_lane_lateral_offsets[
+                        min(n, len(self.target_lane_lateral_offsets) - 1)]
+                lane_centers.append(lane_center)
             xr[0:N*self.nx:self.nx] = lane_centers
+            terminal_center = self._compute_lane_center(
+                self.model.wp_id + N, target_lane)
+            if (
+                target_lane == 2
+                and self.target_lane_lateral_offsets is not None
+            ):
+                terminal_center += self.target_lane_lateral_offsets[
+                    min(N, len(self.target_lane_lateral_offsets) - 1)]
+            xr[N * self.nx] = terminal_center
         elif (
             self.soft_target_lane_idx is not None
             or self.soft_lateral_targets is not None
@@ -735,6 +792,23 @@ class MPC:
                 terminal_center,
                 self.soft_target_alpha,
             )
+        elif self.full_width_l1_offset_limits is not None:
+            # Bounds remain full width. Move only xr toward L1 by at most the
+            # configured amount, avoiding a discontinuous lane-center jump.
+            for n in range(N):
+                midpoint = xr[n * self.nx]
+                l1_center = self._compute_lane_center(
+                    self.model.wp_id + n, 1)
+                limit = max(float(self.full_width_l1_offset_limits[
+                    min(n, len(self.full_width_l1_offset_limits) - 1)]), 0.0)
+                xr[n * self.nx] = midpoint + np.clip(
+                    l1_center - midpoint, -limit, limit)
+            midpoint = xr[N * self.nx]
+            l1_center = self._compute_lane_center(self.model.wp_id + N, 1)
+            limit = max(float(self.full_width_l1_offset_limits[
+                min(N, len(self.full_width_l1_offset_limits) - 1)]), 0.0)
+            xr[N * self.nx] = midpoint + np.clip(
+                l1_center - midpoint, -limit, limit)
 
         t_constraints = time.perf_counter()
 
@@ -853,6 +927,8 @@ class MPC:
         self.failure_reason = None
         self.last_solution_status = None
         self.last_solution_accurate = False
+        self._constraint_collapse_detected = False
+        self._constraint_collapse_detail = None
 
         #最近傍Waypointを取得
         self.model.get_current_waypoint()

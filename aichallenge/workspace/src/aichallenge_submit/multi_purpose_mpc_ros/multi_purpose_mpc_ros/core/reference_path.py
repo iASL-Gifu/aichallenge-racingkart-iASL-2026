@@ -29,6 +29,39 @@ CURVATURE_SAVGOL_WINDOW = 7
 CURVATURE_SAVGOL_POLYORDER = 3
 
 
+def collapsed_constraint_snapshot(upper, lower, wp_ids, tolerance=1e-3):
+    """Return the first invalid/zero-width prediction bound, if present."""
+    upper = np.asarray(upper, dtype=float).reshape(-1)
+    lower = np.asarray(lower, dtype=float).reshape(-1)
+    wp_ids = np.asarray(wp_ids, dtype=int).reshape(-1)
+    count = min(len(upper), len(lower), len(wp_ids))
+    if count <= 0:
+        return None
+    widths = upper[:count] - lower[:count]
+    collapsed = np.flatnonzero(
+        ~np.isfinite(widths) | (widths <= float(tolerance)))
+    if collapsed.size == 0:
+        return None
+    index = int(collapsed[0])
+    return {
+        "index": index,
+        "wp": int(wp_ids[index]),
+        "width": float(widths[index]),
+        "lower": float(lower[index]),
+        "upper": float(upper[index]),
+    }
+
+
+def retain_first_collapsed_constraint(
+    previous, upper, lower, wp_ids, tolerance=1e-3
+):
+    """Keep the first collapsed corridor seen across MPC retry attempts."""
+    if previous is not None:
+        return previous
+    return collapsed_constraint_snapshot(
+        upper, lower, wp_ids, tolerance=tolerance)
+
+
 @dataclass(frozen=True)
 class ConstraintBounds:
     """Independent lateral-bound layers used by the latest MPC build."""
