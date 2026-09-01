@@ -10,6 +10,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     circular_forward_progress,
     continuous_condition_confirmed,
     evaluate_stopped_lead_overtake,
+    exclude_short_failed_normal_commit_candidates,
     follow_stop_deadlock_conditions_met,
     is_follow_target_ahead,
     is_follow_retry_within_distance,
@@ -17,6 +18,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     lane_conflicts_are_clear,
     lateral_vehicle_clearance,
     longitudinal_vehicle_clearance,
+    minimum_predicted_vehicle_margin,
     is_parallel_vehicle,
     ordered_outer_lane_candidates,
     ordered_prepass_fallback_candidates,
@@ -29,6 +31,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     select_latched_overtake_lane,
     select_parallel_abort_lane,
     select_safe_outer_lane,
+    select_ranked_safe_outer_lane,
     should_release_latched_overtake_lane,
     should_reevaluate_follow_overtake,
     should_count_mpc_recovery_success,
@@ -54,6 +57,30 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
 
 
 class StoppedVehicleSafetyTest(unittest.TestCase):
+    def test_normal_commit_excludes_short_failed_l2(self):
+        self.assertEqual(
+            exclude_short_failed_normal_commit_candidates([2], {2}), [])
+
+    def test_normal_commit_excludes_short_failed_l0(self):
+        self.assertEqual(
+            exclude_short_failed_normal_commit_candidates([0], {0}), [])
+
+    def test_normal_commit_excludes_both_short_failed_outer_lanes(self):
+        self.assertEqual(
+            exclude_short_failed_normal_commit_candidates([0, 2], {0, 2}),
+            [],
+        )
+
+    def test_normal_commit_keeps_unfailed_opposite_lane(self):
+        self.assertEqual(
+            exclude_short_failed_normal_commit_candidates([0, 2], {2}), [0])
+
+    def test_normal_commit_without_short_failures_is_unchanged(self):
+        self.assertEqual(
+            exclude_short_failed_normal_commit_candidates([0, 2], set()),
+            [0, 2],
+        )
+
     def test_reverse_corridor_ignores_adjacent_lane_vehicle(self):
         self.assertFalse(reverse_path_has_vehicle_conflict(
             ego_x=0.0, ego_y=0.0, ego_heading=0.0,
@@ -845,6 +872,101 @@ class OvertakeGeometryTest(unittest.TestCase):
                 2: {"front": [], "side": ["d3"], "rear": []},
             },
         ))
+
+    def test_ranked_outer_lane_keeps_single_safe_l0(self):
+        lane, reason = select_ranked_safe_outer_lane(
+            2, {0: True, 2: False},
+            {0: {"front": [], "side": [], "rear": []},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (1.0, 1.0), 2: (100.0, 100.0)}, tie_margin=0.1)
+        self.assertEqual((lane, reason), (0, "only_safe_lane"))
+
+    def test_ranked_outer_lane_keeps_single_safe_l2(self):
+        lane, reason = select_ranked_safe_outer_lane(
+            0, {0: True, 2: True},
+            {0: {"front": ["d2"], "side": [], "rear": []},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (100.0, 100.0), 2: (1.0, 1.0)}, tie_margin=0.1)
+        self.assertEqual((lane, reason), (2, "only_safe_lane"))
+
+    def test_ranked_outer_lane_rejects_both_unsafe(self):
+        lane, reason = select_ranked_safe_outer_lane(
+            0, {0: False, 2: True},
+            {0: {"front": [], "side": [], "rear": []},
+             2: {"front": [], "side": ["d3"], "rear": []}},
+            {0: (100.0, 100.0), 2: (100.0, 100.0)}, tie_margin=0.1)
+        self.assertEqual((lane, reason), (None, "no_safe_lane"))
+
+    def test_ranked_outer_lane_uses_larger_l0_v2x_margin(self):
+        lane, reason = select_ranked_safe_outer_lane(
+            2, {0: True, 2: True},
+            {0: {"front": [], "side": [], "rear": []},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (2.0, 0.2), 2: (1.0, 2.0)}, tie_margin=0.1)
+        self.assertEqual((lane, reason), (0, "v2x_margin"))
+
+    def test_ranked_outer_lane_uses_larger_l2_v2x_margin(self):
+        lane, reason = select_ranked_safe_outer_lane(
+            0, {0: True, 2: True},
+            {0: {"front": [], "side": [], "rear": []},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (1.0, 2.0), 2: (2.0, 0.2)}, tie_margin=0.1)
+        self.assertEqual((lane, reason), (2, "v2x_margin"))
+
+    def test_ranked_outer_lane_uses_wall_margin_when_v2x_tied(self):
+        lane, reason = select_ranked_safe_outer_lane(
+            2, {0: True, 2: True},
+            {0: {"front": [], "side": [], "rear": []},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (1.00, 0.5), 2: (1.05, 0.2)}, tie_margin=0.1)
+        self.assertEqual((lane, reason), (0, "wall_margin"))
+
+    def test_ranked_outer_lane_uses_preferred_for_effective_tie(self):
+        lane, reason = select_ranked_safe_outer_lane(
+            2, {0: True, 2: True},
+            {0: {"front": [], "side": [], "rear": []},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (1.00, 0.50), 2: (1.05, 0.55)}, tie_margin=0.1)
+        self.assertEqual((lane, reason), (2, "preferred_tiebreak"))
+
+    def test_non_target_vehicle_changes_ranked_lane(self):
+        times = [0.0, 1.0]
+        target = [("target", 1.0, 2.0, 1.0, 0.0)]
+        other = ("other", 0.0, 0.5, 1.0, 0.0)
+        l0_target_margin, _ = minimum_predicted_vehicle_margin(
+            [0.0, 1.0], [0.0, 0.0], times, target,
+            minimum_clearance=1.0)
+        l2_target_margin, _ = minimum_predicted_vehicle_margin(
+            [0.0, 1.0], [4.0, 4.0], times, target,
+            minimum_clearance=1.0)
+        lane_without_other, _ = select_ranked_safe_outer_lane(
+            0, {0: True, 2: True},
+            {0: {"front": [], "side": [], "rear": []},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (l0_target_margin, 1.0),
+             2: (l2_target_margin, 1.0)}, tie_margin=0.1)
+        l0_all_margin, _ = minimum_predicted_vehicle_margin(
+            [0.0, 1.0], [0.0, 0.0], times, target + [other],
+            minimum_clearance=1.0)
+        l2_all_margin, _ = minimum_predicted_vehicle_margin(
+            [0.0, 1.0], [4.0, 4.0], times, target + [other],
+            minimum_clearance=1.0)
+        lane_with_other, reason = select_ranked_safe_outer_lane(
+            0, {0: True, 2: True},
+            {0: {"front": [], "side": [], "rear": []},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (l0_all_margin, 1.0),
+             2: (l2_all_margin, 1.0)}, tie_margin=0.1)
+        self.assertEqual(lane_without_other, 0)
+        self.assertEqual((lane_with_other, reason), (2, "v2x_margin"))
+
+    def test_ranked_outer_lane_never_rescues_unsafe_high_quality(self):
+        lane, reason = select_ranked_safe_outer_lane(
+            0, {0: True, 2: True},
+            {0: {"front": [], "side": [], "rear": ["d2"]},
+             2: {"front": [], "side": [], "rear": []}},
+            {0: (100.0, 100.0), 2: (0.0, 0.0)}, tie_margin=0.1)
+        self.assertEqual((lane, reason), (2, "only_safe_lane"))
 
     def test_vehicle_ahead_has_positive_longitudinal_distance(self):
         self.assertGreater(relative_longitudinal_distance(5.0, 0.0, 0.0), 0.0)

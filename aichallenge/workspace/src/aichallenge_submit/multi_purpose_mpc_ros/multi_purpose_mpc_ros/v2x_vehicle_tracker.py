@@ -8,6 +8,7 @@ and reusable from non-ROS contexts (e.g. offline replay of rosbag CSVs).
 
 import math
 import threading
+import time
 from collections import deque
 from typing import Deque, Dict, List, Tuple
 
@@ -718,6 +719,100 @@ def lane_conflicts_are_clear(conflicts) -> bool:
     return not any(conflicts.get(group) for group in ("front", "side", "rear"))
 
 
+def should_defer_l0_prohibited_l1_hard(
+    *,
+    l0_prohibited,
+    physical_lane_idx,
+    l1_conflicts,
+    heading_error=0.0,
+    max_heading_error=math.inf,
+    lateral_speed=0.0,
+    max_lateral_speed=math.inf,
+    yaw_rate=0.0,
+    max_yaw_rate=math.inf,
+    l1_lateral_error=0.0,
+    max_l1_lateral_error=math.inf,
+    prediction_available=True,
+    prediction_fit=1.0,
+    minimum_prediction_fit=0.0,
+    l1_hard_already_owned=False,
+) -> bool:
+    """Defer a new L1 hard corridor until existing entry gates are ready."""
+    return bool(l0_prohibited_l1_hard_defer_reasons(
+        l0_prohibited=l0_prohibited,
+        physical_lane_idx=physical_lane_idx,
+        l1_conflicts=l1_conflicts,
+        heading_error=heading_error,
+        max_heading_error=max_heading_error,
+        lateral_speed=lateral_speed,
+        max_lateral_speed=max_lateral_speed,
+        yaw_rate=yaw_rate,
+        max_yaw_rate=max_yaw_rate,
+        l1_lateral_error=l1_lateral_error,
+        max_l1_lateral_error=max_l1_lateral_error,
+        prediction_available=prediction_available,
+        prediction_fit=prediction_fit,
+        minimum_prediction_fit=minimum_prediction_fit,
+        l1_hard_already_owned=l1_hard_already_owned,
+    ))
+
+
+def l0_prohibited_l1_hard_defer_reasons(
+    *,
+    l0_prohibited,
+    physical_lane_idx,
+    l1_conflicts,
+    heading_error,
+    max_heading_error,
+    lateral_speed,
+    max_lateral_speed,
+    yaw_rate,
+    max_yaw_rate,
+    l1_lateral_error,
+    max_l1_lateral_error,
+    prediction_available,
+    prediction_fit,
+    minimum_prediction_fit,
+    l1_hard_already_owned=False,
+):
+    """List existing readiness gates that reject immediate hard L1 entry."""
+    if (
+        not l0_prohibited
+        or physical_lane_idx not in (1, 2)
+        or l1_hard_already_owned
+    ):
+        return ()
+    reasons = []
+    if not lane_conflicts_are_clear(l1_conflicts):
+        reasons.append("predicted_v2x_conflict")
+    if float(heading_error) > float(max_heading_error):
+        reasons.append("heading_unstable")
+    if float(lateral_speed) > float(max_lateral_speed):
+        reasons.append("lateral_speed_unstable")
+    if float(yaw_rate) > float(max_yaw_rate):
+        reasons.append("yaw_rate_unstable")
+    if float(l1_lateral_error) > float(max_l1_lateral_error):
+        reasons.append("l1_lateral_error")
+    if not prediction_available:
+        reasons.append("prediction_unavailable")
+    elif float(prediction_fit) < float(minimum_prediction_fit):
+        reasons.append("prediction_fit_low")
+    return tuple(reasons)
+
+
+def should_defer_l0_prohibited_physical_l2_l1_hard(
+    *, l0_prohibited, physical_lane_idx, requested_lane_idx,
+    failed_readiness_conditions,
+) -> bool:
+    """Defer any new physical-L2 to L1-hard entry that is not ready."""
+    return bool(
+        l0_prohibited
+        and physical_lane_idx == 2
+        and requested_lane_idx != 2
+        and failed_readiness_conditions
+    )
+
+
 def select_safe_outer_lane(
     preferred_lane_idx,
     physical_passage,
@@ -732,6 +827,88 @@ def select_safe_outer_lane(
         ):
             return lane_idx
     return None
+
+
+def exclude_short_failed_normal_commit_candidates(
+    binary_safe_outer_lanes, short_failed_outer_lanes
+):
+    """Remove attempt-level short failures from ordinary new commits only."""
+    short_failed = set(short_failed_outer_lanes)
+    return [
+        lane_idx for lane_idx in binary_safe_outer_lanes
+        if lane_idx in (0, 2) and lane_idx not in short_failed
+    ]
+
+
+def minimum_predicted_vehicle_margin(
+    prediction_x,
+    prediction_y,
+    prediction_times,
+    moving_vehicles,
+    *,
+    minimum_clearance,
+):
+    """Return the worst predicted clearance margin across all V2X traffic."""
+    if (
+        not prediction_x
+        or len(prediction_x) != len(prediction_y)
+        or len(prediction_x) != len(prediction_times)
+    ):
+        return -math.inf, None
+    minimum_margin = math.inf
+    limiting_vehicle_id = None
+    for vehicle_id, vehicle_x, vehicle_y, vehicle_vx, vehicle_vy in (
+        moving_vehicles
+    ):
+        for ego_x, ego_y, prediction_time in zip(
+            prediction_x, prediction_y, prediction_times
+        ):
+            margin = math.hypot(
+                float(ego_x)
+                - (float(vehicle_x) + float(vehicle_vx) * prediction_time),
+                float(ego_y)
+                - (float(vehicle_y) + float(vehicle_vy) * prediction_time),
+            ) - float(minimum_clearance)
+            if margin < minimum_margin:
+                minimum_margin = margin
+                limiting_vehicle_id = vehicle_id
+    return minimum_margin, limiting_vehicle_id
+
+
+def select_ranked_safe_outer_lane(
+    preferred_lane_idx,
+    physical_passage,
+    conflicts_by_lane,
+    quality_by_lane,
+    *,
+    tie_margin,
+):
+    """Rank two binary-safe outer lanes without rescuing an unsafe lane."""
+    safe_lanes = [
+        lane_idx for lane_idx in (0, 2)
+        if physical_passage.get(lane_idx, False)
+        and lane_conflicts_are_clear(conflicts_by_lane.get(lane_idx, {}))
+    ]
+    if not safe_lanes:
+        return None, "no_safe_lane"
+    if len(safe_lanes) == 1:
+        return safe_lanes[0], "only_safe_lane"
+
+    preferred = preferred_lane_idx if preferred_lane_idx in (0, 2) else 0
+    tie_margin = max(float(tie_margin), 0.0)
+    l0_v2x, l0_wall = quality_by_lane[0]
+    l2_v2x, l2_wall = quality_by_lane[2]
+    if abs(float(l0_v2x) - float(l2_v2x)) > tie_margin:
+        return (
+            (0, "v2x_margin")
+            if l0_v2x > l2_v2x else (2, "v2x_margin")
+        )
+    if abs(float(l0_wall) - float(l2_wall)) > tie_margin:
+        return (
+            (0, "wall_margin")
+            if l0_wall > l2_wall else (2, "wall_margin")
+        )
+    return preferred, "preferred_tiebreak"
 
 
 def follow_stop_deadlock_conditions_met(
@@ -855,6 +1032,143 @@ def prediction_clears_moving_vehicle(
         ) >= minimum_clearance
         for ego_x, ego_y, prediction_time in selected
     )
+
+
+def minimum_predicted_envelope_conflict(
+    prediction_x, prediction_y, prediction_times, moving_vehicles, *,
+    project_frenet, arc_total_length, ego_width, other_half_width,
+    ego_half_length, other_half_length, timing=None,
+    candidate_frenet_cache_enabled=True,
+    external_candidate_frenet_cache=None,
+):
+    """Return the worst predicted rectangular-envelope overlap, if any."""
+    total_start = time.perf_counter() if timing is not None else None
+    if timing is not None:
+        timing["candidate_sample_count"] = len(prediction_x)
+        timing["moving_vehicle_count"] = len(moving_vehicles)
+        timing["pair_check_count"] = 0
+        timing["center_frenet_call_count"] = 0
+        timing["candidate_frenet_cache_hits"] = 0
+        timing["candidate_frenet_cache_misses"] = 0
+        timing["external_candidate_frenet_cache_hits"] = 0
+        timing["external_candidate_frenet_cache_misses"] = 0
+        timing["frenet_projection_ms"] = 0.0
+        timing["clearance_evaluation_ms"] = 0.0
+        timing["conflict_found"] = False
+        timing["early_returned"] = False
+    if (
+        not prediction_x
+        or len(prediction_x) != len(prediction_y)
+        or len(prediction_x) != len(prediction_times)
+    ):
+        if timing is not None:
+            timing["early_returned"] = True
+            timing["total_ms"] = (
+                time.perf_counter() - total_start) * 1000.0
+        return None
+    worst_conflict = None
+    candidate_frenet_by_index = {}
+    for vehicle_id, vehicle_x, vehicle_y, vehicle_vx, vehicle_vy in moving_vehicles:
+        for index, (ego_x, ego_y, prediction_time) in enumerate(zip(
+            prediction_x, prediction_y, prediction_times
+        )):
+            if timing is not None:
+                timing["pair_check_count"] += 1
+            frenet_start = (
+                time.perf_counter() if timing is not None else None)
+            candidate_cache_hit = bool(
+                candidate_frenet_cache_enabled
+                and index in candidate_frenet_by_index
+            )
+            external_candidate_cache_hit = False
+            candidate_projection_called = False
+            if candidate_cache_hit:
+                ego_frenet = candidate_frenet_by_index[index]
+            else:
+                external_cache_key = (float(ego_x), float(ego_y))
+                external_candidate_cache_hit = bool(
+                    external_candidate_frenet_cache is not None
+                    and external_cache_key in external_candidate_frenet_cache
+                )
+                if external_candidate_cache_hit:
+                    ego_frenet = external_candidate_frenet_cache[
+                        external_cache_key]
+                else:
+                    ego_frenet = project_frenet(ego_x, ego_y)
+                    candidate_projection_called = True
+                    if external_candidate_frenet_cache is not None:
+                        external_candidate_frenet_cache[
+                            external_cache_key] = ego_frenet
+                if candidate_frenet_cache_enabled:
+                    candidate_frenet_by_index[index] = ego_frenet
+            vehicle_frenet = project_frenet(
+                vehicle_x + vehicle_vx * prediction_time,
+                vehicle_y + vehicle_vy * prediction_time,
+            )
+            if timing is not None:
+                if candidate_cache_hit:
+                    timing["candidate_frenet_cache_hits"] += 1
+                elif candidate_projection_called:
+                    timing["candidate_frenet_cache_misses"] += 1
+                if external_candidate_cache_hit:
+                    timing["external_candidate_frenet_cache_hits"] += 1
+                elif (
+                    not candidate_cache_hit
+                    and external_candidate_frenet_cache is not None
+                ):
+                    timing["external_candidate_frenet_cache_misses"] += 1
+                timing["center_frenet_call_count"] += (
+                    1 + int(candidate_projection_called))
+                timing["frenet_projection_ms"] += (
+                    time.perf_counter() - frenet_start) * 1000.0
+            if ego_frenet is None or vehicle_frenet is None:
+                continue
+            clearance_start = (
+                time.perf_counter() if timing is not None else None)
+            longitudinal = signed_closed_path_arc_distance(
+                ego_frenet[0], vehicle_frenet[0], arc_total_length)
+            if longitudinal is None:
+                if timing is not None:
+                    timing["clearance_evaluation_ms"] += (
+                        time.perf_counter() - clearance_start) * 1000.0
+                continue
+            lateral_clearance = lateral_vehicle_clearance(
+                vehicle_frenet[1] - ego_frenet[1],
+                ego_width, other_half_width)
+            longitudinal_clearance = longitudinal_vehicle_clearance(
+                longitudinal, ego_half_length, other_half_length)
+            if (
+                lateral_clearance <= 0.0
+                and longitudinal_clearance <= 0.0
+                and (
+                    worst_conflict is None
+                    or lateral_clearance
+                        < worst_conflict["predicted_lateral_clearance"]
+                )
+            ):
+                worst_conflict = {
+                    "vehicle_id": vehicle_id,
+                    "predicted_lateral_clearance": lateral_clearance,
+                    "predicted_longitudinal_clearance": longitudinal_clearance,
+                    "prediction_time": float(prediction_time),
+                    "prediction_step": index,
+                }
+            if timing is not None:
+                timing["clearance_evaluation_ms"] += (
+                    time.perf_counter() - clearance_start) * 1000.0
+    if timing is not None:
+        timing["conflict_found"] = worst_conflict is not None
+        timing["total_ms"] = (
+            time.perf_counter() - total_start) * 1000.0
+    return worst_conflict
+
+
+def exclude_envelope_conflicting_lanes(candidate_lanes, conflicts_by_lane):
+    """Keep candidate lanes whose continuous envelope prediction is clear."""
+    return [
+        lane_idx for lane_idx in candidate_lanes
+        if conflicts_by_lane.get(lane_idx) is None
+    ]
 
 
 def is_parallel_vehicle(

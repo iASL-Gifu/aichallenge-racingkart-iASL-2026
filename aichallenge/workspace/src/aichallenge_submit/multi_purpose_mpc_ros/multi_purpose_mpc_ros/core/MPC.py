@@ -13,6 +13,9 @@ from datetime import datetime
 from multi_purpose_mpc_ros.core.spatial_bicycle_models import (
     understeer_curvature_gain,
 )
+from multi_purpose_mpc_ros.core.runtime_mode import (
+    ENABLE_RUNTIME_DIAGNOSTICS,
+)
 
 # Colors
 PREDICTION = '#BA4A00'
@@ -371,6 +374,19 @@ class MPC:
         self.use_max_kappa_pred = use_max_kappa_pred
         # 既存の初期化
         self.current_prediction = None
+        # Relative times for the same spatial states as current_prediction.
+        # Keep the legacy (x, y) prediction shape unchanged for all consumers.
+        self.current_prediction_times = None
+        # Relative times for the N spatial states which own the N path-
+        # constraint bounds (state indices 1..N).  This is intentionally
+        # separate from current_prediction_times, whose public shape remains
+        # the world-prediction states 2..N-1.
+        self.current_constraint_prediction_times = None
+        # Optional one-solve ownership supplied by the controller for a
+        # validated candidate-guided outer commit.  Ordinary solves leave
+        # these unset and retain the existing timeless obstacle map.
+        self.dynamic_v2x_by_step = None
+        self.static_occupancy_data = None
         self.infeasibility_counter = 0
         self.solve_time_budget_ms = 20.0
         self.max_prediction_fallback_cycles = 3
@@ -390,6 +406,10 @@ class MPC:
         # SOLVED_INACCURATE without reaching into the solver result object.
         self.last_solution_status = None
         self.last_solution_accurate = False
+        # Diagnostic-only wall-time breakdowns populated by get_control().
+        # The controller adds its loop/source ownership when it emits them.
+        self.last_problem_build_phase_wall_ms = []
+        self.last_get_control_timing_ms = None
         self.soft_target_lane_idx = None
         self.soft_target_start_e_y = 0.0
         self.soft_target_alpha = 0.0
@@ -642,6 +662,8 @@ class MPC:
             else float(safety_margin)
         )
         self._constraint_lane_relaxation = max(float(lane_relaxation), 0.0)
+        path_reference_bounds_started_at = time.perf_counter()
+        reference_path_internal_timing_ms = None
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
                 self.model.wp_id + 1,
@@ -656,7 +678,17 @@ class MPC:
                     self.lane_constraint_retry_terminal_ratio),
                 connect_lane_from_current_pose=True,
                 lane_connection_points=(
-                    self.lane_constraint_connection_points))
+                    self.lane_constraint_connection_points),
+                dynamic_v2x_by_step=self.dynamic_v2x_by_step,
+                static_occupancy_data=self.static_occupancy_data)
+            latest_reference_path_timing = getattr(
+                self.model.reference_path,
+                "last_path_constraint_timing_ms",
+                None,
+            )
+            if isinstance(latest_reference_path_timing, dict):
+                reference_path_internal_timing_ms = dict(
+                    latest_reference_path_timing)
         else:
             ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
@@ -673,6 +705,7 @@ class MPC:
                 ub[infeasible_index] = 0.0
                 lb[infeasible_index] = 0.0
 
+        path_reference_bounds_ended_at = time.perf_counter()
         lb, ub = apply_outer_boundary_guard(
             lb,
             ub,
@@ -683,6 +716,7 @@ class MPC:
         # the bounds passed to OSQP.  The zero-width sentinel makes the
         # problem safely infeasible and lets the existing recovery run.
         lb, ub = zero_inverted_bounds(lb, ub)
+        path_boundary_guard_ended_at = time.perf_counter()
 
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
@@ -695,6 +729,7 @@ class MPC:
         xr[self.nx::self.nx] = (lb + ub) / 2
         self._prediction_lower_bounds = np.array(lb, copy=True)
         self._prediction_upper_bounds = np.array(ub, copy=True)
+        path_state_bounds_ended_at = time.perf_counter()
 
         # If a target lane is active, preserve lane-center targets for the e_y references.
         target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
@@ -809,7 +844,115 @@ class MPC:
           
             self.optimizer.update(q=q, l=l, u=u, Ax=A_full.data)
 
+        if not ENABLE_RUNTIME_DIAGNOSTICS:
+            return
+
         t_update = time.perf_counter()
+        self.last_problem_build_phase_wall_ms.append({
+            "problem_setup_ms": (t_pref - t_start) * 1000.0,
+            "linearization_reference_ms": (
+                t_linearize - t_pref) * 1000.0,
+            "path_constraints_ms": (
+                t_constraints - t_linearize) * 1000.0,
+            "path_constraint_metadata_ms": (
+                path_reference_bounds_started_at - t_linearize) * 1000.0,
+            "path_constraint_reference_bounds_ms": (
+                path_reference_bounds_ended_at
+                - path_reference_bounds_started_at) * 1000.0,
+            "path_constraint_boundary_guard_ms": (
+                path_boundary_guard_ended_at
+                - path_reference_bounds_ended_at) * 1000.0,
+            "path_constraint_state_bounds_ms": (
+                path_state_bounds_ended_at
+                - path_boundary_guard_ended_at) * 1000.0,
+            "path_constraint_lateral_reference_ms": (
+                t_constraints - path_state_bounds_ended_at) * 1000.0,
+            "reference_free_segments_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_segments_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_combination_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "combination_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_smoothing_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "smoothing_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_other_ms": float(
+                reference_path_internal_timing_ms.get("other_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_internal_total_ms": float(
+                reference_path_internal_timing_ms.get("total_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_line_aa_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_line_aa_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_static_map_check_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_static_map_check_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_dynamic_obstacle_check_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_dynamic_obstacle_check_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_dynamic_geometry_prepare_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_dynamic_geometry_prepare_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_conversion_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_conversion_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_other_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_other_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_other_setup_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_other_setup_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_other_endpoint_map_prepare_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_other_endpoint_map_prepare_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_other_cell_loop_bookkeeping_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_other_cell_loop_bookkeeping_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_other_post_loop_finalization_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_other_post_loop_finalization_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_other_detail_total_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_other_detail_total_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_other_remaining_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_other_remaining_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_internal_total_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_internal_total_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_section_overhead_ms": float(
+                reference_path_internal_timing_ms.get(
+                    "free_section_overhead_ms", 0.0)
+                if reference_path_internal_timing_ms is not None else 0.0),
+            "reference_free_timing_call_count": int(
+                reference_path_internal_timing_ms.get(
+                    "free_timing_call_count", 0)
+                if reference_path_internal_timing_ms is not None else 0),
+            "reference_timing_available": bool(
+                reference_path_internal_timing_ms is not None),
+            "sparse_matrix_ms": (t_matrix - t_constraints) * 1000.0,
+            "constraint_bounds_ms": (
+                t_constraints2 - t_matrix) * 1000.0,
+            "cost_vector_ms": (t_vector - t_constraints2) * 1000.0,
+            "optimizer_update_ms": (t_update - t_vector) * 1000.0,
+        })
         self.startup +=(t_pref-t_start)
         self.linearize +=(t_linearize-t_pref)
         self.path_constraints +=(t_constraints-t_linearize)
@@ -845,6 +988,7 @@ class MPC:
         """
         Get control signal given the current position of the car.
         """
+        get_control_started_at = time.perf_counter()
         nx = self.nx
         nu = self.nu
         self.used_prediction_fallback = False
@@ -853,6 +997,13 @@ class MPC:
         self.failure_reason = None
         self.last_solution_status = None
         self.last_solution_accurate = False
+        # Diagnostic only: wall time spent inside actual OSQP solve calls.
+        # This excludes problem construction and optimizer.update/setup.
+        self.last_optimizer_solve_wall_ms = []
+        self.last_problem_build_phase_wall_ms = []
+        self.last_get_control_timing_ms = None
+        result_postprocess_wall_ms = 0.0
+        fallback_wall_ms = 0.0
 
         #最近傍Waypointを取得
         self.model.get_current_waypoint()
@@ -864,6 +1015,9 @@ class MPC:
             reference_state=self.model.temporal_state,
             reference_waypoint=self.model.current_waypoint)
 
+        state_prepare_wall_ms = (
+            time.perf_counter() - get_control_started_at) * 1000.0
+
         t0 = time.perf_counter()
 
         base_wp_id = self.model.wp_id
@@ -874,11 +1028,19 @@ class MPC:
 
         # Preserve last prediction as fallback when the solver temporarily fails
         prediction_backup = self.current_prediction
+        prediction_times_backup = self.current_prediction_times
+        constraint_prediction_times_backup = (
+            self.current_constraint_prediction_times)
 
+        result_postprocess_started_at = None
         try:
 
+            optimizer_solve_start = time.perf_counter()
             dec = self.optimizer.solve()
-            if self.debug_counter % 20 == 0:
+            if ENABLE_RUNTIME_DIAGNOSTICS:
+                self.last_optimizer_solve_wall_ms.append(
+                    (time.perf_counter() - optimizer_solve_start) * 1000.0)
+            if ENABLE_RUNTIME_DIAGNOSTICS and self.debug_counter % 20 == 0:
                 print(dec.info.status,flush=True)
             t2 = time.perf_counter()
 
@@ -933,7 +1095,12 @@ class MPC:
                     self._init_problem(
                         N, self.model.safety_margin,
                         lane_relaxation=lane_relaxation)
+                    optimizer_solve_start = time.perf_counter()
                     dec = self.optimizer.solve()
+                    if ENABLE_RUNTIME_DIAGNOSTICS:
+                        self.last_optimizer_solve_wall_ms.append(
+                            (time.perf_counter() - optimizer_solve_start)
+                            * 1000.0)
                     t2 = time.perf_counter()
 
                     if is_valid_osqp_solution(dec):
@@ -947,6 +1114,7 @@ class MPC:
                     if not is_primal_infeasible(dec):
                         break
 
+            result_postprocess_started_at = time.perf_counter()
             if not is_valid_osqp_solution(dec):
                 if self.time_budget_exceeded:
                     raise ValueError(
@@ -964,7 +1132,10 @@ class MPC:
             # ステア角の計算と保存
             control_signals[1::2] = np.arctan(control_signals[1::2] * self.model.length)
             x = np.reshape(dec.x[:(N+1)*nx], (N+1, nx))
-            candidate_prediction = self.update_prediction(x, N)
+            candidate_prediction, candidate_prediction_times = (
+                self.update_prediction_with_times(x, N))
+            candidate_constraint_prediction_times = (
+                self.constraint_prediction_times(x, N))
             if not is_plausible_mpc_prediction(
                 x,
                 candidate_prediction,
@@ -991,6 +1162,9 @@ class MPC:
             # Commit the candidate only after solver and geometry validation.
             self.current_control = control_signals
             self.current_prediction = candidate_prediction
+            self.current_prediction_times = candidate_prediction_times
+            self.current_constraint_prediction_times = (
+                candidate_constraint_prediction_times)
             self.last_solution_accurate = solution_is_accurate
 
             u = np.array([v, delta])
@@ -1000,10 +1174,20 @@ class MPC:
                 print(f'Problem solved after {self.infeasibility_counter} infeasible iterations')
             self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
+            result_postprocess_wall_ms = (
+                time.perf_counter() - result_postprocess_started_at
+            ) * 1000.0
+            result_postprocess_started_at = None
 
         except (TypeError, ValueError) as error:
+            fallback_started_at = time.perf_counter()
+            if result_postprocess_started_at is not None:
+                result_postprocess_wall_ms = (
+                    fallback_started_at - result_postprocess_started_at
+                ) * 1000.0
+                result_postprocess_started_at = None
             self.failure_reason = str(error)
-            if self.debug_counter % 20 == 0:
+            if ENABLE_RUNTIME_DIAGNOSTICS and self.debug_counter % 20 == 0:
                 print(f"[MPCFallback] {error}", flush=True)
             failure_cycle = self.infeasibility_counter + 1
             fallback_id = nu * failure_cycle
@@ -1032,6 +1216,9 @@ class MPC:
                     self.current_control[fallback_id:fallback_id + 2])
                 max_delta = np.abs(u[1])
                 self.current_prediction = prediction_backup
+                self.current_prediction_times = prediction_times_backup
+                self.current_constraint_prediction_times = (
+                    constraint_prediction_times_backup)
                 self.used_prediction_fallback = True
             else:
                 # Do not drive indefinitely on an old prediction. Preserve
@@ -1039,17 +1226,26 @@ class MPC:
                 u = np.array([0.0, self.previous_steering])
                 max_delta = np.abs(self.previous_steering)
                 self.current_prediction = None
+                self.current_prediction_times = None
+                self.current_constraint_prediction_times = None
                 self.current_control = np.zeros_like(self.current_control)
                 self.recovery_requested = True
 
             self.infeasibility_counter += 1
 
+            fallback_wall_ms = (
+                time.perf_counter() - fallback_started_at) * 1000.0
+
+        tail_started_at = time.perf_counter()
         if self.infeasibility_counter > (N - 1) and self.infeasibility_counter % 100 == 0:
             now = datetime.now().strftime("%H:%M:%S.%f")
             print('No control signal computed!')
             print(now)
 
         self.debug_counter += 1
+
+        if not ENABLE_RUNTIME_DIAGNOSTICS:
+            return u, max_delta
 
         '''
         if self.debug_counter % 20 == 0:    
@@ -1074,7 +1270,125 @@ class MPC:
                 f"time={now}",
                 flush=True
             )
-        
+
+        tail_wall_ms = (time.perf_counter() - tail_started_at) * 1000.0
+        get_control_total_wall_ms = (
+            time.perf_counter() - get_control_started_at) * 1000.0
+        problem_phase_names = (
+            "problem_setup_ms",
+            "linearization_reference_ms",
+            "path_constraints_ms",
+            "sparse_matrix_ms",
+            "constraint_bounds_ms",
+            "cost_vector_ms",
+            "optimizer_update_ms",
+        )
+        problem_phase_totals_ms = {
+            name: sum(
+                float(record.get(name, 0.0))
+                for record in self.last_problem_build_phase_wall_ms
+            )
+            for name in problem_phase_names
+        }
+        path_constraint_detail_names = (
+            "path_constraint_metadata_ms",
+            "path_constraint_reference_bounds_ms",
+            "path_constraint_boundary_guard_ms",
+            "path_constraint_state_bounds_ms",
+            "path_constraint_lateral_reference_ms",
+        )
+        path_constraint_detail_totals_ms = {
+            name: sum(
+                float(record.get(name, 0.0))
+                for record in self.last_problem_build_phase_wall_ms
+            )
+            for name in path_constraint_detail_names
+        }
+        path_constraint_detail_total_ms = sum(
+            path_constraint_detail_totals_ms.values())
+        path_constraint_other_ms = max(
+            problem_phase_totals_ms["path_constraints_ms"]
+            - path_constraint_detail_total_ms,
+            0.0,
+        )
+        reference_path_detail_names = (
+            "reference_free_segments_ms",
+            "reference_combination_ms",
+            "reference_smoothing_ms",
+            "reference_other_ms",
+            "reference_internal_total_ms",
+            "reference_free_line_aa_ms",
+            "reference_free_static_map_check_ms",
+            "reference_free_dynamic_obstacle_check_ms",
+            "reference_free_dynamic_geometry_prepare_ms",
+            "reference_free_conversion_ms",
+            "reference_free_other_ms",
+            "reference_free_other_setup_ms",
+            "reference_free_other_endpoint_map_prepare_ms",
+            "reference_free_other_cell_loop_bookkeeping_ms",
+            "reference_free_other_post_loop_finalization_ms",
+            "reference_free_other_detail_total_ms",
+            "reference_free_other_remaining_ms",
+            "reference_free_internal_total_ms",
+            "reference_free_section_overhead_ms",
+        )
+        reference_path_detail_totals_ms = {
+            name: sum(
+                float(record.get(name, 0.0))
+                for record in self.last_problem_build_phase_wall_ms
+            )
+            for name in reference_path_detail_names
+        }
+        reference_timing_call_count = sum(
+            1 for record in self.last_problem_build_phase_wall_ms
+            if bool(record.get("reference_timing_available", False))
+        )
+        reference_free_timing_call_count = sum(
+            int(record.get("reference_free_timing_call_count", 0))
+            for record in self.last_problem_build_phase_wall_ms
+        )
+        reference_wrapper_overhead_ms = max(
+            path_constraint_detail_totals_ms[
+                "path_constraint_reference_bounds_ms"]
+            - reference_path_detail_totals_ms[
+                "reference_internal_total_ms"],
+            0.0,
+        )
+        solve_wall_ms = float(sum(self.last_optimizer_solve_wall_ms))
+        accounted_wall_ms = (
+            state_prepare_wall_ms
+            + sum(problem_phase_totals_ms.values())
+            + solve_wall_ms
+            + result_postprocess_wall_ms
+            + fallback_wall_ms
+            + tail_wall_ms
+        )
+        other_wall_ms = max(
+            get_control_total_wall_ms - accounted_wall_ms, 0.0)
+        self.last_get_control_timing_ms = {
+            "total_ms": get_control_total_wall_ms,
+            "solve_ms": solve_wall_ms,
+            "non_solve_ms": max(
+                get_control_total_wall_ms - solve_wall_ms, 0.0),
+            "state_prepare_ms": state_prepare_wall_ms,
+            **problem_phase_totals_ms,
+            **path_constraint_detail_totals_ms,
+            **reference_path_detail_totals_ms,
+            "path_constraint_detail_total_ms": (
+                path_constraint_detail_total_ms),
+            "path_constraint_other_ms": path_constraint_other_ms,
+            "reference_wrapper_overhead_ms": (
+                reference_wrapper_overhead_ms),
+            "reference_timing_call_count": reference_timing_call_count,
+            "reference_free_timing_call_count": (
+                reference_free_timing_call_count),
+            "result_postprocess_ms": result_postprocess_wall_ms,
+            "fallback_ms": fallback_wall_ms,
+            "tail_ms": tail_wall_ms,
+            "other_ms": other_wall_ms,
+            "problem_build_call_count": len(
+                self.last_problem_build_phase_wall_ms),
+        }
 
         return u, max_delta
 
@@ -1086,8 +1400,21 @@ class MPC:
         :return: lists of predicted x and y coordinates
         """
 
-        # Containers for x and y coordinates of predicted states
+        prediction, _ = self.update_prediction_with_times(
+            spatial_state_prediction, N)
+        return prediction
+
+    def update_prediction_with_times(self, spatial_state_prediction, N):
+        """Return world prediction and its MPC-derived relative times.
+
+        Spatial state 2 is time in seconds and starts at zero for every solve.
+        The x/y and time arrays deliberately use the identical n=2..N-1
+        spatial-state indices.
+        """
+        # Containers for x/y coordinates and matching relative times.
         x_pred, y_pred = [], []
+        prediction_times = []
+        initial_time = float(spatial_state_prediction[0, 2])
 
         # Iterate over prediction horizon
         for n in range(2, N):
@@ -1101,8 +1428,43 @@ class MPC:
             # Save predicted coordinates in world coordinate frame
             x_pred.append(predicted_temporal_state.x)
             y_pred.append(predicted_temporal_state.y)
+            relative_time = float(spatial_state_prediction[n, 2]) - initial_time
+            if not np.isfinite(relative_time) or relative_time < -1e-6:
+                raise ValueError("MPC returned an invalid prediction time")
+            prediction_times.append(max(relative_time, 0.0))
 
-        return x_pred, y_pred
+        if any(
+            later + 1e-9 < earlier
+            for earlier, later in zip(prediction_times, prediction_times[1:])
+        ):
+            raise ValueError("MPC prediction times are not monotonic")
+
+        return (x_pred, y_pred), prediction_times
+
+    @staticmethod
+    def constraint_prediction_times(spatial_state_prediction, N):
+        """Return times paired one-to-one with path-constraint indices.
+
+        Constraint index ``i`` bounds spatial state ``i + 1`` and waypoint
+        ``model.wp_id + 1 + i``.  Preserve that exact indexing here.
+        """
+        states = np.asarray(spatial_state_prediction)
+        if states.ndim != 2 or states.shape[0] < N + 1 or states.shape[1] < 3:
+            raise ValueError("MPC returned an invalid constraint time grid")
+        initial_time = float(states[0, 2])
+        times = [
+            max(float(states[index, 2]) - initial_time, 0.0)
+            for index in range(1, N + 1)
+        ]
+        if (
+            any(not np.isfinite(value) or value < 0.0 for value in times)
+            or any(
+                later + 1e-9 < earlier
+                for earlier, later in zip(times, times[1:])
+            )
+        ):
+            raise ValueError("MPC returned an invalid constraint time grid")
+        return times
 
     def show_prediction(self, ax):
         """

@@ -2,7 +2,6 @@
 
 import yaml
 import math
-import time
 import csv
 from typing import List, Tuple, Optional, NamedTuple
 import dataclasses
@@ -118,9 +117,6 @@ from multi_purpose_mpc_ros.core.MPC import (
     curvature_lateral_shift,
     lateral_reference_ramp_duration,
     zero_inverted_bounds,
-)
-from multi_purpose_mpc_ros.core.runtime_mode import (
-    ENABLE_RUNTIME_DIAGNOSTICS,
 )
 from multi_purpose_mpc_ros.core.utils import load_waypoints, kmh_to_m_per_sec, load_ref_path
 
@@ -859,11 +855,8 @@ class MPCController(Node):
             self._cfg, "center_lane_rejoin_stability", None)
         self._center_lane_rejoin_stability_enabled = bool(getattr(
             rejoin_stability_cfg, "enabled", True))
-        self._constraint_diagnostics_enabled = bool(
-            ENABLE_RUNTIME_DIAGNOSTICS
-            and getattr(
-                rejoin_stability_cfg, "constraint_diagnostics_enabled", True)
-        )
+        self._constraint_diagnostics_enabled = bool(getattr(
+            rejoin_stability_cfg, "constraint_diagnostics_enabled", True))
         self._constraint_diagnostics_points = max(int(getattr(
             rejoin_stability_cfg, "constraint_diagnostics_points", 5)), 1)
         self._center_lane_rejoin_max_heading = math.radians(max(float(getattr(
@@ -2940,31 +2933,19 @@ class MPCController(Node):
 
     def _candidate_lane_center_prediction(
         self, pose, ego_speed: float, lane_idx: int, vehicle_id=None,
-        *, include_consumed=False, timing=None,
-        geometry_frenet_cache=None,
+        *, include_consumed=False,
     ):
         """Return only the fresh MPC path solved with this lane's guidance."""
-        prediction_prepare_start = (
-            time.perf_counter() if timing is not None else None)
         if lane_idx not in (0, 2):
-            if timing is not None:
-                timing["prediction_prepare_ms"] += (
-                    time.perf_counter() - prediction_prepare_start) * 1000.0
             return None
         if not self._outer_candidate_guided_prediction_ready(
             vehicle_id, lane_idx
         ):
-            if timing is not None:
-                timing["prediction_prepare_ms"] += (
-                    time.perf_counter() - prediction_prepare_start) * 1000.0
             return None
 
         fresh_prediction = self._rebased_candidate_world_prediction(
             vehicle_id, lane_idx)
         if fresh_prediction is None:
-            if timing is not None:
-                timing["prediction_prepare_ms"] += (
-                    time.perf_counter() - prediction_prepare_start) * 1000.0
             return None
         pred_x, pred_y, prediction_times, consumed_samples = fresh_prediction
         candidate_x = [float(value) for value in pred_x]
@@ -2977,39 +2958,13 @@ class MPCController(Node):
             or any(not np.isfinite(value) for value in candidate_x)
             or any(not np.isfinite(value) for value in candidate_y)
         ):
-            if timing is not None:
-                timing["prediction_prepare_ms"] += (
-                    time.perf_counter() - prediction_prepare_start) * 1000.0
             return None
-        if timing is not None:
-            timing["prediction_prepare_ms"] += (
-                time.perf_counter() - prediction_prepare_start) * 1000.0
 
-        geometry_prepare_start = (
-            time.perf_counter() if timing is not None else None)
         samples = []
         for step, (prediction_time, sample_x, sample_y) in enumerate(zip(
             prediction_times, candidate_x, candidate_y
         )):
-            frenet_cache_key = (float(sample_x), float(sample_y))
-            if (
-                geometry_frenet_cache is not None
-                and frenet_cache_key in geometry_frenet_cache
-            ):
-                frenet = geometry_frenet_cache[frenet_cache_key]
-                if timing is not None:
-                    timing["geometry_frenet_cache_hits"] = (
-                        timing.get("geometry_frenet_cache_hits", 0) + 1)
-            else:
-                frenet = self._center_frenet(sample_x, sample_y)
-                if geometry_frenet_cache is not None:
-                    geometry_frenet_cache[frenet_cache_key] = frenet
-                if timing is not None:
-                    timing["geometry_frenet_cache_misses"] = (
-                        timing.get("geometry_frenet_cache_misses", 0) + 1)
-                    timing["geometry_center_frenet_call_count"] = (
-                        timing.get(
-                            "geometry_center_frenet_call_count", 0) + 1)
+            frenet = self._center_frenet(sample_x, sample_y)
             samples.append({
                 "step": step,
                 "time": float(prediction_time),
@@ -3018,9 +2973,6 @@ class MPCController(Node):
                 "s": None if frenet is None else float(frenet[0]),
                 "e_y": None if frenet is None else float(frenet[1]),
             })
-        if timing is not None:
-            timing["geometry_prepare_ms"] += (
-                time.perf_counter() - geometry_prepare_start) * 1000.0
         if include_consumed:
             return (
                 candidate_x, candidate_y, prediction_times, samples,
@@ -3029,49 +2981,22 @@ class MPCController(Node):
         return candidate_x, candidate_y, prediction_times, samples
 
     def _candidate_guided_prediction_terminal_fit(
-        self, pose, ego_speed: float, lane_idx: int, vehicle_id=None,
-        *, timing=None, geometry_frenet_cache=None,
+        self, pose, ego_speed: float, lane_idx: int, vehicle_id=None
     ):
         """Verify that the solved candidate trajectory reaches its outer lane."""
         candidate_prediction = self._candidate_lane_center_prediction(
-            pose, ego_speed, lane_idx, vehicle_id, timing=timing,
-            geometry_frenet_cache=geometry_frenet_cache,
-        )
+            pose, ego_speed, lane_idx, vehicle_id)
         if candidate_prediction is None:
             return None
-        terminal_fit_start = (
-            time.perf_counter() if timing is not None else None)
         candidate_x, candidate_y, _, diagnostic_samples = candidate_prediction
         if not candidate_x or len(candidate_x) != len(candidate_y):
-            if timing is not None:
-                timing["terminal_fit_ms"] += (
-                    time.perf_counter() - terminal_fit_start) * 1000.0
             return None
 
         terminal_x = float(candidate_x[-1])
         terminal_y = float(candidate_y[-1])
         terminal_lane_error = self._lane_lateral_error(
             terminal_x, terminal_y, int(lane_idx))
-        terminal_frenet_cache_key = (terminal_x, terminal_y)
-        if (
-            geometry_frenet_cache is not None
-            and terminal_frenet_cache_key in geometry_frenet_cache
-        ):
-            terminal_frenet = geometry_frenet_cache[
-                terminal_frenet_cache_key]
-            if timing is not None:
-                timing["geometry_frenet_cache_hits"] = (
-                    timing.get("geometry_frenet_cache_hits", 0) + 1)
-        else:
-            terminal_frenet = self._center_frenet(terminal_x, terminal_y)
-            if geometry_frenet_cache is not None:
-                geometry_frenet_cache[
-                    terminal_frenet_cache_key] = terminal_frenet
-            if timing is not None:
-                timing["geometry_frenet_cache_misses"] = (
-                    timing.get("geometry_frenet_cache_misses", 0) + 1)
-                timing["geometry_center_frenet_call_count"] = (
-                    timing.get("geometry_center_frenet_call_count", 0) + 1)
+        terminal_frenet = self._center_frenet(terminal_x, terminal_y)
         terminal_e_y = (
             None if terminal_frenet is None else float(terminal_frenet[1]))
 
@@ -3090,7 +3015,7 @@ class MPCController(Node):
             np.isfinite(terminal_lane_error)
             and terminal_lane_error <= allowed_error
         )
-        result = {
+        return {
             "terminal_x": terminal_x,
             "terminal_y": terminal_y,
             "terminal_e_y": terminal_e_y,
@@ -3100,16 +3025,10 @@ class MPCController(Node):
             "fit": fit,
             "terminal_sample": diagnostic_samples[-1],
         }
-        if timing is not None:
-            timing["terminal_fit_ms"] += (
-                time.perf_counter() - terminal_fit_start) * 1000.0
-        return result
 
     def _log_outer_candidate_trajectory_fit(
         self, *, source, vehicle_id, lane_idx: int, fit_result
     ) -> None:
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
         if fit_result is None:
             return
         fit = bool(fit_result["fit"])
@@ -3129,8 +3048,7 @@ class MPCController(Node):
         )
 
     def _candidate_lane_predicted_envelope_conflict(
-        self, pose, ego_speed: float, lane_idx: int, vehicle_id=None,
-        *, timing=None, collision_timing=None, geometry_frenet_cache=None,
+        self, pose, ego_speed: float, lane_idx: int, vehicle_id=None
     ):
         """Check a continuous outer transition against every active V2X.
 
@@ -3140,15 +3058,12 @@ class MPCController(Node):
         """
         candidate_prediction = self._candidate_lane_center_prediction(
             pose, ego_speed, lane_idx, vehicle_id,
-            include_consumed=True, timing=timing,
-            geometry_frenet_cache=geometry_frenet_cache,
+            include_consumed=True,
         )
         if candidate_prediction is None:
             return None
         candidate_x, candidate_y, prediction_times, diagnostic_samples, consumed_samples = (
             candidate_prediction)
-        dynamic_v2x_prepare_start = (
-            time.perf_counter() if timing is not None else None)
         moving_vehicles = []
         for vehicle_id in self._v2x_tracker.active_vehicle_ids():
             samples = self._v2x_tracker._samples.get(vehicle_id)
@@ -3160,24 +3075,18 @@ class MPCController(Node):
                 vehicle_id, float(vehicle_x), float(vehicle_y),
                 float(vehicle_vx), float(vehicle_vy),
             ))
-        if timing is not None:
-            timing["dynamic_v2x_prepare_ms"] += (
-                time.perf_counter() - dynamic_v2x_prepare_start) * 1000.0
         # This cache is observational only. Commit sites consume the exact ego
         # and traffic samples which the safety gate evaluated in this loop.
-        if ENABLE_RUNTIME_DIAGNOSTICS:
-            self._candidate_envelope_diagnostic_cache[int(lane_idx)] = {
-                "control_loop": int(self._loop),
-                "prediction_source": "candidate_guided_full_width_mpc",
-                "prediction_age": self._candidate_prediction_age_sec(),
-                "candidate_state_time_sec": self._outer_candidate_guidance.get(
-                    "candidate_state_time_sec"),
-                "consumed_prediction_samples": int(consumed_samples),
-                "samples": diagnostic_samples,
-                "moving_vehicles": list(moving_vehicles),
-            }
-        envelope_collision_start = (
-            time.perf_counter() if timing is not None else None)
+        self._candidate_envelope_diagnostic_cache[int(lane_idx)] = {
+            "control_loop": int(self._loop),
+            "prediction_source": "candidate_guided_full_width_mpc",
+            "prediction_age": self._candidate_prediction_age_sec(),
+            "candidate_state_time_sec": self._outer_candidate_guidance.get(
+                "candidate_state_time_sec"),
+            "consumed_prediction_samples": int(consumed_samples),
+            "samples": diagnostic_samples,
+            "moving_vehicles": list(moving_vehicles),
+        }
         conflict = minimum_predicted_envelope_conflict(
             candidate_x, candidate_y, prediction_times, moving_vehicles,
             project_frenet=self._center_frenet,
@@ -3186,12 +3095,7 @@ class MPCController(Node):
             other_half_width=self._v2x_parallel_vehicle_half_width,
             ego_half_length=self._parallel_ego_half_length,
             other_half_length=self._parallel_vehicle_half_length,
-            timing=collision_timing,
-            external_candidate_frenet_cache=geometry_frenet_cache,
         )
-        if timing is not None:
-            timing["envelope_collision_ms"] += (
-                time.perf_counter() - envelope_collision_start) * 1000.0
         if conflict is None:
             return None
         ego_current_frenet = self._center_frenet(pose.x, pose.y)
@@ -3300,8 +3204,6 @@ class MPCController(Node):
         speed: float, now_sec: float,
     ) -> None:
         """Attach the gate's exact lane-center samples to a new commit."""
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
         cached = self._candidate_envelope_diagnostic_cache.get(int(lane_idx))
         if cached is None or cached["control_loop"] != self._loop:
             return
@@ -3429,94 +3331,16 @@ class MPCController(Node):
         relaxation_profiles = (0.0,) + eligible_retries
 
         candidates = []
-
-        corridor_inner_start = time.perf_counter()
-        corridor_copy_sec = 0.0
-        corridor_reference_path_copy_sec = 0.0
-        corridor_waypoint_copy_sec = 0.0
-        corridor_border_cells_copy_sec = 0.0
-        corridor_unsafe_static_copy_sec = 0.0
-        corridor_update_constraints_sec = 0.0
-        corridor_profile_count = 0
-        shared_transition_collision_cache = {}
-        shared_transition_collision_cache_stats = {
-            "hits": 0,
-            "misses": 0,
-        }
-        shared_precomputed_segment_bound_cache = {}
-        shared_precomputed_segment_bound_cache_stats = {
-            "hits": 0,
-            "misses": 0,
-        }
-
-        # Every retry profile sees identical physical/static/dynamic free space.
-        # Compute that raw, pre-lane-filtering layer once; each diagnostic copy
-        # still applies its own lane relaxation, filtering, combination search,
-        # smoothing, and bound selection below.
-        precomputed_free_segments_hor = []
-        for n in range(mpc.N):
-            raw_wp = reference_path.get_waypoint(center_wp + 1 + n)
-            step_dynamic_obstacles = (
-                None if dynamic_v2x_by_step is None
-                else dynamic_v2x_by_step[n]
-            )
-            precomputed_free_segments_hor.append(
-                reference_path._compute_free_segments(
-                    raw_wp,
-                    max(float(mpc.model.width), 0.0),
-                    wp_idx=(center_wp + 1 + n),
-                    occupancy_data=static_occupancy_data,
-                    dynamic_obstacles=step_dynamic_obstacles,
-                )
-            )
-
         for lane_relaxation in relaxation_profiles:
-            corridor_profile_count += 1
-            corridor_copy_start = time.perf_counter()
-
-            reference_path_copy_start = time.perf_counter()
             diagnostic_path = copy.copy(reference_path)
-            corridor_reference_path_copy_sec += (
-                time.perf_counter() - reference_path_copy_start
-            )
-            waypoint_copy_start = time.perf_counter()
-            diagnostic_path.waypoints = list(reference_path.waypoints)
-            copied_waypoint_indices = set()
-            for horizon_index in range(mpc.N):
-                waypoint_index = center_wp + 1 + horizon_index
-                if waypoint_index >= reference_path.n_waypoints:
-                    if reference_path.circular:
-                        waypoint_index %= reference_path.n_waypoints
-                    else:
-                        waypoint_index = reference_path.n_waypoints - 1
-                if waypoint_index in copied_waypoint_indices:
-                    continue
-                diagnostic_path.waypoints[waypoint_index] = copy.copy(
-                    reference_path.waypoints[waypoint_index])
-                copied_waypoint_indices.add(waypoint_index)
-            corridor_waypoint_copy_sec += (
-                time.perf_counter() - waypoint_copy_start
-            )
-            border_cells_copy_start = time.perf_counter()
+            diagnostic_path.waypoints = [
+                copy.copy(waypoint) for waypoint in reference_path.waypoints
+            ]
             diagnostic_path.border_cells = copy.deepcopy(
                 reference_path.border_cells)
-            corridor_border_cells_copy_sec += (
-                time.perf_counter() - border_cells_copy_start
-            )
-            unsafe_static_copy_start = time.perf_counter()
             diagnostic_path.unsafe_static_fallback_wp_ids = list(
                 reference_path.unsafe_static_fallback_wp_ids)
-            corridor_unsafe_static_copy_sec += (
-                time.perf_counter() - unsafe_static_copy_start
-            )
-
-            corridor_copy_sec += (
-                time.perf_counter() - corridor_copy_start
-            )
-
             diagnostic_path.target_lane_idx = int(lane_idx)
-
-            corridor_update_start = time.perf_counter()
             upper, lower, _ = diagnostic_path.update_path_constraints(
                 center_wp + 1,
                 [pose.x, pose.y, pose.theta],
@@ -3535,21 +3359,7 @@ class MPCController(Node):
                 lane_connection_points=mpc.lane_constraint_connection_points,
                 dynamic_v2x_by_step=dynamic_v2x_by_step,
                 static_occupancy_data=static_occupancy_data,
-                precomputed_free_segments_hor=precomputed_free_segments_hor,
-                precomputed_combination_collision_cache=(
-                    shared_transition_collision_cache),
-                shared_combination_collision_cache_stats=(
-                    shared_transition_collision_cache_stats),
-                precomputed_segment_bound_cache=(
-                    shared_precomputed_segment_bound_cache),
-                shared_precomputed_segment_bound_cache_stats=(
-                    shared_precomputed_segment_bound_cache_stats),
             )
-
-            corridor_update_constraints_sec += (
-                time.perf_counter() - corridor_update_start
-            )
-
             lower, upper = apply_outer_boundary_guard(
                 lower,
                 upper,
@@ -3665,51 +3475,6 @@ class MPCController(Node):
         result["limiting_vehicle_id"] = limiting_vehicle_id
         result["time_aligned"] = dynamic_v2x_by_step is not None
         result["constraint_times"] = constraint_times
-
-        corridor_inner_total_sec = (
-            time.perf_counter() - corridor_inner_start
-        )
-        corridor_other_sec = max(
-            0.0,
-            corridor_inner_total_sec
-            - corridor_copy_sec
-            - corridor_update_constraints_sec,
-        )
-
-        if (
-            ENABLE_RUNTIME_DIAGNOSTICS
-            and corridor_inner_total_sec > 0.020
-        ):
-            self.get_logger().info(
-                "[ProspectiveCorridorTiming] "
-                f"loop={self._loop}, "
-                f"lane=L{lane_idx}, "
-                f"profiles={corridor_profile_count}, "
-                f"relaxations={relaxation_profiles}, "
-                f"copy={corridor_copy_sec * 1000.0:.1f}ms, "
-                f"copy_ms={corridor_copy_sec * 1000.0:.3f}, "
-                "reference_path_copy_ms="
-                f"{corridor_reference_path_copy_sec * 1000.0:.3f}, "
-                "waypoint_copy_ms="
-                f"{corridor_waypoint_copy_sec * 1000.0:.3f}, "
-                "border_cells_copy_ms="
-                f"{corridor_border_cells_copy_sec * 1000.0:.3f}, "
-                "unsafe_static_copy_ms="
-                f"{corridor_unsafe_static_copy_sec * 1000.0:.3f}, "
-                f"update_constraints="
-                f"{corridor_update_constraints_sec * 1000.0:.1f}ms, "
-                f"other={corridor_other_sec * 1000.0:.1f}ms, "
-                f"total={corridor_inner_total_sec * 1000.0:.1f}ms, "
-                "shared_transition_cache_hits="
-                f"{shared_transition_collision_cache_stats['hits']}, "
-                "shared_transition_cache_misses="
-                f"{shared_transition_collision_cache_stats['misses']}, "
-                "precomputed_bound_cache_hits="
-                f"{shared_precomputed_segment_bound_cache_stats['hits']}, "
-                "precomputed_bound_cache_misses="
-                f"{shared_precomputed_segment_bound_cache_stats['misses']}"
-            )
-
         return result
 
     def _log_outer_commit_corridor_prospective(
@@ -3728,28 +3493,26 @@ class MPCController(Node):
             return None
         if result is None:
             return None
-        if ENABLE_RUNTIME_DIAGNOSTICS:
-            min_index = result["min_index"]
-            min_wp = int(result["wp_ids"][min_index])
-            nearest = result["nearest_obstacle_clearance"]
-            nearest_text = (
-                f"{nearest:.3f}m" if math.isfinite(nearest) else "none")
-            self.get_logger().info(
-                "[OuterCommitCorridorProspective] gate_active=True, "
-                f"source={source}, vehicle_id={vehicle_id}, lane=L{lane_idx}, "
-                f"center_wp={result['center_wp']}, "
-                f"base_width_min={result['base_width_min']:.3f}m, "
-                "prospective_effective_width_min="
-                f"{result['min_width']:.3f}m, "
-                f"min_index={min_index}, min_wp={min_wp}, "
-                f"required_width={result['required_width']:.3f}m, "
-                f"below_required_width={result['below_required_count']}/"
-                f"{len(result['widths'])}, "
-                f"nearest_obstacle_clearance={nearest_text}, "
-                f"limiting_vehicle={result['limiting_vehicle_id']}, "
-                f"lane_relaxation={result['lane_relaxation']:.3f}m, "
-                f"would_block={result['would_block']}"
-            )
+        min_index = result["min_index"]
+        min_wp = int(result["wp_ids"][min_index])
+        nearest = result["nearest_obstacle_clearance"]
+        nearest_text = (
+            f"{nearest:.3f}m" if math.isfinite(nearest) else "none")
+        self.get_logger().info(
+            "[OuterCommitCorridorProspective] gate_active=True, "
+            f"source={source}, vehicle_id={vehicle_id}, lane=L{lane_idx}, "
+            f"center_wp={result['center_wp']}, "
+            f"base_width_min={result['base_width_min']:.3f}m, "
+            f"prospective_effective_width_min={result['min_width']:.3f}m, "
+            f"min_index={min_index}, min_wp={min_wp}, "
+            f"required_width={result['required_width']:.3f}m, "
+            f"below_required_width={result['below_required_count']}/"
+            f"{len(result['widths'])}, "
+            f"nearest_obstacle_clearance={nearest_text}, "
+            f"limiting_vehicle={result['limiting_vehicle_id']}, "
+            f"lane_relaxation={result['lane_relaxation']:.3f}m, "
+            f"would_block={result['would_block']}"
+        )
         return result
 
     def _outer_commit_corridor_would_block(
@@ -3785,8 +3548,6 @@ class MPCController(Node):
         now_sec: float,
     ) -> None:
         """Record the first fresh accurate outer-constrained MPC solution."""
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
         record = self._outer_commit_prediction_diagnostic
         if record is None:
             return
@@ -3862,8 +3623,6 @@ class MPCController(Node):
         self, conflict, *, now_sec: float,
     ) -> None:
         """Log blocker envelopes for an early post-commit conflict."""
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
         record = self._outer_commit_prediction_diagnostic
         if record is None or conflict is None:
             return
@@ -4282,8 +4041,8 @@ class MPCController(Node):
         self._prepass_fallback_recovery_stable_since = None
         self._clear_prepass_soft_objective()
         self.get_logger().warn(
-            "[PrepassSoftNeutralHoldEnter] current outer ownership became "
-            "unsafe; clearing its objective and retaining "
+            "[PrepassSoftNeutralHoldEnter] current outer soft candidate "
+            "became binary-unsafe; clearing only its objective and retaining "
             "full-width recovery: "
             f"vehicle_id={self._overtake_target_vehicle_id}, "
             f"unsafe_candidate=L{current_candidate}, "
@@ -5359,144 +5118,6 @@ class MPCController(Node):
         if alpha >= 1.0:
             self._race_rejoin_handoff_guidance_ready = True
 
-    def _record_mpc_solve_timing(
-        self, mpc, source: str, get_control_wall_ms: float,
-    ) -> None:
-        """Record diagnostic-only OSQP and enclosing MPC wall time."""
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
-        solve_times_ms = list(getattr(
-            mpc, "last_optimizer_solve_wall_ms", ()))
-        solve_wall_total_ms = float(sum(solve_times_ms))
-        solve_wall_max_ms = float(max(solve_times_ms, default=0.0))
-        solve_call_count = len(solve_times_ms)
-        valid = bool(
-            mpc.infeasibility_counter == 0
-            and mpc.current_prediction is not None
-            and not getattr(mpc, "used_prediction_fallback", False)
-            and not mpc.recovery_requested
-            and not mpc.time_budget_exceeded
-            and bool(getattr(mpc, "last_solution_accurate", False))
-        )
-        record = {
-            "source": source,
-            "solve_call_count": solve_call_count,
-            "solve_wall_total_ms": solve_wall_total_ms,
-            "solve_wall_max_ms": solve_wall_max_ms,
-            "get_control_wall_ms": float(get_control_wall_ms),
-            "valid": valid,
-        }
-        self._control_mpc_timing_records.append(record)
-        self.get_logger().info(
-            "[MPCSolveTiming] "
-            f"loop={self._loop}, "
-            f"source={source}, "
-            f"solve_wall_ms={solve_wall_total_ms:.3f}, "
-            f"solve_call_count={solve_call_count}, "
-            f"solve_wall_max_ms={solve_wall_max_ms:.3f}, "
-            f"get_control_wall_ms={get_control_wall_ms:.3f}, "
-            f"valid={valid}"
-        )
-        get_control_timing = getattr(
-            mpc, "last_get_control_timing_ms", None)
-        if (
-            isinstance(get_control_timing, dict)
-            and (
-                float(get_control_wall_ms) > 20.0
-                or self._loop % 40 == 0
-            )
-        ):
-            self.get_logger().info(
-                "[MPCGetControlTiming] "
-                f"loop={self._loop}, "
-                f"source={source}, "
-                f"total_ms={get_control_timing['total_ms']:.3f}, "
-                f"solve_ms={get_control_timing['solve_ms']:.3f}, "
-                f"non_solve_ms={get_control_timing['non_solve_ms']:.3f}, "
-                f"state_prepare_ms={get_control_timing['state_prepare_ms']:.3f}, "
-                f"problem_setup_ms={get_control_timing['problem_setup_ms']:.3f}, "
-                "linearization_reference_ms="
-                f"{get_control_timing['linearization_reference_ms']:.3f}, "
-                f"path_constraints_ms={get_control_timing['path_constraints_ms']:.3f}, "
-                f"sparse_matrix_ms={get_control_timing['sparse_matrix_ms']:.3f}, "
-                f"constraint_bounds_ms={get_control_timing['constraint_bounds_ms']:.3f}, "
-                f"cost_vector_ms={get_control_timing['cost_vector_ms']:.3f}, "
-                f"optimizer_update_ms={get_control_timing['optimizer_update_ms']:.3f}, "
-                f"result_postprocess_ms={get_control_timing['result_postprocess_ms']:.3f}, "
-                f"fallback_ms={get_control_timing['fallback_ms']:.3f}, "
-                f"tail_ms={get_control_timing['tail_ms']:.3f}, "
-                f"other_ms={get_control_timing['other_ms']:.3f}, "
-                "problem_build_call_count="
-                f"{get_control_timing['problem_build_call_count']}, "
-                f"valid={valid}"
-            )
-            self.get_logger().info(
-                "[MPCPathConstraintsTiming] "
-                f"loop={self._loop}, "
-                f"source={source}, "
-                "path_constraints_total_ms="
-                f"{get_control_timing['path_constraints_ms']:.3f}, "
-                f"metadata_ms={get_control_timing['path_constraint_metadata_ms']:.3f}, "
-                "reference_path_bounds_ms="
-                f"{get_control_timing['path_constraint_reference_bounds_ms']:.3f}, "
-                "boundary_guard_ms="
-                f"{get_control_timing['path_constraint_boundary_guard_ms']:.3f}, "
-                "state_bounds_ms="
-                f"{get_control_timing['path_constraint_state_bounds_ms']:.3f}, "
-                "lateral_reference_ms="
-                f"{get_control_timing['path_constraint_lateral_reference_ms']:.3f}, "
-                "reference_free_segments_ms="
-                f"{get_control_timing['reference_free_segments_ms']:.3f}, "
-                "reference_combination_ms="
-                f"{get_control_timing['reference_combination_ms']:.3f}, "
-                "reference_smoothing_ms="
-                f"{get_control_timing['reference_smoothing_ms']:.3f}, "
-                "reference_other_ms="
-                f"{get_control_timing['reference_other_ms']:.3f}, "
-                "reference_internal_total_ms="
-                f"{get_control_timing['reference_internal_total_ms']:.3f}, "
-                "reference_wrapper_overhead_ms="
-                f"{get_control_timing['reference_wrapper_overhead_ms']:.3f}, "
-                "reference_timing_call_count="
-                f"{get_control_timing['reference_timing_call_count']}, "
-                "reference_free_line_aa_ms="
-                f"{get_control_timing['reference_free_line_aa_ms']:.3f}, "
-                "reference_free_static_map_check_ms="
-                f"{get_control_timing['reference_free_static_map_check_ms']:.3f}, "
-                "reference_free_dynamic_obstacle_check_ms="
-                f"{get_control_timing['reference_free_dynamic_obstacle_check_ms']:.3f}, "
-                "reference_free_dynamic_geometry_prepare_ms="
-                f"{get_control_timing['reference_free_dynamic_geometry_prepare_ms']:.3f}, "
-                "reference_free_conversion_ms="
-                f"{get_control_timing['reference_free_conversion_ms']:.3f}, "
-                "reference_free_other_ms="
-                f"{get_control_timing['reference_free_other_ms']:.3f}, "
-                "reference_free_other_setup_ms="
-                f"{get_control_timing['reference_free_other_setup_ms']:.3f}, "
-                "reference_free_other_endpoint_map_prepare_ms="
-                f"{get_control_timing['reference_free_other_endpoint_map_prepare_ms']:.3f}, "
-                "reference_free_other_cell_loop_bookkeeping_ms="
-                f"{get_control_timing['reference_free_other_cell_loop_bookkeeping_ms']:.3f}, "
-                "reference_free_other_post_loop_finalization_ms="
-                f"{get_control_timing['reference_free_other_post_loop_finalization_ms']:.3f}, "
-                "reference_free_other_detail_total_ms="
-                f"{get_control_timing['reference_free_other_detail_total_ms']:.3f}, "
-                "reference_free_other_remaining_ms="
-                f"{get_control_timing['reference_free_other_remaining_ms']:.3f}, "
-                "reference_free_internal_total_ms="
-                f"{get_control_timing['reference_free_internal_total_ms']:.3f}, "
-                "reference_free_section_overhead_ms="
-                f"{get_control_timing['reference_free_section_overhead_ms']:.3f}, "
-                "reference_free_timing_call_count="
-                f"{get_control_timing['reference_free_timing_call_count']}, "
-                "detail_total_ms="
-                f"{get_control_timing['path_constraint_detail_total_ms']:.3f}, "
-                f"other_ms={get_control_timing['path_constraint_other_ms']:.3f}, "
-                "problem_build_call_count="
-                f"{get_control_timing['problem_build_call_count']}, "
-                f"valid={valid}"
-            )
-
     def _run_race_rejoin_probe(self, predicted_pose, recovery_active, now_sec,
                                heading_ok, heading_released):
         if not self._race_rejoin_handoff_active or not self._race_rejoin_handoff_guidance_ready:
@@ -5524,13 +5145,7 @@ class MPCController(Node):
         self._mpcN_race.set_soft_lateral_reference()
         self._mpcN_race.update_wp_id_offset(0)
         self._mpcN_race.previous_steering = self._mpcN_center.previous_steering
-        probe_control_start = time.perf_counter()
         self._mpcN_race.get_control()
-        self._record_mpc_solve_timing(
-            self._mpcN_race,
-            "probe",
-            (time.perf_counter() - probe_control_start) * 1000.0,
-        )
         success = (
             not self._mpcN_race.recovery_requested
             and self._mpcN_race.infeasibility_counter == 0
@@ -7994,10 +7609,6 @@ class MPCController(Node):
             # Race / Center 両軌道に境界線を反映（切り替え後も正しく動作するよう両方更新）
             self._reference_pathN_race.update_boundaries_from_markers(left_arr, right_arr)
             self._reference_pathN_center.update_boundaries_from_markers(left_arr, right_arr)
-            lane_marker_cache = getattr(self, "_lane_marker_cache", None)
-            if lane_marker_cache is not None:
-                lane_marker_cache.clear()
-            self._lane_marker_last_published_cache_key = None
 
             self.destroy_subscription(self._map_marker_sub)
 
@@ -8111,8 +7722,6 @@ class MPCController(Node):
             self._wait_until_message_received(lambda: self._reference_path.path_constraints, 'path constraints', timeout)
 
     def _publish_mpc_pred_marker(self, x_pred, y_pred):
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
         pred_marker_array = MarkerArray()
         clear_marker = Marker()
         clear_marker.header.frame_id = "map"
@@ -8137,8 +7746,6 @@ class MPCController(Node):
         self._mpc_pred_pub_dummy.publish(pred_marker_array)
 
     def _clear_mpc_pred_markers(self):
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
         marker_array = MarkerArray()
         marker = Marker()
         marker.header.frame_id = "map"
@@ -8148,72 +7755,14 @@ class MPCController(Node):
         self._mpc_pred_pub.publish(marker_array)
         self._mpc_pred_pub_dummy.publish(marker_array)
 
-    def _publish_lane_markers(
-        self, ref_path: ReferencePath, n_lanes: int = 3, *, use_cache=True,
-    ) -> None:
+    def _publish_lane_markers(self, ref_path: ReferencePath, n_lanes: int = 3) -> None:
         """
         3車線の範囲を塗りつぶしたMarkerArray(TRIANGLE_LIST)としてRvizに描画
         追い越し許可ゾーン → L0=赤, L1=黄, L2=緑
         追い越し不可ゾーン → グレー 
         ターゲット車線はより不透明度を高くして強調表示する
         """
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
-        timing_start = time.perf_counter()
-        cache_lookup_start = time.perf_counter()
         import math
-        target_lane_idx = getattr(ref_path, "target_lane_idx", None)
-        cache_key = (
-            id(ref_path), int(n_lanes), target_lane_idx, float(self._map_z))
-        cache_hit = False
-        cache_miss = bool(use_cache)
-        if use_cache:
-            lane_marker_cache = getattr(self, "_lane_marker_cache", None)
-            if lane_marker_cache is None:
-                lane_marker_cache = {}
-                self._lane_marker_cache = lane_marker_cache
-            cached_markers = lane_marker_cache.get(cache_key)
-            if cached_markers is not None:
-                cache_hit = True
-                cache_miss = False
-                cache_lookup_end = time.perf_counter()
-                publish_start = time.perf_counter()
-                # /mpc/lane_bounds is RELIABLE/TRANSIENT_LOCAL with depth 1,
-                # and these markers keep the default zero (forever) lifetime.
-                # Republish only when the latest retained MarkerArray differs.
-                publish_skipped = (
-                    getattr(
-                        self,
-                        "_lane_marker_last_published_cache_key",
-                        None,
-                    ) == cache_key
-                )
-                if not publish_skipped:
-                    self._lane_marker_pub.publish(cached_markers)
-                    self._lane_marker_last_published_cache_key = cache_key
-                publish_end = time.perf_counter()
-                timing_end = time.perf_counter()
-                loop = getattr(self, "_loop", None)
-                if loop is not None:
-                    control_rate = int(self._mpc_cfg.control_rate)
-                    if loop % control_rate == 0:
-                        self.get_logger().info(
-                            "[LaneMarkerTiming] "
-                            f"loop={loop}, "
-                            f"cache_hit={cache_hit}, "
-                            f"cache_miss={cache_miss}, "
-                            "cache_lookup_ms="
-                            f"{(cache_lookup_end - cache_lookup_start) * 1000.0:.3f}, "
-                            "geometry_build_ms=0.000, "
-                            f"publish_ms={(publish_end - publish_start) * 1000.0:.3f}, "
-                            f"publish_skipped={publish_skipped}, "
-                            f"total_ms={(timing_end - timing_start) * 1000.0:.3f}, "
-                            f"marker_count={len(cached_markers.markers)}"
-                        )
-                return
-        cache_lookup_end = time.perf_counter()
-        geometry_build_start = time.perf_counter()
-
         markers = MarkerArray()
 
         N = ref_path.n_waypoints
@@ -8234,7 +7783,7 @@ class MPCController(Node):
             m.pose.orientation.w = 1.0
 
             # ターゲット車線（強調表示）か通常の車線かで不透明度(Alpha)を変える
-            is_target_lane = target_lane_idx == lane_idx
+            is_target_lane = hasattr(ref_path, 'target_lane_idx') and ref_path.target_lane_idx == lane_idx
             if is_target_lane:
                 lane_colors = [
                     ColorRGBA(r=0.9, g=0.2, b=0.2, a=0.55),   # L0 内側  赤
@@ -8348,36 +7897,9 @@ class MPCController(Node):
 
             markers.markers.append(m)
 
-        geometry_build_end = time.perf_counter()
-        if use_cache:
-            lane_marker_cache[cache_key] = markers
-        publish_start = time.perf_counter()
         self._lane_marker_pub.publish(markers)
-        self._lane_marker_last_published_cache_key = cache_key
-        publish_end = time.perf_counter()
-        timing_end = time.perf_counter()
-        loop = getattr(self, "_loop", None)
-        if loop is not None:
-            control_rate = int(self._mpc_cfg.control_rate)
-            if loop % control_rate == 0:
-                self.get_logger().info(
-                    "[LaneMarkerTiming] "
-                    f"loop={loop}, "
-                    f"cache_hit={cache_hit}, "
-                    f"cache_miss={cache_miss}, "
-                    "cache_lookup_ms="
-                    f"{(cache_lookup_end - cache_lookup_start) * 1000.0:.3f}, "
-                    "geometry_build_ms="
-                    f"{(geometry_build_end - geometry_build_start) * 1000.0:.3f}, "
-                    f"publish_ms={(publish_end - publish_start) * 1000.0:.3f}, "
-                    "publish_skipped=False, "
-                    f"total_ms={(timing_end - timing_start) * 1000.0:.3f}, "
-                    f"marker_count={len(markers.markers)}"
-                )
 
     def _publish_ref_path_marker(self, ref_path: ReferencePath):
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
         WP_SPHERE_ENABLED = False
 
         ref_path_marker_array = MarkerArray()
@@ -8425,10 +7947,6 @@ class MPCController(Node):
         self._ref_path_pub_dummy.publish(ref_path_marker_array)
 
     def _control(self):
-        wall_cycle_start = time.perf_counter()
-        self._control_mpc_timing_records = []
-        control_phase_wall_ms = {}
-
         now = self.get_clock().now()
         current_time_sec = float(now.nanoseconds) / 1e9
         t = (now - self._t_start).nanoseconds / 1e9
@@ -8442,9 +7960,7 @@ class MPCController(Node):
             self._stats.record()
 
         # 制御周期を維持
-        wall_sleep_start = time.perf_counter()
         self._control_rate.sleep()
-        wall_after_sleep = time.perf_counter()
 
         # Take the snapshot after the rate wait and apply exactly that generation
         # to the obstacle map.  A boolean notification can be overwritten by the
@@ -9680,7 +9196,6 @@ class MPCController(Node):
 
 
         # --- Overtaking Lane Selection Logic ---
-        overtake_selection_start = time.perf_counter()
         if not hasattr(self, '_target_lane_idx'):
             self._target_lane_idx = None
 
@@ -9842,17 +9357,8 @@ class MPCController(Node):
             right_is_free = False
         elif opponent_ahead_detected and opponent_ahead is not None:
             if is_overtake_zone:
-                phase_start = time.perf_counter()
                 horizon_passage, _ = self._vehicle_passage(
                     opponent_vehicle_id, pose)
-                phase_ms = (time.perf_counter() - phase_start) * 1000.0
-                control_phase_wall_ms["vehicle_passage"] = phase_ms
-                if ENABLE_RUNTIME_DIAGNOSTICS and phase_ms > 20.0:
-                    self.get_logger().info(
-                        "[ControlPhaseTiming] "
-                        f"loop={self._loop}, "
-                        f"phase=vehicle_passage, wall={phase_ms:.1f}ms"
-                    )
                 # L0EntryProhibited applies early only to ordinary new
                 # overtake candidates. Keep the physical passage result intact
                 # for stopped/deadlock/Prepass/SafetyRecovery processing.
@@ -9876,7 +9382,6 @@ class MPCController(Node):
                     or future_l0_prohibited
                 ):
                     ordinary_horizon_passage[0] = False
-                phase_start = time.perf_counter()
                 horizon_samples = self._relative_lane_vehicle_samples(pose, v)
                 horizon_conflicts = {
                     lane_idx: classify_lane_conflicts(
@@ -9891,14 +9396,6 @@ class MPCController(Node):
                     )
                     for lane_idx in (0, 2)
                 }
-                phase_ms = (time.perf_counter() - phase_start) * 1000.0
-                control_phase_wall_ms["horizon_conflicts"] = phase_ms
-                if ENABLE_RUNTIME_DIAGNOSTICS and phase_ms > 20.0:
-                    self.get_logger().info(
-                        "[ControlPhaseTiming] "
-                        f"loop={self._loop}, "
-                        f"phase=horizon_conflicts, wall={phase_ms:.1f}ms"
-                    )
                 future_l0_candidate_excluded = bool(
                     future_l0_prohibited
                     and horizon_passage.get(0, False)
@@ -9991,20 +9488,11 @@ class MPCController(Node):
                     len(ordinary_commit_outer_lanes) == 2
                     and ordinary_new_candidate
                 ):
-                    phase_start = time.perf_counter()
                     (
                         ordinary_lane_quality,
                         ordinary_lane_limiting_vehicle,
                         ordinary_lane_tie_margin,
                     ) = self._ordinary_outer_lane_quality(pose, v)
-                    phase_ms = (time.perf_counter() - phase_start) * 1000.0
-                    control_phase_wall_ms["lane_quality"] = phase_ms
-                    if ENABLE_RUNTIME_DIAGNOSTICS and phase_ms > 20.0:
-                        self.get_logger().info(
-                            "[ControlPhaseTiming] "
-                            f"loop={self._loop}, "
-                            f"phase=lane_quality, wall={phase_ms:.1f}ms"
-                        )
                     selected_outer_lane, selection_reason = (
                         select_ranked_safe_outer_lane(
                             new_target_lane_idx,
@@ -10450,60 +9938,6 @@ class MPCController(Node):
                 self._parallel_timer_vehicle_id = None
                 self._parallel_start_time = None
 
-        preempt_evaluation_start = time.perf_counter()
-        preempt_target_prep_ms = 0.0
-        preempt_passage_evaluation_ms = 0.0
-        preempt_lane_candidate_ms = 0.0
-        preempt_prospective_ms = 0.0
-        preempt_prospective_l0_ms = 0.0
-        preempt_prospective_l2_ms = 0.0
-        preempt_prediction_envelope_ms = 0.0
-        preempt_prediction_envelope_detail = (
-            {
-                "guidance_check_ms": 0.0,
-                "prediction_prepare_ms": 0.0,
-                "geometry_prepare_ms": 0.0,
-                "dynamic_v2x_prepare_ms": 0.0,
-                "envelope_collision_ms": 0.0,
-                "terminal_fit_ms": 0.0,
-                "geometry_frenet_cache_hits": 0,
-                "geometry_frenet_cache_misses": 0,
-                "geometry_center_frenet_call_count": 0,
-            }
-            if ENABLE_RUNTIME_DIAGNOSTICS else None
-        )
-        preempt_envelope_collision_detail = (
-            {} if ENABLE_RUNTIME_DIAGNOSTICS else None)
-        preempt_stability_ms = 0.0
-        preempt_commit_decision_ms = 0.0
-
-        def timed_preempt_corridor_would_block(lane_idx):
-            nonlocal preempt_prospective_ms
-            nonlocal preempt_prospective_l0_ms
-            nonlocal preempt_prospective_l2_ms
-            if not ENABLE_RUNTIME_DIAGNOSTICS:
-                return self._outer_commit_corridor_would_block(
-                    source="preempt",
-                    vehicle_id=opponent_vehicle_id,
-                    lane_idx=lane_idx,
-                    pose=pose,
-                )
-            prospective_start = time.perf_counter()
-            result = self._outer_commit_corridor_would_block(
-                source="preempt",
-                vehicle_id=opponent_vehicle_id,
-                lane_idx=lane_idx,
-                pose=pose,
-            )
-            elapsed_ms = (
-                time.perf_counter() - prospective_start) * 1000.0
-            preempt_prospective_ms += elapsed_ms
-            if lane_idx == 0:
-                preempt_prospective_l0_ms += elapsed_ms
-            elif lane_idx == 2:
-                preempt_prospective_l2_ms += elapsed_ms
-            return result
-
         prepass_selection_exclusive = (
             recovery_active
             or self._post_reverse_full_width_recovery_active
@@ -10533,7 +9967,7 @@ class MPCController(Node):
         # current/predicted V2X traffic, continuing to force L1 can remove a
         # valid passing opportunity. Allow that verified candidate to preempt
         # normal L1 rejoin regardless of the lead vehicle's stopped state.
-        preempt_eligible = bool(
+        if (
             exclusive_l1_rejoin
             and not self._follow_only
             and not startup_overtake_suppressed
@@ -10546,11 +9980,7 @@ class MPCController(Node):
             and self._mpc.infeasibility_counter == 0
             and self._mpc.current_prediction is not None
             and not self._mpc_safety_recovery_active
-        )
-        preempt_target_prep_ms = (
-            time.perf_counter() - preempt_evaluation_start) * 1000.0
-        if preempt_eligible:
-            preempt_passage_start = time.perf_counter()
+        ):
             preempt_passage, _ = self._vehicle_passage(
                 opponent_vehicle_id, pose)
             # This is also an ordinary new overtake request. Do not mutate the
@@ -10561,9 +9991,6 @@ class MPCController(Node):
                 or l0_recovery_exit_hold
             ):
                 ordinary_preempt_passage[0] = False
-            preempt_passage_evaluation_ms = (
-                time.perf_counter() - preempt_passage_start) * 1000.0
-            preempt_lane_candidate_start = time.perf_counter()
             preempt_samples = self._relative_lane_vehicle_samples(pose, v)
             preempt_conflicts = {
                 lane_idx: classify_lane_conflicts(
@@ -10601,11 +10028,14 @@ class MPCController(Node):
                 ordinary_preempt_passage,
                 preempt_conflicts,
             )
-            preempt_lane_candidate_ms = (
-                time.perf_counter() - preempt_lane_candidate_start) * 1000.0
             if (
                 preempt_lane_idx in (0, 2)
-                and timed_preempt_corridor_would_block(preempt_lane_idx)
+                and self._outer_commit_corridor_would_block(
+                    source="preempt",
+                    vehicle_id=opponent_vehicle_id,
+                    lane_idx=preempt_lane_idx,
+                    pose=pose,
+                )
             ):
                 ordinary_preempt_passage[preempt_lane_idx] = False
                 preempt_lane_idx = select_safe_outer_lane(
@@ -10614,11 +10044,14 @@ class MPCController(Node):
                     preempt_conflicts,
                 )
                 if preempt_lane_idx in (0, 2):
-                    if timed_preempt_corridor_would_block(preempt_lane_idx):
+                    if self._outer_commit_corridor_would_block(
+                        source="preempt",
+                        vehicle_id=opponent_vehicle_id,
+                        lane_idx=preempt_lane_idx,
+                        pose=pose,
+                    ):
                         preempt_lane_idx = None
             if preempt_lane_idx in (0, 2):
-                preempt_prediction_envelope_start = time.perf_counter()
-                preempt_guidance_check_start = time.perf_counter()
                 self._arm_outer_candidate_guidance(
                     vehicle_id=opponent_vehicle_id,
                     lane_idx=preempt_lane_idx,
@@ -10629,41 +10062,16 @@ class MPCController(Node):
                     self._outer_candidate_guided_prediction_ready(
                         opponent_vehicle_id, preempt_lane_idx)
                 )
-                if ENABLE_RUNTIME_DIAGNOSTICS:
-                    preempt_prediction_envelope_detail[
-                        "guidance_check_ms"
-                    ] = (
-                        time.perf_counter() - preempt_guidance_check_start
-                    ) * 1000.0
                 preempt_envelope_conflict = None
                 preempt_terminal_fit = None
                 if preempt_guided_ready:
-                    preempt_geometry_frenet_cache = {}
                     preempt_envelope_conflict = (
                         self._candidate_lane_predicted_envelope_conflict(
-                            pose, v, preempt_lane_idx, opponent_vehicle_id,
-                            timing=(
-                                preempt_prediction_envelope_detail
-                                if ENABLE_RUNTIME_DIAGNOSTICS else None
-                            ),
-                            collision_timing=(
-                                preempt_envelope_collision_detail
-                                if ENABLE_RUNTIME_DIAGNOSTICS else None
-                            ),
-                            geometry_frenet_cache=(
-                                preempt_geometry_frenet_cache),
-                        )
+                            pose, v, preempt_lane_idx, opponent_vehicle_id)
                     )
                     preempt_terminal_fit = (
                         self._candidate_guided_prediction_terminal_fit(
-                            pose, v, preempt_lane_idx, opponent_vehicle_id,
-                            timing=(
-                                preempt_prediction_envelope_detail
-                                if ENABLE_RUNTIME_DIAGNOSTICS else None
-                            ),
-                            geometry_frenet_cache=(
-                                preempt_geometry_frenet_cache),
-                        )
+                            pose, v, preempt_lane_idx, opponent_vehicle_id)
                     )
                     self._log_outer_candidate_trajectory_fit(
                         source="preempt",
@@ -10694,12 +10102,7 @@ class MPCController(Node):
                             throttle_duration_sec=1.0,
                         )
                     preempt_lane_idx = None
-                if ENABLE_RUNTIME_DIAGNOSTICS:
-                    preempt_prediction_envelope_ms = (
-                        time.perf_counter()
-                        - preempt_prediction_envelope_start) * 1000.0
             if preempt_lane_idx in (0, 2):
-                preempt_stability_start = time.perf_counter()
                 candidate_heading = self._candidate_lane_heading(
                     preempt_lane_idx, wp)
                 candidate_heading_error = absolute_heading_difference(
@@ -10716,9 +10119,6 @@ class MPCController(Node):
                         <= self._center_lane_rejoin_max_yaw_rate
                     and fresh_full_width_prediction
                 )
-                preempt_stability_ms = (
-                    time.perf_counter() - preempt_stability_start) * 1000.0
-                preempt_commit_decision_start = time.perf_counter()
                 if preempt_entry_stable:
                     preempt_reference_handoff_captured = (
                         self._capture_outer_candidate_reference_handoff(
@@ -10762,10 +10162,6 @@ class MPCController(Node):
                         f"{fresh_full_width_prediction}",
                         throttle_duration_sec=1.0,
                     )
-                preempt_commit_decision_ms = (
-                    time.perf_counter()
-                    - preempt_commit_decision_start) * 1000.0
-        candidate_commit_selection_start = time.perf_counter()
         motionhold_record = self._motionhold_validated_full_width
         if motionhold_record is not None:
             if not ordinary_horizon_candidate:
@@ -10850,7 +10246,6 @@ class MPCController(Node):
             ):
                 # Binary/ranking has selected the candidate. Verify the
                 # prospective hard corridor before arming its soft guidance.
-                phase_start = time.perf_counter()
                 while (
                     new_target_lane_idx in (0, 2)
                     and self._outer_commit_corridor_would_block(
@@ -10872,14 +10267,6 @@ class MPCController(Node):
                     )
                     ordinary_horizon_candidate = (
                         new_target_lane_idx in (0, 2))
-                phase_ms = (time.perf_counter() - phase_start) * 1000.0
-                control_phase_wall_ms["commit_corridor"] = phase_ms
-                if ENABLE_RUNTIME_DIAGNOSTICS and phase_ms > 20.0:
-                    self.get_logger().info(
-                        "[ControlPhaseTiming] "
-                        f"loop={self._loop}, "
-                        f"phase=commit_corridor, wall={phase_ms:.1f}ms"
-                    )
                 if not ordinary_horizon_candidate:
                     new_target_lane_idx = 1
                 else:
@@ -10890,7 +10277,6 @@ class MPCController(Node):
                         source="normal",
                         now_sec=current_time_sec,
                     )
-                    phase_start = time.perf_counter()
                     guided_prediction_ready = (
                         self._outer_candidate_guided_prediction_ready(
                             opponent_vehicle_id, guided_lane_idx)
@@ -10919,15 +10305,6 @@ class MPCController(Node):
                             vehicle_id=opponent_vehicle_id,
                             lane_idx=guided_lane_idx,
                             fit_result=guided_terminal_fit,
-                        )
-                    phase_ms = (time.perf_counter() - phase_start) * 1000.0
-                    control_phase_wall_ms[
-                        "guided_candidate_checks"] = phase_ms
-                    if ENABLE_RUNTIME_DIAGNOSTICS and phase_ms > 20.0:
-                        self.get_logger().info(
-                            "[ControlPhaseTiming] "
-                            f"loop={self._loop}, "
-                            f"phase=guided_candidate_checks, wall={phase_ms:.1f}ms"
                         )
                     if (
                         not guided_prediction_ready
@@ -11174,7 +10551,6 @@ class MPCController(Node):
                         throttle_duration_sec=0.5,
                     )
                 self._motionhold_validated_full_width = None
-        recovery_lane_safety_start = time.perf_counter()
         if (
             self._parallel_abort_active
             and not prepass_selection_exclusive
@@ -11585,31 +10961,6 @@ class MPCController(Node):
                     self._prepass_fallback_commit_pending = False
                     self._prepass_fallback_commit_lane_idx = None
                     self._prepass_fallback_commit_success_since = None
-                    # A committed outer lane becoming unsafe is itself the
-                    # start of a neutral recovery episode.  Do not wait for a
-                    # later soft candidate to become unsafe before disabling
-                    # lateral objective ownership: the opposite candidate may
-                    # be tracked, but it must earn the existing MPC/heading/
-                    # lateral-speed/yaw stability interval before guidance.
-                    self._enter_prepass_soft_neutral_hold(
-                        current_candidate=latched_lane_idx,
-                        next_candidate=(
-                            opposite_lane_idx if opposite_lane_safe else None
-                        ),
-                        heading_error=center_heading_error,
-                        lateral_speed=center_lateral_speed,
-                        yaw_rate=center_yaw_rate,
-                        mpc_stable=bool(
-                            self._mpc.infeasibility_counter == 0
-                            and self._mpc.current_prediction is not None
-                            and not getattr(
-                                self._mpc,
-                                "used_prediction_fallback",
-                                False,
-                            )
-                            and not self._mpc_safety_recovery_active
-                        ),
-                    )
                     self._prepass_attempted_outer_lanes.clear()
                     self._clear_prepass_timeout_progress()
                     self._mpc.osqp_initialized = False
@@ -11849,10 +11200,7 @@ class MPCController(Node):
                 current_time_sec,
                 diagnostics=prepass_soft_diagnostics,
             )
-            if (
-                not self._prepass_soft_neutral_hold_active
-                and self._prepass_soft_candidate_lane_idx in (0, 2)
-            ):
+            if self._prepass_soft_candidate_lane_idx in (0, 2):
                 self._arm_outer_candidate_guidance(
                     vehicle_id=self._overtake_target_vehicle_id,
                     lane_idx=self._prepass_soft_candidate_lane_idx,
@@ -11864,12 +11212,7 @@ class MPCController(Node):
                 and self._outer_candidate_guidance["source"] == "fallback"
             ):
                 self._discard_outer_candidate_guidance(
-                    (
-                        "fallback_neutral_stability_hold"
-                        if self._prepass_soft_neutral_hold_active
-                        else "fallback_candidate_unavailable_or_unsafe"
-                    )
-                )
+                    "fallback_candidate_unavailable_or_unsafe")
             if should_release_prepass_distance_gate(
                 recovery_active=self._prepass_fallback_recovery_active,
                 distance=(
@@ -12540,7 +11883,6 @@ class MPCController(Node):
             # end ownership of the neutral Prepass episode.
             self._clear_prepass_soft_guidance()
 
-        corridor_ownership_start = time.perf_counter()
         # Check if vehicle is in or near a curve based on waypoint ranges (when following centerline)
         is_curve_locked = False
         if self._curve_lane_lock_enabled:
@@ -12986,7 +12328,6 @@ class MPCController(Node):
             and (close_overtake_blocked or fallback_stop_requested)
         )
 
-        reference_handoff_start = time.perf_counter()
         # Apply target lane
         # --- 制約切り替え安定化ウィンドウ ---
         # target_lane_idx が変わった瞬間に制約を即時切り替えると OSQP が infeasible になりやすい。
@@ -13233,7 +12574,6 @@ class MPCController(Node):
             )
         )
 
-        v2x_transaction_start = time.perf_counter()
         # The first committed solve owns precedence.  Otherwise a
         # candidate-guided full-width solve may consume only the immediately
         # preceding fresh full-width grid.  With no valid prior grid the solve
@@ -13251,27 +12591,10 @@ class MPCController(Node):
             )
         
         # MPCの実行
-        if candidate_guidance_applied_for_solve:
-            mpc_solve_source = "candidate"
-        elif (
-            recovery_active
-            or self._mpc_safety_recovery_active
-            or self._post_reverse_full_width_recovery_active
-        ):
-            mpc_solve_source = "fallback"
-        else:
-            mpc_solve_source = "normal"
-        mpc_control_start = time.perf_counter()
         try:
             with self._stats.time_block("control"):
                 u, max_delta = self._mpc.get_control()
         finally:
-            mpc_control_end = time.perf_counter()
-            self._record_mpc_solve_timing(
-                self._mpc,
-                mpc_solve_source,
-                (mpc_control_end - mpc_control_start) * 1000.0,
-            )
             # One solve only.  Subsequent outer-lane and ordinary MPC cycles
             # deliberately return to the existing conservative flatten mode.
             self._mpc.dynamic_v2x_by_step = None
@@ -13361,7 +12684,6 @@ class MPCController(Node):
         pure_pursuit_v2x_blocker = None
         pure_pursuit_v2x_stop_requested = False
         wall_v2x_stop_requested = False
-        legacy_wall_fallback_speed_limit = None
         if self._steering_fallback_enabled:
             solution_valid = bool(
                 not self._mpc.recovery_requested
@@ -13490,19 +12812,6 @@ class MPCController(Node):
                             controller = "legacy_feedback"
                             u[0] = min(
                                 float(u[0]), self._steering_fallback_speed)
-                            if reason.startswith("wall_at_step="):
-                                legacy_wall_fallback_speed_limit = max(
-                                    float(getattr(
-                                        self._cfg.mpc,
-                                        "safety_recovery_speed",
-                                        1.0,
-                                    )),
-                                    0.0,
-                                )
-                                u[0] = min(
-                                    float(u[0]),
-                                    legacy_wall_fallback_speed_limit,
-                                )
                             if nearby_vehicle is not None:
                                 wall_v2x_stop_requested = True
                                 details = pass_result or {}
@@ -13566,27 +12875,12 @@ class MPCController(Node):
                         throttle_duration_sec=0.5)
 
         # Race復帰中だけ裏でRace MPCを解く。追越し車線の選択には使わない。
-        race_probe_wall_start = time.perf_counter()
-        race_probe_get_control_before_ms = sum(
-            record["get_control_wall_ms"]
-            for record in self._control_mpc_timing_records
-        )
         self._run_race_rejoin_probe(
             predicted_pose,
             recovery_active=recovery_active,
             now_sec=current_time_sec,
             heading_ok=race_rejoin_probe_heading_ok,
             heading_released=race_rejoin_probe_heading_released)
-        race_probe_wall_end = time.perf_counter()
-        race_probe_get_control_after_ms = sum(
-            record["get_control_wall_ms"]
-            for record in self._control_mpc_timing_records
-        )
-        race_probe_get_control_wall_ms = max(
-            race_probe_get_control_after_ms
-            - race_probe_get_control_before_ms,
-            0.0,
-        )
 
         if self._mpc.used_prediction_fallback:
             self._mpc_prediction_fallback_cycles += 1
@@ -14927,6 +14221,12 @@ class MPCController(Node):
                 # Probe and rear-blocked states are observation-only.
                 u[0] = 0.0
 
+        # Apply after ordinary longitudinal overrides, including start boost,
+        # follow restart and Pure Pursuit recovery creep. Existing stuck
+        # recovery may still take ownership below under its own safety gates.
+        if wall_v2x_stop_requested or pure_pursuit_v2x_stop_requested:
+            u[0] = 0.0
+
         # 停止命令がコマンドで入力させたら減速させる
         if not self._enable_control:
             last_v_cmd = self._last_u[0]
@@ -14935,17 +14235,6 @@ class MPCController(Node):
             else:
                 decel_v = last_v_cmd + self._mpc_cfg.a_min * dt
                 u[0] = np.clip(decel_v, 0.0, self._mpc_cfg.v_max)
-
-        # Apply after every ordinary longitudinal override, including start
-        # boost, follow restart, Pure Pursuit recovery creep, and disabled-
-        # control deceleration. Existing stuck recovery may still take
-        # ownership below under its own safety gates.
-        if legacy_wall_fallback_speed_limit is not None:
-            u[0] = min(float(u[0]), legacy_wall_fallback_speed_limit)
-
-        # Stop owners remain stricter than the wall-unsafe legacy speed cap.
-        if wall_v2x_stop_requested or pure_pursuit_v2x_stop_requested:
-            u[0] = 0.0
        
         if len(u) == 0:
             self.get_logger().error("No control signal", throttle_duration_sec=1)
@@ -14955,7 +14244,6 @@ class MPCController(Node):
             intentional_follow_stop_active
             and not self._follow_escape_active
         )
-        stuck_and_command_prep_start = time.perf_counter()
         recovering_from_stuck = self._apply_stuck_recovery(now, u, v, pose)
 
         acc = 0.
@@ -15057,480 +14345,27 @@ class MPCController(Node):
         # update car state (use v for feedback actual speed)
         self._car.drive([v, u[1]])
 
-        # Tracking diagnostic only.  This must not change control behavior.
-        # Compare the current vehicle state, latest MPC prediction, and the
-        # command which is about to be sent to AWSIM.
-        if ENABLE_RUNTIME_DIAGNOSTICS and self._loop % 10 == 0:
-            actual_frenet = self._center_frenet(
-                float(pose.x), float(pose.y))
-            actual_e_y = (
-                None if actual_frenet is None
-                else float(actual_frenet[1])
-            )
-
-            pred_x = None
-            pred_y = None
-            pred_e_y = None
-            pred_t = None
-
-            if self._mpc.current_prediction is not None:
-                current_pred_x, current_pred_y = (
-                    self._mpc.current_prediction
-                )
-                if len(current_pred_x) > 0 and len(current_pred_y) > 0:
-                    pred_x = float(current_pred_x[0])
-                    pred_y = float(current_pred_y[0])
-                    pred_frenet = self._center_frenet(
-                        pred_x, pred_y)
-                    pred_e_y = (
-                        None if pred_frenet is None
-                        else float(pred_frenet[1])
-                    )
-
-                    prediction_times = getattr(
-                        self._mpc,
-                        "current_prediction_times",
-                        None,
-                    )
-                    if (
-                        prediction_times is not None
-                        and len(prediction_times) > 0
-                    ):
-                        pred_t = float(prediction_times[0])
-
-            raw_steer = float(u[1])
-            published_steer = (
-                raw_steer
-                * float(
-                    self._mpc_cfg.steering_tire_angle_gain_var
-                )
-            )
-
-            steering_source = (
-                "fallback"
-                if self._steering_fallback_armed
-                else "normal"
-            )
-
-            self.get_logger().info(
-                "[MPCTrackingDiagnostic] "
-                f"loop={self._loop}, "
-                f"dt={dt:.4f}s, "
-                f"source={steering_source}, "
-                f"actual_x={float(pose.x):.3f}, "
-                f"actual_y={float(pose.y):.3f}, "
-                f"actual_e_y={actual_e_y}, "
-                f"speed={float(v):.3f}m/s, "
-                f"pred_x={pred_x}, "
-                f"pred_y={pred_y}, "
-                f"pred_e_y={pred_e_y}, "
-                f"pred_t={pred_t}, "
-                f"cmd_speed={float(u[0]):.3f}m/s, "
-                f"raw_steer={raw_steer:+.4f}rad, "
-                f"published_steer={published_steer:+.4f}rad, "
-                f"fallback_armed={self._steering_fallback_armed}"
-            )
-
         # Publish control command.  Keep this active during stuck recovery because
         # the known-working teleop path drives AWSIM through control_cmd directly.
-        publish_control_start = time.perf_counter()
         self._publish_control_command(now, u, acc, bug_acc_enabled)
-        publish_control_end = time.perf_counter()
 
-        if ENABLE_RUNTIME_DIAGNOSTICS:
-            # State history and plots are visualization-only.  Final lap
-            # summaries use the controller's lap counters, not these buffers.
-            self._sim_logger.log(self._car, u, t)
-            self._sim_logger.plot_animation(
-                t, self._loop, self._current_laps, self._lap_times,
-                is_colliding, u, self._mpc, self._car,
-            )
+        # Log states
+        self._sim_logger.log(self._car, u, t)
+        self._sim_logger.plot_animation(t, self._loop, self._current_laps, self._lap_times, is_colliding, u, self._mpc, self._car)
 
-            # 約 0.25 秒ごとに予測結果を表示
-            if self._loop % (self._mpc_cfg.control_rate // 4) == 0:
-                if self._mpc.current_prediction is not None:
-                    self._publish_mpc_pred_marker(
-                        self._mpc.current_prediction[0],
-                        self._mpc.current_prediction[1],
-                    )
-                else:
-                    self._clear_mpc_pred_markers()
-
-            # 約 1 秒ごとに車線境界を表示
-            if self._loop % int(self._mpc_cfg.control_rate) == 0:
-                self._publish_lane_markers(self._reference_path)
-
-        if not ENABLE_RUNTIME_DIAGNOSTICS:
-            return
-
-        # Timing diagnostic only. Does not alter controller behavior.
-        wall_cycle_end = time.perf_counter()
-        sleep_wall_sec = wall_after_sleep - wall_sleep_start
-        body_wall_sec = wall_cycle_end - wall_after_sleep
-        total_wall_sec = wall_cycle_end - wall_cycle_start
-
-        solve_call_count = sum(
-            record["solve_call_count"]
-            for record in self._control_mpc_timing_records
-        )
-        solve_wall_total_ms = sum(
-            record["solve_wall_total_ms"]
-            for record in self._control_mpc_timing_records
-        )
-        solve_wall_max_ms = max(
-            (
-                record["solve_wall_max_ms"]
-                for record in self._control_mpc_timing_records
-            ),
-            default=0.0,
-        )
-        mpc_get_control_wall_ms = sum(
-            record["get_control_wall_ms"]
-            for record in self._control_mpc_timing_records
-        )
-        mpc_get_control_by_source_ms = {}
-        for record in self._control_mpc_timing_records:
-            source = str(record["source"])
-            mpc_get_control_by_source_ms[source] = (
-                mpc_get_control_by_source_ms.get(source, 0.0)
-                + float(record["get_control_wall_ms"])
-            )
-        measured_phase_wall_ms = sum(control_phase_wall_ms.values())
-        # get_control includes the optimizer solves and constraint generation.
-        # Subtract it once; optimizer solve time is reported separately and is
-        # intentionally not added again to the known-phase total.
-        known_phase_total_ms = (
-            measured_phase_wall_ms + mpc_get_control_wall_ms)
-        unaccounted_ms = max(
-            body_wall_sec * 1000.0 - known_phase_total_ms,
-            0.0,
-        )
-        pre_mpc_ms = max(
-            (mpc_control_start - wall_after_sleep) * 1000.0
-            - measured_phase_wall_ms,
-            0.0,
-        )
-        overtake_selection_existing_ms = sum(
-            control_phase_wall_ms.get(name, 0.0)
-            for name in (
-                "vehicle_passage",
-                "horizon_conflicts",
-                "lane_quality",
-            )
-        )
-        candidate_commit_existing_ms = sum(
-            control_phase_wall_ms.get(name, 0.0)
-            for name in (
-                "commit_corridor",
-                "guided_candidate_checks",
-            )
-        )
-        state_and_target_prep_ms = max(
-            (overtake_selection_start - wall_after_sleep) * 1000.0,
-            0.0,
-        )
-        overtake_selection_ms = max(
-            (preempt_evaluation_start - overtake_selection_start) * 1000.0
-            - overtake_selection_existing_ms,
-            0.0,
-        )
-        preempt_evaluation_ms = max(
-            (candidate_commit_selection_start - preempt_evaluation_start)
-            * 1000.0,
-            0.0,
-        )
-        preempt_detail_total_ms = sum((
-            preempt_target_prep_ms,
-            preempt_passage_evaluation_ms,
-            preempt_lane_candidate_ms,
-            preempt_prospective_ms,
-            preempt_prediction_envelope_ms,
-            preempt_stability_ms,
-            preempt_commit_decision_ms,
-        ))
-        other_preempt_ms = max(
-            preempt_evaluation_ms - preempt_detail_total_ms,
-            0.0,
-        )
-        preempt_prediction_envelope_detail_total_ms = sum(
-            value for name, value
-            in preempt_prediction_envelope_detail.items()
-            if name.endswith("_ms")
-        )
-        preempt_prediction_envelope_other_ms = max(
-            preempt_prediction_envelope_ms
-            - preempt_prediction_envelope_detail_total_ms,
-            0.0,
-        )
-        preempt_envelope_collision_detail_total_ms = sum((
-            preempt_envelope_collision_detail.get(
-                "frenet_projection_ms", 0.0),
-            preempt_envelope_collision_detail.get(
-                "clearance_evaluation_ms", 0.0),
-        ))
-        preempt_envelope_collision_other_ms = max(
-            preempt_envelope_collision_detail.get("total_ms", 0.0)
-            - preempt_envelope_collision_detail_total_ms,
-            0.0,
-        )
-        candidate_commit_selection_ms = max(
-            (recovery_lane_safety_start - candidate_commit_selection_start)
-            * 1000.0
-            - candidate_commit_existing_ms,
-            0.0,
-        )
-        recovery_lane_safety_ms = max(
-            (corridor_ownership_start - recovery_lane_safety_start) * 1000.0,
-            0.0,
-        )
-        corridor_ownership_ms = max(
-            (reference_handoff_start - corridor_ownership_start) * 1000.0,
-            0.0,
-        )
-        reference_handoff_ms = max(
-            (v2x_transaction_start - reference_handoff_start) * 1000.0,
-            0.0,
-        )
-        v2x_transaction_ms = max(
-            (mpc_control_start - v2x_transaction_start) * 1000.0,
-            0.0,
-        )
-        pre_mpc_detail_total_ms = sum((
-            state_and_target_prep_ms,
-            overtake_selection_ms,
-            preempt_evaluation_ms,
-            candidate_commit_selection_ms,
-            recovery_lane_safety_ms,
-            corridor_ownership_ms,
-            reference_handoff_ms,
-            v2x_transaction_ms,
-        ))
-        other_pre_mpc_ms = max(
-            pre_mpc_ms - pre_mpc_detail_total_ms,
-            0.0,
-        )
-        post_mpc_fallback_ms = max(
-            (race_probe_wall_start - mpc_control_end) * 1000.0,
-            0.0,
-        )
-        race_probe_surrounding_ms = max(
-            (race_probe_wall_end - race_probe_wall_start) * 1000.0
-            - race_probe_get_control_wall_ms,
-            0.0,
-        )
-        recovery_and_safety_ms = max(
-            (stuck_and_command_prep_start - race_probe_wall_end) * 1000.0,
-            0.0,
-        )
-        stuck_and_command_prep_ms = max(
-            (publish_control_start - stuck_and_command_prep_start) * 1000.0,
-            0.0,
-        )
-        publish_control_ms = max(
-            (publish_control_end - publish_control_start) * 1000.0,
-            0.0,
-        )
-        post_publish_tail_ms = max(
-            (wall_cycle_end - publish_control_end) * 1000.0,
-            0.0,
-        )
-        new_unaccounted_phase_total_ms = sum((
-            pre_mpc_ms,
-            post_mpc_fallback_ms,
-            race_probe_surrounding_ms,
-            recovery_and_safety_ms,
-            stuck_and_command_prep_ms,
-            publish_control_ms,
-            post_publish_tail_ms,
-        ))
-        remaining_unaccounted_ms = max(
-            body_wall_sec * 1000.0
-            - known_phase_total_ms
-            - new_unaccounted_phase_total_ms,
-            0.0,
-        )
-
-        if self._loop % 10 == 0 or total_wall_sec > 0.050:
-            self.get_logger().info(
-                "[ControlTimingDiagnostic] "
-                f"loop={self._loop}, "
-                f"ros_dt={dt:.4f}s, "
-                f"sleep_wall={sleep_wall_sec * 1000.0:.1f}ms, "
-                f"body_wall={body_wall_sec * 1000.0:.1f}ms, "
-                f"total_wall={total_wall_sec * 1000.0:.1f}ms"
-            )
-            self.get_logger().info(
-                "[ControlTimingBreakdown] "
-                f"loop={self._loop}, "
-                f"body_wall_ms={body_wall_sec * 1000.0:.3f}, "
-                f"solve_call_count={solve_call_count}, "
-                f"solve_wall_total_ms={solve_wall_total_ms:.3f}, "
-                f"solve_wall_max_ms={solve_wall_max_ms:.3f}, "
-                "mpc_get_control_wall_ms="
-                f"{mpc_get_control_wall_ms:.3f}, "
-                "commit_corridor_ms="
-                f"{control_phase_wall_ms.get('commit_corridor', 0.0):.3f}, "
-                "guided_candidate_checks_ms="
-                f"{control_phase_wall_ms.get('guided_candidate_checks', 0.0):.3f}, "
-                "measured_non_mpc_phase_total_ms="
-                f"{measured_phase_wall_ms:.3f}, "
-                f"known_phase_total_ms={known_phase_total_ms:.3f}, "
-                f"unaccounted_ms={unaccounted_ms:.3f}"
-            )
-
-        if (
-            body_wall_sec * 1000.0 > 25.0
-            or self._loop % 40 == 0
-            or remaining_unaccounted_ms > 20.0
-        ):
-            self.get_logger().info(
-                "[ControlUnaccountedTiming] "
-                f"loop={self._loop}, "
-                f"body_wall_ms={body_wall_sec * 1000.0:.3f}, "
-                "existing_phase_total_ms="
-                f"{measured_phase_wall_ms:.3f}, "
-                "vehicle_passage_ms="
-                f"{control_phase_wall_ms.get('vehicle_passage', 0.0):.3f}, "
-                "horizon_conflicts_ms="
-                f"{control_phase_wall_ms.get('horizon_conflicts', 0.0):.3f}, "
-                "lane_quality_ms="
-                f"{control_phase_wall_ms.get('lane_quality', 0.0):.3f}, "
-                "commit_corridor_ms="
-                f"{control_phase_wall_ms.get('commit_corridor', 0.0):.3f}, "
-                "guided_candidate_checks_ms="
-                f"{control_phase_wall_ms.get('guided_candidate_checks', 0.0):.3f}, "
-                "mpc_get_control_wall_ms="
-                f"{mpc_get_control_wall_ms:.3f}, "
-                "mpc_normal_ms="
-                f"{mpc_get_control_by_source_ms.get('normal', 0.0):.3f}, "
-                "mpc_candidate_ms="
-                f"{mpc_get_control_by_source_ms.get('candidate', 0.0):.3f}, "
-                "mpc_fallback_ms="
-                f"{mpc_get_control_by_source_ms.get('fallback', 0.0):.3f}, "
-                "mpc_probe_ms="
-                f"{mpc_get_control_by_source_ms.get('probe', 0.0):.3f}, "
-                f"pre_mpc_ms={pre_mpc_ms:.3f}, "
-                "post_mpc_fallback_ms="
-                f"{post_mpc_fallback_ms:.3f}, "
-                "race_probe_surrounding_ms="
-                f"{race_probe_surrounding_ms:.3f}, "
-                "recovery_and_safety_ms="
-                f"{recovery_and_safety_ms:.3f}, "
-                "stuck_and_command_prep_ms="
-                f"{stuck_and_command_prep_ms:.3f}, "
-                f"publish_control_ms={publish_control_ms:.3f}, "
-                f"post_publish_tail_ms={post_publish_tail_ms:.3f}, "
-                "new_unaccounted_phase_total_ms="
-                f"{new_unaccounted_phase_total_ms:.3f}, "
-                "remaining_unaccounted_ms="
-                f"{remaining_unaccounted_ms:.3f}"
-            )
-
-        if pre_mpc_ms > 20.0 or body_wall_sec * 1000.0 > 100.0:
-            self.get_logger().info(
-                "[PreMPCTiming] "
-                f"loop={self._loop}, "
-                "state_and_target_prep_ms="
-                f"{state_and_target_prep_ms:.3f}, "
-                f"overtake_selection_ms={overtake_selection_ms:.3f}, "
-                f"preempt_evaluation_ms={preempt_evaluation_ms:.3f}, "
-                "candidate_commit_selection_ms="
-                f"{candidate_commit_selection_ms:.3f}, "
-                "recovery_lane_safety_ms="
-                f"{recovery_lane_safety_ms:.3f}, "
-                f"corridor_ownership_ms={corridor_ownership_ms:.3f}, "
-                f"reference_handoff_ms={reference_handoff_ms:.3f}, "
-                f"v2x_transaction_ms={v2x_transaction_ms:.3f}, "
-                f"other_pre_mpc_ms={other_pre_mpc_ms:.3f}, "
-                "existing_pre_mpc_phase_total_ms="
-                f"{overtake_selection_existing_ms + candidate_commit_existing_ms:.3f}, "
-                f"pre_mpc_detail_total_ms={pre_mpc_detail_total_ms:.3f}, "
-                f"total_pre_mpc_ms={pre_mpc_ms:.3f}"
-            )
-
-        if preempt_evaluation_ms > 20.0:
-            self.get_logger().info(
-                "[PreemptTiming] "
-                f"loop={self._loop}, "
-                f"eligible={preempt_eligible}, "
-                f"target_prep_ms={preempt_target_prep_ms:.3f}, "
-                "passage_evaluation_ms="
-                f"{preempt_passage_evaluation_ms:.3f}, "
-                f"lane_candidate_ms={preempt_lane_candidate_ms:.3f}, "
-                f"prospective_ms={preempt_prospective_ms:.3f}, "
-                f"prospective_l0_ms={preempt_prospective_l0_ms:.3f}, "
-                f"prospective_l2_ms={preempt_prospective_l2_ms:.3f}, "
-                "prediction_envelope_ms="
-                f"{preempt_prediction_envelope_ms:.3f}, "
-                f"stability_ms={preempt_stability_ms:.3f}, "
-                f"commit_decision_ms={preempt_commit_decision_ms:.3f}, "
-                f"other_preempt_ms={other_preempt_ms:.3f}, "
-                f"detail_total_ms={preempt_detail_total_ms:.3f}, "
-                f"total_preempt_ms={preempt_evaluation_ms:.3f}"
-            )
-
-        if preempt_prediction_envelope_ms > 20.0:
-            self.get_logger().info(
-                "[PreemptPredictionEnvelopeTiming] "
-                f"loop={self._loop}, "
-                "guidance_check_ms="
-                f"{preempt_prediction_envelope_detail['guidance_check_ms']:.3f}, "
-                "prediction_prepare_ms="
-                f"{preempt_prediction_envelope_detail['prediction_prepare_ms']:.3f}, "
-                "geometry_prepare_ms="
-                f"{preempt_prediction_envelope_detail['geometry_prepare_ms']:.3f}, "
-                "dynamic_v2x_prepare_ms="
-                f"{preempt_prediction_envelope_detail['dynamic_v2x_prepare_ms']:.3f}, "
-                "envelope_collision_ms="
-                f"{preempt_prediction_envelope_detail['envelope_collision_ms']:.3f}, "
-                "terminal_fit_ms="
-                f"{preempt_prediction_envelope_detail['terminal_fit_ms']:.3f}, "
-                "geometry_frenet_cache_hits="
-                f"{preempt_prediction_envelope_detail['geometry_frenet_cache_hits']}, "
-                "geometry_frenet_cache_misses="
-                f"{preempt_prediction_envelope_detail['geometry_frenet_cache_misses']}, "
-                "geometry_center_frenet_call_count="
-                f"{preempt_prediction_envelope_detail['geometry_center_frenet_call_count']}, "
-                f"other_ms={preempt_prediction_envelope_other_ms:.3f}, "
-                "detail_total_ms="
-                f"{preempt_prediction_envelope_detail_total_ms:.3f}, "
-                "total_prediction_envelope_ms="
-                f"{preempt_prediction_envelope_ms:.3f}"
-            )
-            if preempt_envelope_collision_detail:
-                self.get_logger().info(
-                    "[EnvelopeCollisionTiming] "
-                    f"loop={self._loop}, "
-                    "candidate_sample_count="
-                    f"{preempt_envelope_collision_detail.get('candidate_sample_count', 0)}, "
-                    "moving_vehicle_count="
-                    f"{preempt_envelope_collision_detail.get('moving_vehicle_count', 0)}, "
-                    "pair_check_count="
-                    f"{preempt_envelope_collision_detail.get('pair_check_count', 0)}, "
-                    "center_frenet_call_count="
-                    f"{preempt_envelope_collision_detail.get('center_frenet_call_count', 0)}, "
-                    "candidate_frenet_cache_hits="
-                    f"{preempt_envelope_collision_detail.get('candidate_frenet_cache_hits', 0)}, "
-                    "candidate_frenet_cache_misses="
-                    f"{preempt_envelope_collision_detail.get('candidate_frenet_cache_misses', 0)}, "
-                    "envelope_external_candidate_frenet_cache_hits="
-                    f"{preempt_envelope_collision_detail.get('external_candidate_frenet_cache_hits', 0)}, "
-                    "envelope_external_candidate_frenet_cache_misses="
-                    f"{preempt_envelope_collision_detail.get('external_candidate_frenet_cache_misses', 0)}, "
-                    "frenet_projection_ms="
-                    f"{preempt_envelope_collision_detail.get('frenet_projection_ms', 0.0):.3f}, "
-                    "clearance_evaluation_ms="
-                    f"{preempt_envelope_collision_detail.get('clearance_evaluation_ms', 0.0):.3f}, "
-                    f"other_ms={preempt_envelope_collision_other_ms:.3f}, "
-                    "detail_total_ms="
-                    f"{preempt_envelope_collision_detail_total_ms:.3f}, "
-                    "total_ms="
-                    f"{preempt_envelope_collision_detail.get('total_ms', 0.0):.3f}, "
-                    "conflict_found="
-                    f"{preempt_envelope_collision_detail.get('conflict_found', False)}, "
-                    "early_returned="
-                    f"{preempt_envelope_collision_detail.get('early_returned', False)}"
+        # 約 0.25 秒ごとに予測結果を表示
+        if self._loop % (self._mpc_cfg.control_rate // 4) == 0:
+            if self._mpc.current_prediction is not None:
+                self._publish_mpc_pred_marker(
+                    self._mpc.current_prediction[0],
+                    self._mpc.current_prediction[1],
                 )
+            else:
+                self._clear_mpc_pred_markers()
+
+        # 約 1 秒ごとに車線境界を表示
+        if self._loop % int(self._mpc_cfg.control_rate) == 0:
+            self._publish_lane_markers(self._reference_path)
 
     def run(self) -> None:
         self._wait_until_clock_received()
@@ -15553,16 +14388,7 @@ class MPCController(Node):
         self._control_rate = self.create_rate(self._mpc_cfg.control_rate)
         self._sim_logger = SimulationLogger(
             self.get_logger(),
-            self._car.temporal_state.x,
-            self._car.temporal_state.y,
-            bool(
-                ENABLE_RUNTIME_DIAGNOSTICS
-                and self._cfg.sim_logger.animation_enabled
-            ),
-            bool(ENABLE_RUNTIME_DIAGNOSTICS and self.SHOW_PLOT_ANIMATION),
-            bool(ENABLE_RUNTIME_DIAGNOSTICS and self.PLOT_RESULTS),
-            self.ANIMATION_INTERVAL,
-        ) # type: ignore
+            self._car.temporal_state.x, self._car.temporal_state.y, self._cfg.sim_logger.animation_enabled, self.SHOW_PLOT_ANIMATION, self.PLOT_RESULTS, self.ANIMATION_INTERVAL) # type: ignore
 
         self._loop = 0
         self._last_acc = 0.0

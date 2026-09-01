@@ -12,7 +12,11 @@ from scipy.signal import savgol_filter
 import osqp
 import os
 import itertools
+import time
 from ament_index_python.packages import get_package_share_directory
+from multi_purpose_mpc_ros.core.runtime_mode import (
+    ENABLE_RUNTIME_DIAGNOSTICS,
+)
 
 # Colors
 DRIVABLE_AREA = '#BDC3C7'
@@ -390,6 +394,11 @@ class ReferencePath:
         self.border_cells = BorderCells()
         self.target_lane_idx = None
         self.last_constraint_bounds: Optional[ConstraintBounds] = None
+        # Diagnostic-only snapshot from the latest completed
+        # update_path_constraints() call.  MPC copies it immediately so retry
+        # builds cannot overwrite the timing owned by an earlier build.
+        self.last_path_constraint_timing_ms = None
+        self.last_free_segment_timing_ms = None
         self.n_lanes = 3
         self.inner_lane_width = 0.5
 
@@ -549,7 +558,23 @@ class ReferencePath:
         s = sum(segment_lengths)
         return s, segment_lengths
 
-    def _is_obstacle_occupied(self, t_x, t_y):
+    def _dynamic_obstacle_occupies_cell(self, cell_x, cell_y, obstacle):
+        """Match Map.add_obstacles' existing raster-circle semantics."""
+        center_x, center_y = self.map.w2m(obstacle.cx, obstacle.cy)
+        radius_px = int(np.ceil(float(obstacle.radius) / self.map.resolution))
+        delta_x = int(cell_x) - int(center_x)
+        delta_y = int(cell_y) - int(center_y)
+        return bool(
+            -radius_px <= delta_x < radius_px
+            and -radius_px <= delta_y < radius_px
+            and delta_x ** 2 + delta_y ** 2 <= radius_px ** 2
+        )
+
+    def _is_obstacle_occupied(
+        self, t_x, t_y, occupancy_data=None, dynamic_obstacles=None,
+        dynamic_obstacle_raster_geometry=None,
+    ):
+        map_data = self.map.data if occupancy_data is None else occupancy_data
         for i in range(-1, 2):
             for j in range(-1, 2):
                 # Clip the coordinates to stay within map boundaries
@@ -557,8 +582,27 @@ class ReferencePath:
                 t_yj = np.clip(t_y + j, 0, self.map.height - 1)
 
                 # Check if the cell is occupied
-                if self.map.data[t_yj, t_xi] == 0:
+                if map_data[t_yj, t_xi] == 0:
                     return True
+                if dynamic_obstacle_raster_geometry is not None:
+                    for (
+                        _, center_x, center_y, radius_px,
+                    ) in dynamic_obstacle_raster_geometry:
+                        delta_x = int(t_xi) - int(center_x)
+                        delta_y = int(t_yj) - int(center_y)
+                        if bool(
+                            -radius_px <= delta_x < radius_px
+                            and -radius_px <= delta_y < radius_px
+                            and delta_x ** 2 + delta_y ** 2
+                                <= radius_px ** 2
+                        ):
+                            return True
+                elif dynamic_obstacles:
+                    for obstacle in dynamic_obstacles:
+                        if self._dynamic_obstacle_occupies_cell(
+                            t_xi, t_yj, obstacle
+                        ):
+                            return True
         # No obstacles detected
         return False
 
@@ -1163,7 +1207,11 @@ class ReferencePath:
         #     obstacle.show(ax=ax)
 
 
-    def _compute_free_segments(self, wp, min_width, wp_idx=None):
+    def _compute_free_segments(
+        self, wp, min_width, wp_idx=None, *, occupancy_data=None,
+        dynamic_obstacles=None,
+        precompute_dynamic_obstacle_geometry=True,
+    ):
         """
         Compute free path segments.
         :param wp: waypoint object
@@ -1171,7 +1219,38 @@ class ReferencePath:
         :param wp_idx: index of current waypoint
         :return: segment candidates as list of tuples (ub_cell, lb_cell)
         """
+        timing_enabled = ENABLE_RUNTIME_DIAGNOSTICS
+        timing_total_start = time.perf_counter() if timing_enabled else 0.0
+        line_aa_sec = 0.0
+        static_map_check_sec = 0.0
+        dynamic_obstacle_check_sec = 0.0
+        dynamic_geometry_prepare_sec = 0.0
+        conversion_sec = 0.0
+        scanned_cell_count = 0
+        dynamic_obstacle_check_count = 0
+        dynamic_obstacle_count = (
+            0 if not dynamic_obstacles else len(dynamic_obstacles))
+        occupied_dynamic_hit_count = 0
 
+        dynamic_obstacle_raster_geometry = None
+        if dynamic_obstacles and precompute_dynamic_obstacle_geometry:
+            timing_dynamic_geometry_start = (
+                time.perf_counter() if timing_enabled else 0.0)
+            dynamic_obstacle_raster_geometry = [
+                (
+                    obstacle,
+                    *self.map.w2m(obstacle.cx, obstacle.cy),
+                    int(np.ceil(
+                        float(obstacle.radius) / self.map.resolution)),
+                )
+                for obstacle in dynamic_obstacles
+            ]
+            if timing_enabled:
+                dynamic_geometry_prepare_sec += (
+                    time.perf_counter() - timing_dynamic_geometry_start)
+
+        timing_endpoint_map_prepare_start = (
+            time.perf_counter() if timing_enabled else 0.0)
         # Candidate segments
         free_segments = []
 
@@ -1184,7 +1263,11 @@ class ReferencePath:
                             wp.static_border_cells[1][1])
 
         # Compute path from left border cell to right border cell
+        timing_line_aa_start = time.perf_counter() if timing_enabled else 0.0
         x_list, y_list, _ = line_aa(ub_p[0], ub_p[1], lb_p[0], lb_p[1])
+        timing_line_aa_end = time.perf_counter() if timing_enabled else 0.0
+        if timing_enabled:
+            line_aa_sec += timing_line_aa_end - timing_line_aa_start
 
         # Initialize upper and lower bound of drivable area to
         # upper bound of path
@@ -1194,24 +1277,87 @@ class ReferencePath:
         free_cells = False
 
         # Iterate over path from left border to right border
-        map_data = self.map.data
+        map_data = self.map.data if occupancy_data is None else occupancy_data
+
+        def occupied(x, y):
+            nonlocal static_map_check_sec
+            nonlocal dynamic_obstacle_check_sec
+            nonlocal dynamic_obstacle_check_count
+            nonlocal occupied_dynamic_hit_count
+
+            timing_static_start = (
+                time.perf_counter() if timing_enabled else 0.0)
+            static_occupied = map_data[y, x] == 0
+            if timing_enabled:
+                static_map_check_sec += (
+                    time.perf_counter() - timing_static_start)
+            if static_occupied:
+                return True
+            if not dynamic_obstacles:
+                return False
+
+            def dynamic_occupied(obstacle_geometry):
+                nonlocal dynamic_obstacle_check_sec
+                nonlocal dynamic_obstacle_check_count
+                nonlocal occupied_dynamic_hit_count
+                if timing_enabled:
+                    dynamic_obstacle_check_count += 1
+                timing_dynamic_start = (
+                    time.perf_counter() if timing_enabled else 0.0)
+                if dynamic_obstacle_raster_geometry is None:
+                    result = self._dynamic_obstacle_occupies_cell(
+                        x, y, obstacle_geometry)
+                else:
+                    _, center_x, center_y, radius_px = obstacle_geometry
+                    delta_x = int(x) - int(center_x)
+                    delta_y = int(y) - int(center_y)
+                    result = bool(
+                        -radius_px <= delta_x < radius_px
+                        and -radius_px <= delta_y < radius_px
+                        and delta_x ** 2 + delta_y ** 2 <= radius_px ** 2
+                    )
+                if timing_enabled:
+                    dynamic_obstacle_check_sec += (
+                        time.perf_counter() - timing_dynamic_start)
+                if timing_enabled and result:
+                    occupied_dynamic_hit_count += 1
+                return result
+
+            return any(
+                dynamic_occupied(obstacle_geometry)
+                for obstacle_geometry in (
+                    dynamic_obstacle_raster_geometry
+                    if dynamic_obstacle_raster_geometry is not None
+                    else dynamic_obstacles
+                )
+            )
         all_segments = []
+        timing_cell_loop_start = (
+            time.perf_counter() if timing_enabled else 0.0)
         for x, y in zip(x_list[1:], y_list[1:]):
-            cell_value = map_data[y, x]
+            if timing_enabled:
+                scanned_cell_count += 1
+            cell = (x, y)
+            cell_value = 0 if occupied(x, y) else 1
             # If cell is free, update lower bound
             if cell_value == 1:
                 # Free cell detected
                 free_cells = True
-                lb_o = (x, y)
+                lb_o = cell
             # If cell is occupied or end of path, end segment. Add segment
             # to list of candidates. Then, reset upper and lower bound to
             # current cell.
-            if (cell_value == 0 or (x, y) == lb_p) and free_cells:
+            if (cell_value == 0 or cell == lb_p) and free_cells:
                 # Set lower bound to border cell of segment
-                lb_o = (x, y)
+                lb_o = cell
                 # Transform upper and lower bound cells to world coordinates
+                timing_conversion_start = (
+                    time.perf_counter() if timing_enabled else 0.0)
                 ub_w = self.map.m2w(ub_o[0], ub_o[1])
                 lb_w = self.map.m2w(lb_o[0], lb_o[1])
+                if timing_enabled:
+                    conversion_sec += (
+                        time.perf_counter() - timing_conversion_start)
                 
                 segment_width_sq = (ub_w[0]-lb_w[0])**2 + (ub_w[1]-lb_w[1])**2
                 all_segments.append(((ub_w, lb_w), segment_width_sq))
@@ -1220,11 +1366,13 @@ class ReferencePath:
                 if segment_width_sq > min_width**2:
                     free_segments.append((ub_w, lb_w))
                 # Start new segment
-                ub_o = (x, y)
+                ub_o = cell
                 free_cells = False
             elif cell_value == 0 and not free_cells:
-                ub_o = (x, y)
-                lb_o = (x, y)
+                ub_o = cell
+                lb_o = cell
+        timing_cell_loop_end = (
+            time.perf_counter() if timing_enabled else 0.0)
 
         # Do not promote a segment narrower than the vehicle-width threshold;
         # let the caller use its full-width static fallback instead.
@@ -1233,6 +1381,95 @@ class ReferencePath:
             widest_segment, widest_width_sq = all_segments[0]
             if widest_width_sq >= min_width**2:
                 free_segments.append(widest_segment)
+
+        if not ENABLE_RUNTIME_DIAGNOSTICS:
+            self.last_free_segment_timing_ms = None
+            return free_segments
+
+        timing_total_end = time.perf_counter()
+        total_ms = (timing_total_end - timing_total_start) * 1000.0
+        line_aa_ms = line_aa_sec * 1000.0
+        static_map_check_ms = static_map_check_sec * 1000.0
+        dynamic_obstacle_check_ms = dynamic_obstacle_check_sec * 1000.0
+        dynamic_geometry_prepare_ms = (
+            dynamic_geometry_prepare_sec * 1000.0)
+        conversion_ms = conversion_sec * 1000.0
+        other_ms = max(
+            total_ms
+            - line_aa_ms
+            - static_map_check_ms
+            - dynamic_obstacle_check_ms
+            - dynamic_geometry_prepare_ms
+            - conversion_ms,
+            0.0,
+        )
+        other_setup_ms = max(
+            (timing_endpoint_map_prepare_start - timing_total_start) * 1000.0
+            - dynamic_geometry_prepare_ms,
+            0.0,
+        )
+        other_endpoint_map_prepare_ms = (
+            (timing_line_aa_start - timing_endpoint_map_prepare_start)
+            + (timing_cell_loop_start - timing_line_aa_end)
+        ) * 1000.0
+        cell_loop_total_ms = (
+            timing_cell_loop_end - timing_cell_loop_start) * 1000.0
+        other_cell_loop_bookkeeping_ms = max(
+            cell_loop_total_ms
+            - static_map_check_ms
+            - dynamic_obstacle_check_ms
+            - conversion_ms,
+            0.0,
+        )
+        other_post_loop_finalization_ms = (
+            timing_total_end - timing_cell_loop_end) * 1000.0
+        other_detail_total_ms = sum((
+            other_setup_ms,
+            other_endpoint_map_prepare_ms,
+            other_cell_loop_bookkeeping_ms,
+            other_post_loop_finalization_ms,
+        ))
+        other_remaining_ms = max(
+            other_ms - other_detail_total_ms, 0.0)
+        self.last_free_segment_timing_ms = {
+            "line_aa_ms": line_aa_ms,
+            "static_map_check_ms": static_map_check_ms,
+            "dynamic_obstacle_check_ms": dynamic_obstacle_check_ms,
+            "dynamic_geometry_prepare_ms": dynamic_geometry_prepare_ms,
+            "conversion_ms": conversion_ms,
+            "other_ms": other_ms,
+            "other_setup_ms": other_setup_ms,
+            "other_endpoint_map_prepare_ms": other_endpoint_map_prepare_ms,
+            "other_cell_loop_bookkeeping_ms": (
+                other_cell_loop_bookkeeping_ms),
+            "other_post_loop_finalization_ms": (
+                other_post_loop_finalization_ms),
+            "other_detail_total_ms": other_detail_total_ms,
+            "other_remaining_ms": other_remaining_ms,
+            "total_ms": total_ms,
+        }
+        if total_ms > 5.0:
+            print(
+                "[FreeSegmentTiming] "
+                f"wp_idx={wp_idx} "
+                f"line_aa_ms={line_aa_ms:.3f} "
+                f"static_map_check_ms={static_map_check_ms:.3f} "
+                "dynamic_obstacle_check_ms="
+                f"{dynamic_obstacle_check_ms:.3f} "
+                "dynamic_geometry_prepare_ms="
+                f"{dynamic_geometry_prepare_ms:.3f} "
+                f"conversion_ms={conversion_ms:.3f} "
+                f"other_ms={other_ms:.3f} "
+                f"total_ms={total_ms:.3f} "
+                f"scanned_cell_count={scanned_cell_count} "
+                f"dynamic_obstacle_count={dynamic_obstacle_count} "
+                "dynamic_obstacle_check_count="
+                f"{dynamic_obstacle_check_count} "
+                "occupied_dynamic_hit_count="
+                f"{occupied_dynamic_hit_count} "
+                f"free_segment_count={len(free_segments)}",
+                flush=True,
+            )
 
         return free_segments
 
@@ -1331,11 +1568,20 @@ class ReferencePath:
         lane_relaxation=0.0, toward_center_only=True,
         taper_retry_over_horizon=True, retry_terminal_ratio=0.0,
         connect_lane_from_current_pose=True, lane_connection_points=10,
+        dynamic_v2x_by_step=None, static_occupancy_data=None,
+        precomputed_free_segments_hor=None,
+        combination_collision_cache_enabled=True,
+        precompute_combination_dynamic_geometry=True,
+        precomputed_combination_collision_cache=None,
+        shared_combination_collision_cache_stats=None,
+        precomputed_segment_bound_cache=None,
+        shared_precomputed_segment_bound_cache_stats=None,
     ):
         """
         Compute upper and lower bounds of the drivable area orthogonal to
         the given waypoint.
         """
+        timing_total_start = time.perf_counter()
 
         # min_width = model_width / np.sqrt(2)
         # Note: During overtaking, we do NOT add extra margin here.
@@ -1353,6 +1599,18 @@ class ReferencePath:
         # minimum width.  The former 0.1 m threshold could accept a sliver
         # that was physically impossible for the vehicle.
         min_segment_length = min_width
+        if (
+            dynamic_v2x_by_step is not None
+            and len(dynamic_v2x_by_step) != int(N)
+        ):
+            raise ValueError(
+                "step-specific V2X constraints must match the MPC horizon")
+        if (
+            precomputed_free_segments_hor is not None
+            and len(precomputed_free_segments_hor) != int(N)
+        ):
+            raise ValueError(
+                "precomputed free segments must match the MPC horizon")
 
         # container for constraints and border cells
         ub_hor = []
@@ -1528,21 +1786,239 @@ class ReferencePath:
         #     self.COUNT = 0
 
         # ホライズン内の各ウェイポイントについて、フリーセグメントを算出する。
+        timing_free_segments_start = time.perf_counter()
         free_segments_hor = []
+        total_free_segments = 0
+        max_free_segments = 0
+        free_segment_timing_names = (
+            "line_aa_ms",
+            "static_map_check_ms",
+            "dynamic_obstacle_check_ms",
+            "dynamic_geometry_prepare_ms",
+            "conversion_ms",
+            "other_ms",
+            "other_setup_ms",
+            "other_endpoint_map_prepare_ms",
+            "other_cell_loop_bookkeeping_ms",
+            "other_post_loop_finalization_ms",
+            "other_detail_total_ms",
+            "other_remaining_ms",
+            "total_ms",
+        )
+        free_segment_timing_totals_ms = {
+            name: 0.0 for name in free_segment_timing_names
+        }
+        free_segment_timing_call_count = 0
+        precomputed_filter_total_start = (
+            time.perf_counter()
+            if precomputed_free_segments_hor is not None else None
+        )
+        precomputed_copy_sec = 0.0
+        precomputed_lane_bounds_sec = 0.0
+        precomputed_bound_filter_sec = 0.0
+        precomputed_bound_filter_thread_cpu_sec = 0.0
+        precomputed_bookkeeping_sec = 0.0
+        precomputed_waypoint_count = 0
+        precomputed_segment_count_in = 0
+        precomputed_segment_count_out = 0
+        precomputed_compute_bound_call_count = 0
+        precomputed_bound_cache_hits = 0
+        precomputed_bound_cache_misses = 0
+        precomputed_slowest_wp_index = None
+        precomputed_slowest_wp_sec = 0.0
+        precomputed_slowest_filter_wp_index = None
+        precomputed_slowest_filter_wp_sec = 0.0
+        precomputed_slowest_filter_wp_thread_cpu_sec = 0.0
         for n in range(N):
+            precomputed_waypoint_start = (
+                time.perf_counter()
+                if precomputed_free_segments_hor is not None else None
+            )
+            precomputed_lane_bounds_start = (
+                time.perf_counter()
+                if precomputed_free_segments_hor is not None else None
+            )
             wp = self.get_waypoint(wp_id+n)
-            free_segments = self._compute_free_segments(wp, min_width, wp_idx=(wp_id+n))
+            if precomputed_free_segments_hor is not None:
+                precomputed_lane_bounds_sec += (
+                    time.perf_counter() - precomputed_lane_bounds_start)
+            step_dynamic_obstacles = (
+                None if dynamic_v2x_by_step is None
+                else dynamic_v2x_by_step[n]
+            )
+            if precomputed_free_segments_hor is None:
+                free_segments = self._compute_free_segments(
+                    wp,
+                    min_width,
+                    wp_idx=(wp_id+n),
+                    occupancy_data=static_occupancy_data,
+                    dynamic_obstacles=step_dynamic_obstacles,
+                )
+                latest_free_segment_timing = getattr(
+                    self, "last_free_segment_timing_ms", None)
+                if isinstance(latest_free_segment_timing, dict):
+                    for name in free_segment_timing_names:
+                        free_segment_timing_totals_ms[name] += float(
+                            latest_free_segment_timing.get(name, 0.0))
+                    free_segment_timing_call_count += 1
+            else:
+                # Copy the raw physical segments before applying this profile's
+                # lane-specific filtering.  The shared prospective cache is
+                # observational and must remain unchanged across profiles.
+                precomputed_copy_start = time.perf_counter()
+                free_segments = list(precomputed_free_segments_hor[n])
+                precomputed_copy_sec += (
+                    time.perf_counter() - precomputed_copy_start)
+                precomputed_waypoint_count += 1
+                precomputed_segment_count_in += len(free_segments)
             if target_lane in (0, 1, 2):
+                precomputed_lane_bounds_start = (
+                    time.perf_counter()
+                    if precomputed_free_segments_hor is not None else None
+                )
                 lane_lb, lane_ub = lane_bounds_for(n, wp)
-                free_segments = [
-                    segment for segment in free_segments
-                    if min(compute_bound(wp, segment[0]), lane_ub)
-                    > max(compute_bound(wp, segment[1]), lane_lb)
-                ]
+                if precomputed_free_segments_hor is not None:
+                    precomputed_lane_bounds_sec += (
+                        time.perf_counter() - precomputed_lane_bounds_start)
+                    precomputed_bound_filter_start = time.perf_counter()
+                    precomputed_bound_filter_thread_cpu_start = (
+                        time.thread_time())
+                if (
+                    precomputed_free_segments_hor is not None
+                    and precomputed_segment_bound_cache is not None
+                ):
+                    filtered_free_segments = []
+                    for segment_index, segment in enumerate(free_segments):
+                        endpoint_bounds = []
+                        for endpoint_index, endpoint in enumerate(segment):
+                            bound_cache_key = (
+                                n, segment_index, endpoint_index)
+                            if (
+                                bound_cache_key
+                                in precomputed_segment_bound_cache
+                            ):
+                                precomputed_bound_cache_hits += 1
+                                if (
+                                    shared_precomputed_segment_bound_cache_stats
+                                        is not None
+                                ):
+                                    shared_precomputed_segment_bound_cache_stats[
+                                        "hits"
+                                    ] = (
+                                        shared_precomputed_segment_bound_cache_stats.get(
+                                            "hits", 0
+                                        ) + 1
+                                    )
+                                bound = precomputed_segment_bound_cache[
+                                    bound_cache_key]
+                            else:
+                                precomputed_bound_cache_misses += 1
+                                precomputed_compute_bound_call_count += 1
+                                if (
+                                    shared_precomputed_segment_bound_cache_stats
+                                        is not None
+                                ):
+                                    shared_precomputed_segment_bound_cache_stats[
+                                        "misses"
+                                    ] = (
+                                        shared_precomputed_segment_bound_cache_stats.get(
+                                            "misses", 0
+                                        ) + 1
+                                    )
+                                bound = compute_bound(wp, endpoint)
+                                precomputed_segment_bound_cache[
+                                    bound_cache_key] = bound
+                            endpoint_bounds.append(bound)
+                        if (
+                            min(endpoint_bounds[0], lane_ub)
+                            > max(endpoint_bounds[1], lane_lb)
+                        ):
+                            filtered_free_segments.append(segment)
+                    free_segments = filtered_free_segments
+                else:
+                    if precomputed_free_segments_hor is not None:
+                        precomputed_compute_bound_call_count += (
+                            2 * len(free_segments))
+                    free_segments = [
+                        segment for segment in free_segments
+                        if min(compute_bound(wp, segment[0]), lane_ub)
+                        > max(compute_bound(wp, segment[1]), lane_lb)
+                    ]
+                if precomputed_free_segments_hor is not None:
+                    precomputed_bound_filter_wp_sec = (
+                        time.perf_counter() - precomputed_bound_filter_start)
+                    precomputed_bound_filter_wp_thread_cpu_sec = (
+                        time.thread_time()
+                        - precomputed_bound_filter_thread_cpu_start)
+                    precomputed_bound_filter_sec += (
+                        precomputed_bound_filter_wp_sec)
+                    precomputed_bound_filter_thread_cpu_sec += (
+                        precomputed_bound_filter_wp_thread_cpu_sec)
+                    if (
+                        precomputed_bound_filter_wp_sec
+                        > precomputed_slowest_filter_wp_sec
+                    ):
+                        precomputed_slowest_filter_wp_index = n
+                        precomputed_slowest_filter_wp_sec = (
+                            precomputed_bound_filter_wp_sec)
+                        precomputed_slowest_filter_wp_thread_cpu_sec = (
+                            precomputed_bound_filter_wp_thread_cpu_sec)
+            precomputed_bookkeeping_start = (
+                time.perf_counter()
+                if precomputed_free_segments_hor is not None else None
+            )
             free_segments_hor.append(free_segments)
             self.free_segs.extend(free_segments)
+            free_segment_count = len(free_segments)
+            total_free_segments += free_segment_count
+            max_free_segments = max(max_free_segments, free_segment_count)
+            if precomputed_free_segments_hor is not None:
+                precomputed_segment_count_out += free_segment_count
+                precomputed_bookkeeping_sec += (
+                    time.perf_counter() - precomputed_bookkeeping_start)
+                precomputed_waypoint_sec = (
+                    time.perf_counter() - precomputed_waypoint_start)
+                if (
+                    precomputed_waypoint_sec
+                    > precomputed_slowest_wp_sec
+                ):
+                    precomputed_slowest_wp_sec = precomputed_waypoint_sec
+                    precomputed_slowest_wp_index = n
+        timing_free_segments_end = time.perf_counter()
+
+        if precomputed_free_segments_hor is not None:
+            precomputed_filter_total_sec = (
+                timing_free_segments_end - precomputed_filter_total_start)
+            precomputed_filter_detail_sec = sum((
+                precomputed_copy_sec,
+                precomputed_lane_bounds_sec,
+                precomputed_bound_filter_sec,
+                precomputed_bookkeeping_sec,
+            ))
+            precomputed_filter_other_sec = max(
+                precomputed_filter_total_sec - precomputed_filter_detail_sec,
+                0.0,
+            )
 
         # 実現可能な範囲で反復
+        timing_combination_start = time.perf_counter()
+        combination_count = 0
+        combination_collision_cache = (
+            {}
+            if precomputed_combination_collision_cache is None
+            else precomputed_combination_collision_cache
+        )
+        shared_combination_collision_cache_keys = (
+            set()
+            if precomputed_combination_collision_cache is None
+            else set(precomputed_combination_collision_cache)
+        )
+        transition_check_count = 0
+        transition_cache_hits = 0
+        transition_cache_misses = 0
+        combination_dynamic_geometry_by_step = {}
+        combination_geometry_prepare_sec = 0.0
+        combination_dynamic_cell_check_count = 0
         n = 0
         while n < N:
 
@@ -1569,6 +2045,11 @@ class ReferencePath:
                 #     print(f"n :{n}, free_segments_indices: {free_segments_indices}")
 
                 def calculate_combination_total_segment_length(index_combination, ub_pw, lb_pw):
+                    nonlocal transition_check_count
+                    nonlocal transition_cache_hits
+                    nonlocal transition_cache_misses
+                    nonlocal combination_geometry_prepare_sec
+                    nonlocal combination_dynamic_cell_check_count
                     total_segment_length = 0.0
 
                     for i, segment_index in enumerate(index_combination):
@@ -1577,7 +2058,121 @@ class ReferencePath:
                         mean_prev = (np.array(ub_pw) + np.array(lb_pw)) / 2.
                         mean_fs = (np.array(ub_fs) + np.array(lb_fs)) / 2.
 
-                        if has_collision_in_line(self.map, mean_prev, mean_fs):
+                        if dynamic_v2x_by_step is None:
+                            segment_blocked = has_collision_in_line(
+                                self.map, mean_prev, mean_fs)
+                        else:
+                            transition_check_count += 1
+                            prediction_step = n + i
+                            collision_cache_key = (
+                                prediction_step,
+                                float(mean_prev[0]),
+                                float(mean_prev[1]),
+                                float(mean_fs[0]),
+                                float(mean_fs[1]),
+                            )
+                            if (
+                                combination_collision_cache_enabled
+                                and collision_cache_key
+                                    in combination_collision_cache
+                            ):
+                                transition_cache_hits += 1
+                                if (
+                                    shared_combination_collision_cache_stats
+                                        is not None
+                                    and collision_cache_key
+                                        in shared_combination_collision_cache_keys
+                                ):
+                                    shared_combination_collision_cache_stats[
+                                        "hits"
+                                    ] = (
+                                        shared_combination_collision_cache_stats.get(
+                                            "hits", 0
+                                        ) + 1
+                                    )
+                                segment_blocked = combination_collision_cache[
+                                    collision_cache_key]
+                            else:
+                                transition_cache_misses += 1
+                                if (
+                                    shared_combination_collision_cache_stats
+                                        is not None
+                                ):
+                                    shared_combination_collision_cache_stats[
+                                        "misses"
+                                    ] = (
+                                        shared_combination_collision_cache_stats.get(
+                                            "misses", 0
+                                        ) + 1
+                                    )
+                                line_x0, line_y0 = self.map.w2m(
+                                    mean_prev[0], mean_prev[1])
+                                line_x1, line_y1 = self.map.w2m(
+                                    mean_fs[0], mean_fs[1])
+                                line_x, line_y, _ = line_aa(
+                                    line_x0, line_y0, line_x1, line_y1)
+                                segment_obstacles = dynamic_v2x_by_step[
+                                    min(
+                                        prediction_step,
+                                        len(dynamic_v2x_by_step) - 1,
+                                    )
+                                ]
+
+                                segment_obstacle_geometry = None
+                                if precompute_combination_dynamic_geometry:
+                                    geometry_step = min(
+                                        prediction_step,
+                                        len(dynamic_v2x_by_step) - 1,
+                                    )
+                                    if (
+                                        geometry_step not in
+                                        combination_dynamic_geometry_by_step
+                                    ):
+                                        timing_geometry_start = (
+                                            time.perf_counter())
+                                        combination_dynamic_geometry_by_step[
+                                            geometry_step] = [
+                                                (
+                                                    obstacle,
+                                                    *self.map.w2m(
+                                                        obstacle.cx,
+                                                        obstacle.cy,
+                                                    ),
+                                                    int(np.ceil(float(
+                                                        obstacle.radius) /
+                                                        self.map.resolution)),
+                                                )
+                                                for obstacle in
+                                                segment_obstacles
+                                            ]
+                                        combination_geometry_prepare_sec += (
+                                            time.perf_counter()
+                                            - timing_geometry_start)
+                                    segment_obstacle_geometry = (
+                                        combination_dynamic_geometry_by_step[
+                                            geometry_step])
+
+                                def combination_cell_occupied(cell_x, cell_y):
+                                    nonlocal combination_dynamic_cell_check_count
+                                    combination_dynamic_cell_check_count += 1
+                                    return self._is_obstacle_occupied(
+                                        cell_x,
+                                        cell_y,
+                                        occupancy_data=
+                                            static_occupancy_data,
+                                        dynamic_obstacles=segment_obstacles,
+                                        dynamic_obstacle_raster_geometry=
+                                            segment_obstacle_geometry,
+                                    )
+
+                                segment_blocked = any(
+                                    combination_cell_occupied(cell_x, cell_y)
+                                    for cell_x, cell_y in zip(line_x, line_y)
+                                )
+                                if combination_collision_cache_enabled:
+                                    combination_collision_cache[
+                                        collision_cache_key] = segment_blocked
+                        if segment_blocked:
                             self.upper_cols.append([[mean_prev[0], mean_fs[0]], [mean_prev[1], mean_fs[1]]])
                             return -1000000.0 # penalty because has collision!
 
@@ -1597,6 +2192,7 @@ class ReferencePath:
                 combination_segment_length = []
                 combination_indices = []
                 for combination in free_segments_indices_combinations:
+                    combination_count += 1
                     if n > 0:
                         ub_pw, lb_pw = border_cells_hor[n-1]
                     else:
@@ -1641,6 +2237,7 @@ class ReferencePath:
                 add_constraint(wp, ub_ls, lb_ls, n)
 
                 n += 1  # increment waypoint index
+        timing_combination_end = time.perf_counter()
 
         # return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
 
@@ -1653,6 +2250,7 @@ class ReferencePath:
         ANGLE_TH = np.deg2rad(45.0)
         SEARCH_HORIZON = 3 # >=1
 
+        timing_smoothing_start = time.perf_counter()
         for n in reversed(range(SEARCH_HORIZON, N-SEARCH_HORIZON+1)):
             mid_index = n
             waypoint_mid = self.get_waypoint(wp_id+n)
@@ -1686,7 +2284,17 @@ class ReferencePath:
 
                 # 更新後のbound cellが障害物に被っていないか確認
                 t_x, t_y = self.map.w2m(new_bound_cell[0], new_bound_cell[1])
-                if self._is_obstacle_occupied(t_x, t_y):
+                smoothing_obstacles = (
+                    None if dynamic_v2x_by_step is None
+                    else dynamic_v2x_by_step[
+                        min(mid_index, len(dynamic_v2x_by_step) - 1)]
+                )
+                if self._is_obstacle_occupied(
+                    t_x,
+                    t_y,
+                    occupancy_data=static_occupancy_data,
+                    dynamic_obstacles=smoothing_obstacles,
+                ):
                     # print(f"n: {n} has collision!")
                     return False
                 # if has_collision_in_line(self.map, border_cell_after, new_bound_cell):
@@ -1751,6 +2359,7 @@ class ReferencePath:
             waypoint_mid.dynamic_border_cells = tuple(new_border_cells_hor_sm_mid)
             waypoint_mid.ub_sm = new_bound_sm[0]
             waypoint_mid.lb_sm = new_bound_sm[1]
+        timing_smoothing_end = time.perf_counter()
 
         # The prediction guard remains a third independent layer in MPC.py.
         self.last_constraint_bounds = ConstraintBounds(
@@ -1761,6 +2370,139 @@ class ReferencePath:
             final_lb=np.asarray(lb_hor, dtype=float),
             final_ub=np.asarray(ub_hor, dtype=float),
         )
+
+        if not ENABLE_RUNTIME_DIAGNOSTICS:
+            self.last_path_constraint_timing_ms = None
+            return (
+                np.array(ub_hor),
+                np.array(lb_hor),
+                np.array(border_cells_hor_sm),
+            )
+
+        timing_total_end = time.perf_counter()
+        free_segments_ms = (
+            timing_free_segments_end - timing_free_segments_start) * 1000.0
+        combination_ms = (
+            timing_combination_end - timing_combination_start) * 1000.0
+        smoothing_ms = (
+            timing_smoothing_end - timing_smoothing_start) * 1000.0
+        combination_geometry_prepare_ms = (
+            combination_geometry_prepare_sec * 1000.0)
+        total_ms = (timing_total_end - timing_total_start) * 1000.0
+        other_ms = max(
+            total_ms - free_segments_ms - combination_ms - smoothing_ms,
+            0.0,
+        )
+        free_segment_section_overhead_ms = max(
+            free_segments_ms
+            - free_segment_timing_totals_ms["total_ms"],
+            0.0,
+        )
+        self.last_path_constraint_timing_ms = {
+            "free_segments_ms": free_segments_ms,
+            "combination_ms": combination_ms,
+            "smoothing_ms": smoothing_ms,
+            "other_ms": other_ms,
+            "total_ms": total_ms,
+            "free_line_aa_ms": free_segment_timing_totals_ms["line_aa_ms"],
+            "free_static_map_check_ms": free_segment_timing_totals_ms[
+                "static_map_check_ms"],
+            "free_dynamic_obstacle_check_ms": free_segment_timing_totals_ms[
+                "dynamic_obstacle_check_ms"],
+            "free_dynamic_geometry_prepare_ms": free_segment_timing_totals_ms[
+                "dynamic_geometry_prepare_ms"],
+            "free_conversion_ms": free_segment_timing_totals_ms[
+                "conversion_ms"],
+            "free_other_ms": free_segment_timing_totals_ms["other_ms"],
+            "free_other_setup_ms": free_segment_timing_totals_ms[
+                "other_setup_ms"],
+            "free_other_endpoint_map_prepare_ms": (
+                free_segment_timing_totals_ms[
+                    "other_endpoint_map_prepare_ms"]),
+            "free_other_cell_loop_bookkeeping_ms": (
+                free_segment_timing_totals_ms[
+                    "other_cell_loop_bookkeeping_ms"]),
+            "free_other_post_loop_finalization_ms": (
+                free_segment_timing_totals_ms[
+                    "other_post_loop_finalization_ms"]),
+            "free_other_detail_total_ms": free_segment_timing_totals_ms[
+                "other_detail_total_ms"],
+            "free_other_remaining_ms": free_segment_timing_totals_ms[
+                "other_remaining_ms"],
+            "free_internal_total_ms": free_segment_timing_totals_ms[
+                "total_ms"],
+            "free_section_overhead_ms": free_segment_section_overhead_ms,
+            "free_timing_call_count": free_segment_timing_call_count,
+        }
+        if (
+            precomputed_free_segments_hor is not None
+            and precomputed_filter_total_sec > 0.020
+        ):
+            print(
+                "[PrecomputedFreeSegmentFilterTiming] "
+                f"wp_id={wp_id} "
+                f"target_lane={target_lane} "
+                f"lane_relaxation={lane_relaxation} "
+                f"waypoint_count={precomputed_waypoint_count} "
+                f"segment_count_in={precomputed_segment_count_in} "
+                f"segment_count_out={precomputed_segment_count_out} "
+                "compute_bound_call_count="
+                f"{precomputed_compute_bound_call_count} "
+                "precomputed_bound_cache_hits="
+                f"{precomputed_bound_cache_hits} "
+                "precomputed_bound_cache_misses="
+                f"{precomputed_bound_cache_misses} "
+                "precomputed_copy_ms="
+                f"{precomputed_copy_sec * 1000.0:.3f} "
+                "lane_bounds_ms="
+                f"{precomputed_lane_bounds_sec * 1000.0:.3f} "
+                "compute_bound_filter_ms="
+                f"{precomputed_bound_filter_sec * 1000.0:.3f} "
+                "compute_bound_filter_thread_cpu_ms="
+                f"{precomputed_bound_filter_thread_cpu_sec * 1000.0:.3f} "
+                "bookkeeping_ms="
+                f"{precomputed_bookkeeping_sec * 1000.0:.3f} "
+                f"other_ms={precomputed_filter_other_sec * 1000.0:.3f} "
+                "detail_total_ms="
+                f"{precomputed_filter_detail_sec * 1000.0:.3f} "
+                f"total_ms={precomputed_filter_total_sec * 1000.0:.3f} "
+                "slowest_wp_index="
+                f"{precomputed_slowest_wp_index} "
+                "slowest_wp_ms="
+                f"{precomputed_slowest_wp_sec * 1000.0:.3f} "
+                "slowest_filter_wp_index="
+                f"{precomputed_slowest_filter_wp_index} "
+                "slowest_wp_wall_ms="
+                f"{precomputed_slowest_filter_wp_sec * 1000.0:.3f} "
+                "slowest_wp_thread_cpu_ms="
+                f"{precomputed_slowest_filter_wp_thread_cpu_sec * 1000.0:.3f}",
+                flush=True,
+            )
+        if total_ms > 20.0:
+            print(
+                "[PathConstraintTiming] "
+                f"wp_id={wp_id} "
+                f"target_lane={target_lane} "
+                f"lane_relaxation={lane_relaxation} "
+                "dynamic_v2x="
+                f"{'true' if dynamic_v2x_by_step is not None else 'false'} "
+                f"free_segments_ms={free_segments_ms:.3f} "
+                f"combination_ms={combination_ms:.3f} "
+                f"smoothing_ms={smoothing_ms:.3f} "
+                f"other_ms={other_ms:.3f} "
+                f"total_ms={total_ms:.3f} "
+                f"total_free_segments={total_free_segments} "
+                f"max_free_segments={max_free_segments} "
+                f"combination_count={combination_count} "
+                f"transition_check_count={transition_check_count} "
+                f"transition_cache_hits={transition_cache_hits} "
+                f"transition_cache_misses={transition_cache_misses} "
+                "combination_geometry_prepare_ms="
+                f"{combination_geometry_prepare_ms:.3f} "
+                "combination_dynamic_cell_check_count="
+                f"{combination_dynamic_cell_check_count}",
+                flush=True,
+            )
 
         return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
 

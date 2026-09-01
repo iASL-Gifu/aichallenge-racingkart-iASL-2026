@@ -53,14 +53,14 @@ reference_path:
 trajectory_switch:
   enter_center_wps: 18   # 前方車がこのWaypoint差未満ならCenterへ切り替え
   exit_center_wps: 20    # Center中はこのWaypoint差を超えるまで維持
-  overtake_latch_max_distance: 22.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
+  overtake_latch_max_distance: 18.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
   slow_lead_overtake_speed_kmh: 10.0 # [km/h] 停止車とは分離して特別追越しする低速前方車の上限
   slow_lead_overtake_speed_margin: 0.5 # [m/s] 車線分離まで対象速度に加える接近余裕
   slow_lead_overtake_committed_speed_margin: 1.5 # [m/s] 外側車線適用後、車体分離までの速度差
   slow_lead_speed_match_release_lateral_error: 0.45 # [m] 外側車線中心へ到達後は低速車への速度合わせを解除
   slow_lead_overtake_infeasible_cycles: 8 # 低速車追越し中に古い予測を安全に再利用する最大失敗周期
   slow_lead_overtake_prepare_distance: 25.0 # [m] Center移行・速度合わせ・通過車線評価の開始距離
-  slow_lead_overtake_commit_distance: 22.0 # [m] 外側車線を確定して追越しを開始する距離
+  slow_lead_overtake_commit_distance: 18.0 # [m] 外側車線を確定して追越しを開始する距離
   slow_lead_overtake_retry_sec: 0.25 # [s] 低速車追従中の通過車線再評価周期
   overtake_release_distance: 22.0 # [m] ラッチ後は20m以上で解除し、15m開始とのヒステリシスを持たせる
   overtake_target_switch_margin_m: 3.0 # [m] 現在対象よりこの距離以上近い候補にだけ切り替える
