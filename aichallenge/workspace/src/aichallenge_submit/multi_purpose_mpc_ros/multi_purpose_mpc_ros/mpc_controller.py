@@ -1913,9 +1913,6 @@ class MPCController(Node):
         self, pose: Pose2D, speed: float, steering: float,
     ):
         """Roll out the PP command and validate it against physical walls."""
-        half_width = 0.5 * float(self._cfg.bicycle_model.width)
-        guard = float(getattr(
-            self._cfg.mpc, "prediction_outer_boundary_guard", 0.10))
         predicted = Pose2D()
         predicted.x = float(pose.x)
         predicted.y = float(pose.y)
@@ -1937,8 +1934,8 @@ class MPCController(Node):
             e_y = (
                 (predicted.x - float(waypoint.x)) * math.cos(normal)
                 + (predicted.y - float(waypoint.y)) * math.sin(normal))
-            lower = float(waypoint.lb) + half_width + guard
-            upper = float(waypoint.ub) - half_width - guard
+            lower, upper = self._physical_wall_safe_bounds(
+                waypoint.lb, waypoint.ub)
             if not lower <= e_y <= upper:
                 return False, (
                     f"wall_at_step={index},wp={wp_id},e_y={e_y:.3f},"
@@ -6985,8 +6982,20 @@ class MPCController(Node):
             f"[StuckRecovery] {reason}; starting DRIVE confirmation."
         )
 
+    def _physical_wall_safe_bounds(
+        self, raw_lower: float, raw_upper: float
+    ) -> tuple[float, float]:
+        """Return vehicle-center bounds that keep its footprint off the wall."""
+        half_width = 0.5 * float(self._cfg.bicycle_model.width)
+        guard = float(getattr(
+            self._cfg.mpc, "prediction_outer_boundary_guard", 0.10))
+        return (
+            float(raw_lower) + half_width + guard,
+            float(raw_upper) - half_width - guard,
+        )
+
     def _full_corridor_violation(self, x: float, y: float) -> float:
-        """Return lateral center violation of the active physical corridor."""
+        """Return footprint-aware violation of the active physical corridor."""
         wp_id = self._car.get_closest_waypoint(x, y)
         wp = self._reference_path.get_waypoint(wp_id)
         normal_angle = wp.psi + math.pi / 2.0
@@ -6997,8 +7006,10 @@ class MPCController(Node):
         lanes = self._reference_path.get_lane_bounds(wp_id)
         if not lanes:
             return math.inf
-        lower = min(float(lb) for _, lb in lanes)
-        upper = max(float(ub) for ub, _ in lanes)
+        raw_lower = min(float(lb) for _, lb in lanes)
+        raw_upper = max(float(ub) for ub, _ in lanes)
+        lower, upper = self._physical_wall_safe_bounds(
+            raw_lower, raw_upper)
         return max(lower - offset, offset - upper, 0.0)
 
     def _straight_reentry_rollout(self, pose, direction: int):
@@ -13844,12 +13855,14 @@ class MPCController(Node):
             # Ordinary MPC recovery never changed gear and must not depend on a
             # GearReport topic.  Only post-reverse recovery requires DRIVE to be
             # confirmed (directly or by the stopped-command fallback).
+            recovery_motion_active = bool(
+                recovery_active or self._straight_reentry_active)
             recovery_gear_ready = bool(
                 not self._post_reverse_full_width_recovery_active
                 or self._current_gear_is_drive()
             )
             if should_count_mpc_recovery_success(
-                stuck_recovery_active=recovery_active,
+                stuck_recovery_active=recovery_motion_active,
                 gear_is_drive=recovery_gear_ready,
                 infeasibility_counter=self._mpc.infeasibility_counter,
                 has_current_prediction=(
