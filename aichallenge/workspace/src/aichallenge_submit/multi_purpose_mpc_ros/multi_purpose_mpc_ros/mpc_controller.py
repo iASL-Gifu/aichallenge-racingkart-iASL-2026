@@ -7013,9 +7013,15 @@ class MPCController(Node):
             ))
         return np.asarray(violations, dtype=float)
 
+    @staticmethod
+    def _has_physical_corridor_violation(current_violation: float) -> bool:
+        return bool(
+            np.isfinite(current_violation) and current_violation > 0.05
+        )
+
     def _select_straight_reentry_direction(self, pose) -> int:
         current_violation = self._full_corridor_violation(pose.x, pose.y)
-        if not np.isfinite(current_violation) or current_violation <= 0.05:
+        if not self._has_physical_corridor_violation(current_violation):
             return 0
         candidates = []
         for direction in (1, -1):
@@ -7077,6 +7083,16 @@ class MPCController(Node):
             f"probe={self._straight_reentry_probe_distance:.2f}m"
         )
         return True
+
+    def _physical_violation_blocks_blind_reverse(
+        self, pose
+    ) -> tuple[bool, float]:
+        """Return whether generic reverse must wait for a safe reentry direction."""
+        current_violation = self._full_corridor_violation(pose.x, pose.y)
+        return (
+            self._has_physical_corridor_violation(current_violation),
+            float(current_violation),
+        )
 
     def _apply_straight_reentry(self, now, pose, u) -> bool:
         now_sec = float(now.nanoseconds) / 1e9
@@ -7829,12 +7845,28 @@ class MPCController(Node):
                     else now_sec
                 )
             elif now_sec - self._stuck_since >= self._stuck_time_threshold:
-                if (
+                straight_reentry_attempted = bool(
                     recover_from_mpc_stall
                     and not self._prepass_retry_after_reverse
-                    and self._start_straight_reentry(pose, now_sec)
-                ):
-                    return self._apply_straight_reentry(now, pose, u)
+                    and self._straight_reentry_enabled
+                )
+                if straight_reentry_attempted:
+                    if self._start_straight_reentry(pose, now_sec):
+                        return self._apply_straight_reentry(now, pose, u)
+                    block_blind_reverse, current_violation = (
+                        self._physical_violation_blocks_blind_reverse(pose)
+                    )
+                    if block_blind_reverse:
+                        u[0] = 0.0
+                        u[1] = 0.0
+                        self.get_logger().warn(
+                            "[StuckRecoveryBlindReverseBlocked] holding safe "
+                            "stop because StraightReentry found no safe "
+                            "improving direction: "
+                            f"current_violation={current_violation:.2f}m",
+                            throttle_duration_sec=1.0,
+                        )
+                        return True
                 if recover_from_mpc_stall:
                     self.get_logger().warn(
                         "[MPCStallRecovery] starting reverse after GNSS "

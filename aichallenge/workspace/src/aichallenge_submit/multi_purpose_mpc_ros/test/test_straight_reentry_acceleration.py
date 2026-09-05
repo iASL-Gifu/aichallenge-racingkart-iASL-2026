@@ -27,6 +27,71 @@ def _controller(*, direction=1, gear=2, reverse_drive=False):
 
 
 class StraightReentryAccelerationTest(unittest.TestCase):
+    def test_physical_violation_blocks_blind_generic_reverse(self):
+        controller = _controller()
+        controller._full_corridor_violation = lambda _x, _y: 0.051
+
+        blocked, violation = (
+            controller._physical_violation_blocks_blind_reverse(
+                SimpleNamespace(x=1.0, y=2.0)
+            )
+        )
+
+        self.assertTrue(blocked)
+        self.assertEqual(violation, 0.051)
+
+    def test_inside_physical_corridor_preserves_generic_reverse(self):
+        controller = _controller()
+        controller._full_corridor_violation = lambda _x, _y: 0.05
+
+        blocked, violation = (
+            controller._physical_violation_blocks_blind_reverse(
+                SimpleNamespace(x=1.0, y=2.0)
+            )
+        )
+
+        self.assertFalse(blocked)
+        self.assertEqual(violation, 0.05)
+
+    def test_safe_straight_reentry_directions_still_start(self):
+        for direction in (1, -1):
+            with self.subTest(direction=direction):
+                controller = _controller(direction=direction)
+                controller._straight_reentry_enabled = True
+                controller._select_straight_reentry_direction = (
+                    lambda _pose, selected=direction: selected
+                )
+                controller._reverse_rear_is_clear = lambda *_args, **_kwargs: True
+                controller._straight_reentry_probe_distance = 2.0
+                controller._stuck_pre_reverse_duration = 0.0
+                controller._straight_reentry_min_improvement = 0.2
+                controller._straight_reentry_active = False
+                controller._full_corridor_violation = lambda _x, _y: 0.25
+                controller._last_stuck_gear_command = object()
+                controller._stuck_last_drive_request_at = 1.0
+                controller._stuck_last_reverse_request_at = 1.0
+                controller.get_logger = lambda: SimpleNamespace(
+                    warn=lambda *_args, **_kwargs: None)
+
+                started = controller._start_straight_reentry(
+                    SimpleNamespace(x=0.0, y=0.0), 2.0)
+
+                self.assertTrue(started)
+                self.assertTrue(controller._straight_reentry_active)
+                self.assertEqual(controller._straight_reentry_direction, direction)
+
+    def test_failed_reentry_is_checked_before_generic_reverse_initialization(self):
+        source = inspect.getsource(MPCController._apply_stuck_recovery)
+        block_position = source.index(
+            "_physical_violation_blocks_blind_reverse")
+        reverse_position = source.index(
+            "self._stuck_recovery_until = now_sec + self._stuck_max_shift_wait"
+        )
+
+        self.assertLess(block_position, reverse_position)
+        self.assertIn("u[0] = 0.0", source[block_position:reverse_position])
+        self.assertIn("return True", source[block_position:reverse_position])
+
     def test_drive_reentry_uses_normal_forward_acceleration_from_rest(self):
         controller = _controller()
 
