@@ -62,8 +62,10 @@ def _new_run(path: Path) -> dict[str, Any]:
         "recovery_durations": [],
         "recovery_entries": 0,
         "incomplete_recoveries": 0,
-        "reverse_durations": [],
-        "reverse_episodes": 0,
+        "straight_reentry_reverse_durations": [],
+        "straight_reentry_reverse_episodes": 0,
+        "stuck_recovery_reverse_durations": [],
+        "stuck_recovery_reverse_episodes": 0,
         "reverse_command_samples": 0,
         "incomplete_reverse": 0,
         "fallback_entries": 0,
@@ -85,7 +87,8 @@ def analyze_file(path: Path) -> dict[str, Any]:
     result = _new_run(path)
     open_attempts: dict[str, dict[str, Any]] = {}
     recovery_start: Optional[float] = None
-    reverse_start: Optional[float] = None
+    straight_reentry_reverse_start: Optional[float] = None
+    stuck_recovery_reverse_start: Optional[float] = None
     last_wall_unsafe_time: Optional[float] = None
 
     with path.open("r", encoding="utf-8", errors="replace") as stream:
@@ -160,9 +163,21 @@ def analyze_file(path: Path) -> dict[str, Any]:
 
             if "[StraightReentryStart]" in line:
                 result["safety"]["straight_reentry_starts"] += 1
-                if "direction=REVERSE" in line and reverse_start is None:
-                    reverse_start = now
-                    result["reverse_episodes"] += 1
+                if (
+                    "direction=REVERSE" in line
+                    and straight_reentry_reverse_start is None
+                    and stuck_recovery_reverse_start is None
+                ):
+                    straight_reentry_reverse_start = now
+                    result["straight_reentry_reverse_episodes"] += 1
+            if (
+                "[StuckRecovery] AWSIM gear is REVERSE; "
+                "starting reverse drive" in line
+                and stuck_recovery_reverse_start is None
+                and straight_reentry_reverse_start is None
+            ):
+                stuck_recovery_reverse_start = now
+                result["stuck_recovery_reverse_episodes"] += 1
             if "[StuckRecovery] reverse cmd" in line:
                 # This is a periodic command sample, not a new episode.
                 result["reverse_command_samples"] += 1
@@ -170,12 +185,22 @@ def analyze_file(path: Path) -> dict[str, Any]:
                 "[StraightReentryStop]" in line
                 or "[StraightReentryComplete]" in line
             ):
-                if reverse_start is not None:
+                if straight_reentry_reverse_start is not None:
                     if now is not None:
-                        result["reverse_durations"].append(
-                            max(0.0, now - reverse_start)
+                        result["straight_reentry_reverse_durations"].append(
+                            max(0.0, now - straight_reentry_reverse_start)
                         )
-                    reverse_start = None
+                    straight_reentry_reverse_start = None
+            if (
+                "[StuckRecovery]" in line
+                and "; starting DRIVE confirmation." in line
+                and stuck_recovery_reverse_start is not None
+            ):
+                if now is not None:
+                    result["stuck_recovery_reverse_durations"].append(
+                        max(0.0, now - stuck_recovery_reverse_start)
+                    )
+                stuck_recovery_reverse_start = None
 
             if "[ActivePathSteeringFallbackEnter]" in line:
                 result["fallback_entries"] += 1
@@ -202,8 +227,9 @@ def analyze_file(path: Path) -> dict[str, Any]:
 
     if recovery_start is not None:
         result["incomplete_recoveries"] = 1
-    if reverse_start is not None:
-        result["incomplete_reverse"] = 1
+    result["incomplete_reverse"] = int(
+        straight_reentry_reverse_start is not None
+    ) + int(stuck_recovery_reverse_start is not None)
     return result
 
 
@@ -213,9 +239,19 @@ def aggregate(runs: list[dict[str, Any]]) -> dict[str, Any]:
     recovery_durations = [
         value for run in runs for value in run["recovery_durations"]
     ]
-    reverse_durations = [
-        value for run in runs for value in run["reverse_durations"]
+    straight_reentry_reverse_durations = [
+        value
+        for run in runs
+        for value in run["straight_reentry_reverse_durations"]
     ]
+    stuck_recovery_reverse_durations = [
+        value
+        for run in runs
+        for value in run["stuck_recovery_reverse_durations"]
+    ]
+    reverse_durations = (
+        straight_reentry_reverse_durations + stuck_recovery_reverse_durations
+    )
     successes = sum(attempt["outcome"] == "success" for attempt in attempts)
     failures = sum(attempt["outcome"] == "failure" for attempt in attempts)
     completed_attempts = successes + failures
@@ -290,18 +326,36 @@ def aggregate(runs: list[dict[str, Any]]) -> dict[str, Any]:
             ),
         },
         "reverse": {
+            "straight_reentry_reverse_episodes": sum(
+                run["straight_reentry_reverse_episodes"] for run in runs
+            ),
+            "stuck_recovery_reverse_episodes": sum(
+                run["stuck_recovery_reverse_episodes"] for run in runs
+            ),
             "reverse_episode_count": sum(
-                run["reverse_episodes"] for run in runs
+                run["straight_reentry_reverse_episodes"]
+                + run["stuck_recovery_reverse_episodes"]
+                for run in runs
             ),
             "reverse_command_samples": sum(
                 run["reverse_command_samples"] for run in runs
             ),
             "reverse_durations": reverse_durations,
+            "straight_reentry_reverse_durations": (
+                straight_reentry_reverse_durations
+            ),
+            "stuck_recovery_reverse_durations": (
+                stuck_recovery_reverse_durations
+            ),
             "total_reverse_duration": sum(reverse_durations),
+            "median_reverse_duration": (
+                statistics.median(reverse_durations)
+                if reverse_durations else None
+            ),
             "max_reverse_duration": (
                 max(reverse_durations) if reverse_durations else None
             ),
-            "incomplete_reverse_count": sum(
+            "incomplete_reverse_episodes": sum(
                 run["incomplete_reverse"] for run in runs
             ),
         },
@@ -365,11 +419,18 @@ def human_summary(result: dict[str, Any]) -> str:
             f"{recovery['active_path_steering_fallback_entries']}",
             "OSQP primal infeasible : "
             f"{recovery['osqp_primal_infeasible_events']}",
+            "StraightReentry reverse episodes : "
+            f"{reverse['straight_reentry_reverse_episodes']}",
+            "StuckRecovery reverse episodes : "
+            f"{reverse['stuck_recovery_reverse_episodes']}",
             f"Reverse episodes : {reverse['reverse_episode_count']}",
             f"Reverse command samples : {reverse['reverse_command_samples']}",
             f"Total reverse : {_duration(reverse['total_reverse_duration'])}",
+            "Median reverse : "
+            f"{_duration(reverse['median_reverse_duration'])}",
             f"Max reverse : {_duration(reverse['max_reverse_duration'])}",
-            f"Incomplete reverse : {reverse['incomplete_reverse_count']}",
+            "Incomplete reverse : "
+            f"{reverse['incomplete_reverse_episodes']}",
             "",
             "## Safety",
             "",
