@@ -14,6 +14,7 @@ from multi_purpose_mpc_ros.core.spatial_bicycle_models import (
     understeer_curvature_gain,
 )
 from multi_purpose_mpc_ros.core.reference_path import (
+    collapsed_constraint_snapshot,
     retain_first_collapsed_constraint,
 )
 
@@ -129,6 +130,14 @@ def zero_inverted_bounds(lower_bounds, upper_bounds):
     lower[inverted] = 0.0
     upper[inverted] = 0.0
     return lower, upper
+
+
+def has_active_offset_limits(offsets) -> bool:
+    """Return whether an objective-offset profile requests real movement."""
+    if offsets is None:
+        return False
+    values = np.asarray(offsets, dtype=float).reshape(-1)
+    return bool(values.size and np.any(np.isfinite(values) & (values > 0.0)))
 
 
 def build_arc_length_steering_reservation(
@@ -305,6 +314,7 @@ class MPC:
         # physical-course bounds remain unchanged.
         self.target_lane_lateral_offsets = None
         self.full_width_l1_offset_limits = None
+        self.full_width_l0_offset_limits = None
 
         # setupが済んでいるかどうか
         self.osqp_initialized = False
@@ -404,6 +414,7 @@ class MPC:
         self.soft_lateral_targets = None
         self.target_lane_lateral_offsets = None
         self.full_width_l1_offset_limits = None
+        self.full_width_l0_offset_limits = None
         # Snapshot of the exact corridor used by the latest solve attempt.
         # These values remain available after an infeasible solve so the
         # controller can diagnose lane-bound and obstacle-induced failures.
@@ -415,6 +426,7 @@ class MPC:
         # any retry. A later relaxed solution must not hide the collapse.
         self._constraint_collapse_detected = False
         self._constraint_collapse_detail = None
+        self._current_constraint_bounds_invalid = False
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
         self.optimizer = osqp.OSQP()
@@ -492,6 +504,15 @@ class MPC:
         self.full_width_l1_offset_limits = (
             values if values is not None and values.size else None)
 
+    def set_full_width_l0_offset_limits(self, offsets=None) -> None:
+        """Cap objective-only motion from full-width midpoint toward L0."""
+        values = (
+            None if offsets is None
+            else np.asarray(offsets, dtype=float).reshape(-1).copy()
+        )
+        self.full_width_l0_offset_limits = (
+            values if values is not None and values.size else None)
+
     def _compute_lane_center(self, wp_id: int, target_lane: int) -> float:
         lanes = self.model.reference_path.get_lane_bounds(wp_id)
         if not lanes or target_lane >= len(lanes):
@@ -511,6 +532,7 @@ class MPC:
         """
 
         t_start = time.perf_counter()
+        self._current_constraint_bounds_invalid = False
         
         # 既存の制約設定
         umin = self.input_constraints['umin']
@@ -715,6 +737,22 @@ class MPC:
         # problem safely infeasible and lets the existing recovery run.
         lb, ub = zero_inverted_bounds(lb, ub)
 
+        # A zero-width, inverted, or non-finite corridor is not an OSQP
+        # infeasibility sentinel: lb==ub==0 can be solved as the equality
+        # e_y==0. Reject it explicitly before optimizer.solve().
+        current_collapse = collapsed_constraint_snapshot(
+            ub, lb, self._constraint_wp_ids)
+        self._current_constraint_bounds_invalid = bool(
+            current_collapse is not None)
+        self._constraint_collapse_detail = retain_first_collapsed_constraint(
+            self._constraint_collapse_detail,
+            ub,
+            lb,
+            self._constraint_wp_ids,
+        )
+        self._constraint_collapse_detected = bool(
+            self._constraint_collapse_detail is not None)
+
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
         #print("N =", N)
@@ -726,16 +764,6 @@ class MPC:
         xr[self.nx::self.nx] = (lb + ub) / 2
         self._prediction_lower_bounds = np.array(lb, copy=True)
         self._prediction_upper_bounds = np.array(ub, copy=True)
-        if self._constraint_target_lane in (0, 2):
-            self._constraint_collapse_detail = retain_first_collapsed_constraint(
-                self._constraint_collapse_detail,
-                self._prediction_upper_bounds,
-                self._prediction_lower_bounds,
-                self._constraint_wp_ids,
-            )
-            self._constraint_collapse_detected = bool(
-                self._constraint_collapse_detail is not None)
-
         # If a target lane is active, preserve lane-center targets for the e_y references.
         target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
         if target_lane is not None:
@@ -792,7 +820,25 @@ class MPC:
                 terminal_center,
                 self.soft_target_alpha,
             )
-        elif self.full_width_l1_offset_limits is not None:
+        elif has_active_offset_limits(self.full_width_l0_offset_limits):
+            # Bounds remain full width. Move only xr toward L0 by at most the
+            # configured amount. Higher-priority soft/hard lane targets above
+            # continue to own the objective while a manoeuvre is active.
+            for n in range(N):
+                midpoint = xr[n * self.nx]
+                l0_center = self._compute_lane_center(
+                    self.model.wp_id + n, 0)
+                limit = max(float(self.full_width_l0_offset_limits[
+                    min(n, len(self.full_width_l0_offset_limits) - 1)]), 0.0)
+                xr[n * self.nx] = midpoint + np.clip(
+                    l0_center - midpoint, -limit, limit)
+            midpoint = xr[N * self.nx]
+            l0_center = self._compute_lane_center(self.model.wp_id + N, 0)
+            limit = max(float(self.full_width_l0_offset_limits[
+                min(N, len(self.full_width_l0_offset_limits) - 1)]), 0.0)
+            xr[N * self.nx] = midpoint + np.clip(
+                l0_center - midpoint, -limit, limit)
+        elif has_active_offset_limits(self.full_width_l1_offset_limits):
             # Bounds remain full width. Move only xr toward L1 by at most the
             # configured amount, avoiding a discontinuous lane-center jump.
             for n in range(N):
@@ -929,6 +975,7 @@ class MPC:
         self.last_solution_accurate = False
         self._constraint_collapse_detected = False
         self._constraint_collapse_detail = None
+        self._current_constraint_bounds_invalid = False
 
         #最近傍Waypointを取得
         self.model.get_current_waypoint()
@@ -953,12 +1000,18 @@ class MPC:
 
         try:
 
-            dec = self.optimizer.solve()
+            dec = None
+            if not self._current_constraint_bounds_invalid:
+                dec = self.optimizer.solve()
             if self.debug_counter % 20 == 0:
-                print(dec.info.status,flush=True)
+                print(
+                    "invalid constraint bounds"
+                    if dec is None else dec.info.status,
+                    flush=True,
+                )
             t2 = time.perf_counter()
 
-            if is_primal_infeasible(dec):
+            if self._current_constraint_bounds_invalid or is_primal_infeasible(dec):
                 # Limit only the additional relaxed retries. The initial
                 # problem build and solve are normal MPC work and are not
                 # included in this deadline.
@@ -1009,6 +1062,9 @@ class MPC:
                     self._init_problem(
                         N, self.model.safety_margin,
                         lane_relaxation=lane_relaxation)
+                    if self._current_constraint_bounds_invalid:
+                        dec = None
+                        continue
                     dec = self.optimizer.solve()
                     t2 = time.perf_counter()
 
@@ -1024,6 +1080,13 @@ class MPC:
                         break
 
             if not is_valid_osqp_solution(dec):
+                if self._current_constraint_bounds_invalid:
+                    detail = self._constraint_collapse_detail or {}
+                    raise ValueError(
+                        "invalid/collapsed MPC constraint bounds: "
+                        f"wp={detail.get('wp')}, "
+                        f"width={detail.get('width')}"
+                    )
                 if self.time_budget_exceeded:
                     raise ValueError(
                         "MPC retry time budget exceeded "

@@ -196,6 +196,27 @@ def overtake_shadow_solution_acceptable(
     )
 
 
+def outer_prediction_bypass_target_matches(
+    *, vehicle_id, latched_target_id, handoff_target_id,
+    handoff_lane_idx, verified_outer_lane,
+) -> bool:
+    """Accept the active target or a same-lane consecutive-handoff target.
+
+    A handoff target is intentionally accepted before it becomes the latched
+    target.  The caller must still require a fresh collision-free MPC
+    prediction, separated current envelopes, and a safe dynamic gap.
+    """
+    if vehicle_id is None:
+        return False
+    if vehicle_id == latched_target_id:
+        return True
+    return bool(
+        vehicle_id == handoff_target_id
+        and handoff_lane_idx in (0, 2)
+        and verified_outer_lane == handoff_lane_idx
+    )
+
+
 def update_motion_latch(
     has_moved_once: bool,
     actual_speed: float,
@@ -725,7 +746,7 @@ def ordered_outer_lane_candidates(preferred_lane_idx, excluded_lane_idx=None):
 
 
 def ordered_prepass_fallback_candidates(
-    failed_lane_idx, attempted_outer_lanes=()
+    failed_lane_idx, attempted_outer_lanes=(), reconsider_attempted=False
 ):
     """Return opposite outer, failed outer re-probe, then center lane."""
     if failed_lane_idx == 0:
@@ -734,7 +755,7 @@ def ordered_prepass_fallback_candidates(
         ordered = (0, 2, 1)
     else:
         ordered = (0, 2, 1)
-    attempted = set(attempted_outer_lanes)
+    attempted = set() if reconsider_attempted else set(attempted_outer_lanes)
     return tuple(
         lane_idx for lane_idx in ordered
         if lane_idx == 1 or lane_idx not in attempted
@@ -779,6 +800,54 @@ def classify_lane_conflicts(
 
 def lane_conflicts_are_clear(conflicts) -> bool:
     return not any(conflicts.get(group) for group in ("front", "side", "rear"))
+
+
+def strict_shadow_slow_commit_creep_allowed(
+    *,
+    target_matches: bool,
+    shadow_verified: bool,
+    committed_outer_lane: bool,
+    target_is_slow: bool,
+    current_envelopes_separated: bool,
+    candidate_passable: bool,
+    candidate_conflicts,
+) -> bool:
+    """Allow forward creep only for a still-safe verified slow-car pass.
+
+    This is deliberately stricter than ordinary overtake acquisition.  It is
+    only a deadlock breaker after the exact target/lane has passed strict
+    Shadow MPC verification; any current body overlap, physical-width loss or
+    live front/side traffic conflict restores the normal full-stop behaviour.
+    Rear traffic is intentionally left to the existing merge/parallel safety
+    layers and does not prevent the low-speed forward motion itself.
+    """
+    return bool(
+        target_matches
+        and shadow_verified
+        and committed_outer_lane
+        and target_is_slow
+        and current_envelopes_separated
+        and candidate_passable
+        and not candidate_conflicts.get("front")
+        and not candidate_conflicts.get("side")
+    )
+
+
+def l0_restricted_follow_can_ignore_passage(
+    *, restriction_active, lane_has_vehicle_width, non_target_conflicts
+) -> bool:
+    """Keep L0 when only the followed target invalidates passing clearance.
+
+    Rear-only traffic is intentionally ignored by the L0-priority policy, but
+    any unrelated front/side vehicle or an actual lane-width loss still blocks
+    the override.
+    """
+    return bool(
+        restriction_active
+        and lane_has_vehicle_width
+        and not non_target_conflicts.get("front")
+        and not non_target_conflicts.get("side")
+    )
 
 
 def select_l2_restricted_zone_lane(

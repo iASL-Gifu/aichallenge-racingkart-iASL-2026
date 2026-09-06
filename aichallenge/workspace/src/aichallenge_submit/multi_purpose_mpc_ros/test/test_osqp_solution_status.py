@@ -11,6 +11,7 @@ from multi_purpose_mpc_ros.core.MPC import (
     is_plausible_world_prediction,
     is_primal_infeasible,
     is_valid_osqp_solution,
+    has_active_offset_limits,
     zero_inverted_bounds,
 )
 
@@ -147,6 +148,14 @@ class TestOuterBoundaryGuard(unittest.TestCase):
         lower, upper = zero_inverted_bounds(lower, upper)
         np.testing.assert_array_equal(lower, [0.0])
         np.testing.assert_array_equal(upper, [0.0])
+
+
+class TestObjectiveOffsetActivation(unittest.TestCase):
+    def test_zero_profile_does_not_mask_another_offset_direction(self):
+        self.assertFalse(has_active_offset_limits([0.0, 0.0, 0.0]))
+
+    def test_positive_profile_is_active(self):
+        self.assertTrue(has_active_offset_limits([0.0, 0.35, 0.0]))
 
 
 class TestPredictionFallbackLimit(unittest.TestCase):

@@ -8,12 +8,108 @@ import pytest
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     V2XVehicleTracker,
     follow_emergency_reacquire_blocked,
+    l0_restricted_follow_can_ignore_passage,
     outer_lane_problem_slow_override_active,
+    outer_prediction_bypass_target_matches,
     overtake_shadow_solution_acceptable,
     prepass_recovery_timeout_expired,
     resolve_applied_corridor,
     select_l2_restricted_zone_lane,
+    strict_shadow_slow_commit_creep_allowed,
 )
+
+
+def test_l0_restricted_follow_ignores_target_only_passage_loss():
+    assert l0_restricted_follow_can_ignore_passage(
+        restriction_active=True,
+        lane_has_vehicle_width=True,
+        non_target_conflicts={"front": [], "side": [], "rear": ["d3"]},
+    )
+
+
+@pytest.mark.parametrize("conflict_group", ["front", "side"])
+def test_l0_restricted_follow_rejects_unrelated_collision(conflict_group):
+    conflicts = {"front": [], "side": [], "rear": []}
+    conflicts[conflict_group] = ["d3"]
+    assert not l0_restricted_follow_can_ignore_passage(
+        restriction_active=True,
+        lane_has_vehicle_width=True,
+        non_target_conflicts=conflicts,
+    )
+
+
+def test_l0_restricted_follow_rejects_lane_width_loss():
+    assert not l0_restricted_follow_can_ignore_passage(
+        restriction_active=True,
+        lane_has_vehicle_width=False,
+        non_target_conflicts={"front": [], "side": [], "rear": []},
+    )
+
+
+def test_strict_shadow_stopped_commit_creep_accepts_exact_safe_commit():
+    assert strict_shadow_slow_commit_creep_allowed(
+        target_matches=True,
+        shadow_verified=True,
+        committed_outer_lane=True,
+        target_is_slow=True,
+        current_envelopes_separated=True,
+        candidate_passable=True,
+        candidate_conflicts={"front": [], "side": [], "rear": []},
+    )
+
+
+@pytest.mark.parametrize(
+    "failed_gate",
+    [
+        "target_matches",
+        "shadow_verified",
+        "committed_outer_lane",
+        "target_is_slow",
+        "current_envelopes_separated",
+        "candidate_passable",
+    ],
+)
+def test_strict_shadow_stopped_commit_creep_rejects_failed_gate(failed_gate):
+    gates = {
+        "target_matches": True,
+        "shadow_verified": True,
+        "committed_outer_lane": True,
+        "target_is_slow": True,
+        "current_envelopes_separated": True,
+        "candidate_passable": True,
+    }
+    gates[failed_gate] = False
+    assert not strict_shadow_slow_commit_creep_allowed(
+        **gates,
+        candidate_conflicts={"front": [], "side": [], "rear": []},
+    )
+
+
+@pytest.mark.parametrize("group", ["front", "side"])
+def test_strict_shadow_stopped_commit_creep_rejects_live_conflict(group):
+    conflicts = {"front": [], "side": [], "rear": []}
+    conflicts[group] = ["d3"]
+    assert not strict_shadow_slow_commit_creep_allowed(
+        target_matches=True,
+        shadow_verified=True,
+        committed_outer_lane=True,
+        target_is_slow=True,
+        current_envelopes_separated=True,
+        candidate_passable=True,
+        candidate_conflicts=conflicts,
+    )
+
+
+def test_strict_shadow_stopped_commit_creep_ignores_rear_conflict():
+    assert strict_shadow_slow_commit_creep_allowed(
+        target_matches=True,
+        shadow_verified=True,
+        committed_outer_lane=True,
+        target_is_slow=True,
+        current_envelopes_separated=True,
+        candidate_passable=True,
+        candidate_conflicts={"front": [], "side": [], "rear": ["d3"]},
+    )
 
 
 def test_problem_zone_slow_override_rejects_missing_target():
@@ -361,6 +457,38 @@ def _valid_shadow_kwargs():
 
 def test_shadow_accepts_exact_solution_at_relaxation_limit():
     assert overtake_shadow_solution_acceptable(**_valid_shadow_kwargs())
+
+
+def test_outer_prediction_bypass_accepts_latched_target():
+    assert outer_prediction_bypass_target_matches(
+        vehicle_id="d2", latched_target_id="d2",
+        handoff_target_id=None, handoff_lane_idx=None,
+        verified_outer_lane=0,
+    )
+
+
+def test_outer_prediction_bypass_accepts_same_lane_handoff_target():
+    assert outer_prediction_bypass_target_matches(
+        vehicle_id="d3", latched_target_id="d2",
+        handoff_target_id="d3", handoff_lane_idx=0,
+        verified_outer_lane=0,
+    )
+
+
+def test_outer_prediction_bypass_rejects_unverified_handoff_lane():
+    assert not outer_prediction_bypass_target_matches(
+        vehicle_id="d3", latched_target_id="d2",
+        handoff_target_id="d3", handoff_lane_idx=0,
+        verified_outer_lane=2,
+    )
+
+
+def test_outer_prediction_bypass_rejects_unrelated_vehicle():
+    assert not outer_prediction_bypass_target_matches(
+        vehicle_id="d4", latched_target_id="d2",
+        handoff_target_id="d3", handoff_lane_idx=0,
+        verified_outer_lane=0,
+    )
 
 
 @pytest.mark.parametrize("override", [

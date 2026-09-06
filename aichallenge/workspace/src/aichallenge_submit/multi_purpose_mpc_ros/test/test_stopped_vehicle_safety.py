@@ -597,6 +597,11 @@ class PrepassSafetyRecoveryTest(unittest.TestCase):
             ordered_prepass_fallback_candidates(0, {2}), (0, 1))
         self.assertEqual(
             ordered_prepass_fallback_candidates(0, {0, 2}), (1,))
+        self.assertEqual(
+            ordered_prepass_fallback_candidates(
+                0, {0, 2}, reconsider_attempted=True),
+            (2, 0, 1),
+        )
 
 
 class L1SafetyRecoveryTest(unittest.TestCase):

@@ -62,12 +62,14 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     is_follow_retry_within_distance,
     is_prepass_fallback_lane_change,
     lane_conflicts_are_clear,
+    l0_restricted_follow_can_ignore_passage,
     lateral_vehicle_clearance,
     longitudinal_vehicle_clearance,
     is_parallel_vehicle,
     ordered_outer_lane_candidates,
     ordered_prepass_fallback_candidates,
     outer_lane_problem_slow_override_active,
+    outer_prediction_bypass_target_matches,
     overtake_shadow_solution_acceptable,
     prepass_recovery_timeout_expired,
     prepass_recovery_owns_lane_selection,
@@ -95,6 +97,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     should_release_prepass_distance_gate,
     should_start_l1_recovery_from_safety,
     should_start_prepass_recovery_from_safety,
+    strict_shadow_slow_commit_creep_allowed,
     should_exit_l1_probe_backoff,
     update_continuous_condition_since,
     update_fallback_commit_success_since,
@@ -759,10 +762,28 @@ class MPCController(Node):
             switch_cfg, "overtake_commit_max_relaxation_m", 0.20)), 0.0)
         self._overtake_commit_valid_width_distance = max(float(getattr(
             switch_cfg, "overtake_commit_valid_width_distance_m", 20.0)), 0.0)
+        self._overtake_commit_probe_freshness_sec = max(float(getattr(
+            switch_cfg, "overtake_commit_probe_freshness_sec", 0.75)), 0.0)
+        self._overtake_commit_verified_candidate_hold_sec = max(float(getattr(
+            switch_cfg, "overtake_commit_verified_candidate_hold_sec", 1.5)),
+            self._overtake_commit_probe_freshness_sec)
+        self._committed_overtake_acceleration_boost_enabled = bool(getattr(
+            switch_cfg, "committed_overtake_acceleration_boost_enabled", True))
+        self._committed_overtake_acceleration_min_speed_error = max(float(
+            getattr(switch_cfg,
+                    "committed_overtake_acceleration_min_speed_error", 0.5)),
+            0.0)
         self._overtake_commit_probe_vehicle_id = None
         self._overtake_commit_probe_lane_idx = None
         self._overtake_commit_probe_success_cycles = 0
         self._overtake_commit_probe_confirmed = False
+        self._overtake_commit_probe_confirmed_at = None
+        # A successful Shadow probe is initially pending state, but its safety
+        # result must survive the latch/Soft Transition for the same target and
+        # lane.  Otherwise the next cycle forgets the proof and re-applies the
+        # slow-lead speed cap until lateral convergence completes.
+        self._committed_shadow_vehicle_id = None
+        self._committed_shadow_lane_idx = None
         self._slow_lead_overtake_speed = max(float(getattr(
             switch_cfg, "slow_lead_overtake_speed_kmh", 10.0)) / 3.6, 0.0)
         self._slow_lead_overtake_speed_margin = max(float(getattr(
@@ -785,6 +806,12 @@ class MPCController(Node):
         self._slow_lead_overtake_commit_distance = min(max(float(getattr(
             switch_cfg, "slow_lead_overtake_commit_distance", 18.0)), 0.0),
             self._slow_lead_overtake_prepare_distance)
+        self._late_defense_slow_lead_overtake_commit_distance = min(max(
+            float(getattr(
+                switch_cfg,
+                "late_defense_slow_lead_overtake_commit_distance",
+                20.0,
+            )), 0.0), self._slow_lead_overtake_prepare_distance)
         self._slow_lead_overtake_retry_sec = max(float(getattr(
             switch_cfg, "slow_lead_overtake_retry_sec", 0.25)), 0.0)
         self._overtake_release_distance = max(float(getattr(
@@ -800,6 +827,12 @@ class MPCController(Node):
             0.0)
         self._overtake_target_committed = False
         self._overtake_completed_target_id = None
+        self._consecutive_overtake_handoff_target_id = None
+        self._consecutive_overtake_handoff_lane_idx = None
+        self._consecutive_overtake_handoff_started_at = None
+        self._consecutive_overtake_handoff_timeout_sec = max(float(getattr(
+            switch_cfg, "consecutive_overtake_handoff_timeout_sec", 1.0)),
+            self._overtake_commit_probe_freshness_sec)
         self._outer_lane_progress_timeout = max(float(getattr(
             switch_cfg, "outer_lane_progress_timeout_sec", 2.5)), 0.0)
         self._outer_lane_min_progress = max(float(getattr(
@@ -857,6 +890,14 @@ class MPCController(Node):
             offset_m = max(float(getattr(zone, "offset_m", 0.0)), 0.0)
             if start_wp >= 0 and end_wp >= 0 and offset_m > 0.0:
                 self._full_width_l1_offset_zones.append(
+                    (start_wp, end_wp, offset_m))
+        self._full_width_l0_offset_zones = []
+        for zone in getattr(switch_cfg, "full_width_l0_offset_zones", []):
+            start_wp = int(getattr(zone, "start_wp", -1))
+            end_wp = int(getattr(zone, "end_wp", -1))
+            offset_m = max(float(getattr(zone, "offset_m", 0.0)), 0.0)
+            if start_wp >= 0 and end_wp >= 0 and offset_m > 0.0:
+                self._full_width_l0_offset_zones.append(
                     (start_wp, end_wp, offset_m))
         self._pp_safe_recovery_fast_zones = []
         for zone in getattr(switch_cfg, "pp_safe_recovery_fast_zones", []):
@@ -1127,6 +1168,13 @@ class MPCController(Node):
             overtake_cfg, "lane_width_tolerance", 0.05)), 0.0)
         self._passage_lane_width_tolerance_points = max(int(getattr(
             overtake_cfg, "lane_width_tolerance_points", 2)), 0)
+        self._strict_shadow_stopped_commit_creep_speed = max(float(getattr(
+            overtake_cfg, "strict_shadow_commit_creep_speed", 1.0)), 0.0)
+        self._strict_shadow_commit_creep_max_target_speed = kmh_to_m_per_sec(
+            max(float(getattr(
+                overtake_cfg,
+                "strict_shadow_commit_creep_max_target_speed_kmh",
+                5.0)), 0.0))
         self._forced_overtake_vehicle_id = None
         self._close_obstacle_reverse_requested = False
         self._parallel_abort_active = False
@@ -1239,6 +1287,26 @@ class MPCController(Node):
             self._moving_vehicle_brake_bypass_horizon_sec = 1.5
             self._moving_vehicle_brake_bypass_preview_distance = 8.0
             self._moving_vehicle_brake_bypass_since = {}
+            self._center_path_collision_prediction_horizon_sec = max(float(
+                getattr(v2x_cfg,
+                        "center_path_collision_prediction_horizon_sec", 1.5)),
+                0.0)
+            self._center_path_collision_prediction_margin = max(float(
+                getattr(v2x_cfg,
+                        "center_path_collision_prediction_margin", 0.15)),
+                0.0)
+            self._center_path_collision_hazard_hold_sec = max(float(
+                getattr(v2x_cfg,
+                        "center_path_collision_hazard_hold_sec", 0.50)),
+                0.0)
+            self._center_path_collision_hazard_until = {}
+            self._moving_emergency_preview_distance = max(float(getattr(
+                v2x_cfg, "moving_emergency_preview_distance", 12.0)), 0.0)
+            self._moving_emergency_reaction_sec = max(float(getattr(
+                v2x_cfg, "moving_emergency_reaction_sec", 0.40)), 0.0)
+            self._moving_emergency_available_deceleration = max(float(getattr(
+                v2x_cfg, "moving_emergency_available_deceleration", 2.5)),
+                0.1)
             self._moving_emergency_desired_distance = max(float(getattr(
                 v2x_cfg, "moving_emergency_desired_distance", 3.0)), 0.0)
             self._moving_emergency_spacing_kp = max(float(getattr(
@@ -1247,6 +1315,8 @@ class MPCController(Node):
                 v2x_cfg, "moving_emergency_max_speed_deficit", 0.5)), 0.0)
             self._moving_emergency_critical_distance = max(float(getattr(
                 v2x_cfg, "moving_emergency_critical_distance", 2.0)), 0.0)
+            self._parallel_safety_enabled = bool(getattr(
+                v2x_cfg, "parallel_safety_enabled", True))
             self._v2x_parallel_vehicle_half_width = max(float(getattr(
                 v2x_cfg, "parallel_vehicle_half_width",
                 self._v2x_vehicle_radius)), 0.0)
@@ -2248,6 +2318,11 @@ class MPCController(Node):
         self._prepass_soft_guidance_start_e_y = None
         self._prepass_soft_guidance_ramp_sec = None
 
+    def _clear_consecutive_overtake_handoff(self) -> None:
+        self._consecutive_overtake_handoff_target_id = None
+        self._consecutive_overtake_handoff_lane_idx = None
+        self._consecutive_overtake_handoff_started_at = None
+
     def _reset_overtake_state_for_target_change(
         self, new_target_id, *, reason: str
     ) -> None:
@@ -2272,6 +2347,8 @@ class MPCController(Node):
         self._overtake_completed_target_id = None
         self._reset_outer_lane_progress()
         self._reset_overtake_commit_probe()
+        self._clear_committed_shadow_verification()
+        self._clear_consecutive_overtake_handoff()
         self._overtake_switch_candidate_id = None
         self._overtake_switch_candidate_since = None
         self._clear_urgent_overtake_switch_candidate()
@@ -2329,7 +2406,16 @@ class MPCController(Node):
                 and physical_passage.get(lane_idx, False)
                 and lane_conflicts_are_clear(all_conflicts[lane_idx])
             ):
-                return lane_idx, all_conflicts
+                selected_lane_idx = self._apply_l2_restricted_zone_policy(
+                    lane_idx,
+                    target_vehicle_id=self._follow_escape_target_id,
+                    physical_passage=physical_passage,
+                    conflicts_by_lane=all_conflicts,
+                )
+                if selected_lane_idx == 0:
+                    return 0, all_conflicts
+                if selected_lane_idx == 1:
+                    break
         if (
             1 not in self._follow_escape_attempted_lanes
             and lane_conflicts_are_clear(all_conflicts[1])
@@ -2390,6 +2476,27 @@ class MPCController(Node):
             limits.append(limit)
         mpc.set_full_width_l1_offset_limits(limits)
 
+    def _update_full_width_l0_objective_offsets(self, mpc, center_wp: int):
+        """Move only a full-width objective lightly toward L0 in local zones."""
+        if (
+            not self._full_width_l0_offset_zones
+            or self._reference_pathN_center.target_lane_idx is not None
+        ):
+            mpc.set_full_width_l0_offset_limits()
+            return
+        waypoint_count = len(self._reference_pathN_center.waypoints)
+        limits = []
+        for step in range(mpc.N + 1):
+            wp_id = (int(center_wp) + step) % waypoint_count
+            limit = 0.0
+            for start_wp, end_wp, offset_m in self._full_width_l0_offset_zones:
+                if self._waypoint_in_configured_zones(
+                    wp_id, ((start_wp, end_wp),)
+                ):
+                    limit = max(limit, offset_m)
+            limits.append(limit)
+        mpc.set_full_width_l0_offset_limits(limits)
+
     def _l2_inward_targets(self, center_wp: int):
         """Build the offset L2 xr sequence used during soft guidance."""
         offsets = self._l2_inward_offsets(
@@ -2413,6 +2520,34 @@ class MPCController(Node):
             < self._l2_entry_restricted_override_speed
         )
 
+    def _slow_lead_commit_distance_at(self, center_wp: int) -> float:
+        """Return the low-speed commit gate for the current map section."""
+        if self._waypoint_in_configured_zones(
+            int(center_wp), self._l2_entry_restricted_zones
+        ):
+            return self._late_defense_slow_lead_overtake_commit_distance
+        return self._slow_lead_overtake_commit_distance
+
+    def _lane_horizon_has_vehicle_width(self, lane_idx: int) -> bool:
+        """Return whether a lane alone can contain ego over the MPC horizon."""
+        lane_widths = []
+        for offset in range(self._mpcN_center.N + 1):
+            lanes = self._reference_pathN_center.get_lane_bounds(
+                int(self._carN_center.wp_id) + offset)
+            if lane_idx >= len(lanes):
+                lane_widths.append(0.0)
+                continue
+            lane_ub, lane_lb = lanes[lane_idx]
+            lane_widths.append(float(lane_ub) - float(lane_lb))
+        result = evaluate_lane_width_samples(
+            lane_widths,
+            required_width=float(self._cfg.bicycle_model.width),
+            tolerance=self._passage_lane_width_tolerance,
+            max_consecutive_tolerated=(
+                self._passage_lane_width_tolerance_points),
+        )
+        return bool(result["passable"])
+
     def _apply_l2_restricted_zone_policy(
         self, candidate_lane_idx, *, target_vehicle_id,
         physical_passage, conflicts_by_lane, center_wp=None,
@@ -2425,13 +2560,39 @@ class MPCController(Node):
         restriction_active = self._waypoint_in_configured_zones(
             wp_id, self._l2_entry_restricted_zones)
         slow_override = self._l2_restricted_slow_override(target_vehicle_id)
+        l0_conflicts = conflicts_by_lane.get(0, {})
+        # In the final defensive section, lack of room to pass the lead on L0
+        # must not be confused with lack of room to *follow* it on L0.  The
+        # ordinary passage result includes target-to-boundary clearance and
+        # therefore becomes false when the lead itself occupies L0.  Permit
+        # the L0 follow state whenever the lane's own horizon is wide enough;
+        # side traffic and genuine lane-width collapse remain blockers.
+        l0_follow_geometry_override = bool(
+            restriction_active
+            and not slow_override
+            and target_vehicle_id is not None
+            and not physical_passage.get(0, False)
+            and not l0_conflicts.get("side")
+            and self._lane_horizon_has_vehicle_width(0)
+        )
         selected = select_l2_restricted_zone_lane(
             candidate_lane_idx,
             restriction_active=restriction_active,
             slow_lead_override=slow_override,
-            l0_physically_passable=physical_passage.get(0, False),
-            l0_conflicts=conflicts_by_lane.get(0, {}),
+            l0_physically_passable=(
+                physical_passage.get(0, False)
+                or l0_follow_geometry_override
+            ),
+            l0_conflicts=l0_conflicts,
         )
+        if l0_follow_geometry_override and selected == 0:
+            self.get_logger().info(
+                "[L0ZoneFollowGeometryOverride] L0 passing clearance is "
+                "unavailable, but the lane itself has vehicle width; "
+                "selecting L0 to follow the lead instead of returning to L1: "
+                f"center_wp={wp_id}, vehicle_id={target_vehicle_id}",
+                throttle_duration_sec=1.0,
+            )
         if restriction_active and not slow_override and selected != candidate_lane_idx:
             self.get_logger().info(
                 "[L2EntryRestricted] ordinary lead cannot create an L2 "
@@ -2447,7 +2608,13 @@ class MPCController(Node):
 
     def _prediction_collision_with_vehicle(self, target_id):
         """Return True/False for predicted OBB collision, or None if unknown."""
-        if target_id is None or self._mpc.current_prediction is None:
+        if (
+            target_id is None
+            or self._mpc.current_prediction is None
+            or self._mpc.infeasibility_counter != 0
+            or self._mpc.used_prediction_fallback
+            or self._mpc.recovery_requested
+        ):
             return None
         target_buf = self._v2x_tracker._samples.get(target_id)
         if not target_buf:
@@ -2549,14 +2716,126 @@ class MPCController(Node):
                 return False
         return True
 
+    def _center_path_collision_prediction(self, target_id):
+        """Predict an opponent along Center and check ego/opponent OBBs.
+
+        V2X velocity is used only for progress speed.  Keeping its current
+        Center lateral offset while advancing on the closed Center arc makes
+        the predicted position and yaw follow the bend instead of continuing
+        along a straight world-frame velocity vector.
+        """
+        if (
+            target_id is None
+            or self._mpc.current_prediction is None
+            or self._mpc.infeasibility_counter != 0
+            or self._mpc.used_prediction_fallback
+            or self._mpc.recovery_requested
+        ):
+            return None
+        target_buf = self._v2x_tracker._samples.get(target_id)
+        if not target_buf:
+            return None
+        _, target_x, target_y = target_buf[-1]
+        target_frenet = self._center_frenet(target_x, target_y)
+        if target_frenet is None or self._center_arc_total_length <= 1e-6:
+            return None
+        target_vx, target_vy = self._v2x_tracker.velocity(target_id)
+        target_wp_id = self._carN_center.get_closest_waypoint(
+            target_x, target_y)
+        target_center_heading = float(
+            self._reference_pathN_center.get_waypoint(target_wp_id).psi)
+        # Only forward progress on Center advances the opponent. Lateral V2X
+        # velocity and corner-heading lag must not inflate its arc speed.
+        target_speed = max(
+            target_vx * math.cos(target_center_heading)
+            + target_vy * math.sin(target_center_heading),
+            0.0,
+        )
+        if not self._v2x_tracker.has_velocity_estimate(target_id):
+            target_speed = 0.0
+
+        pred_x, pred_y = self._mpc.current_prediction
+        if not pred_x or len(pred_x) != len(pred_y):
+            return None
+        points = self._center_arc_points
+        cumulative = self._center_arc_cumulative
+        total = float(self._center_arc_total_length)
+        target_s, target_lateral = target_frenet
+
+        def center_pose_at_s(path_s):
+            wrapped_s = float(path_s) % total
+            segment_index = int(np.searchsorted(
+                cumulative, wrapped_s, side="right") - 1)
+            segment_index = max(0, min(segment_index, len(points) - 1))
+            next_index = (segment_index + 1) % len(points)
+            x0, y0 = points[segment_index]
+            x1, y1 = points[next_index]
+            segment_start = float(cumulative[segment_index])
+            segment_length = float(cumulative[segment_index + 1]) - segment_start
+            ratio = (
+                (wrapped_s - segment_start) / segment_length
+                if segment_length > 1e-9 else 0.0
+            )
+            heading = math.atan2(y1 - y0, x1 - x0)
+            center_x = float(x0) + ratio * (float(x1) - float(x0))
+            center_y = float(y0) + ratio * (float(y1) - float(y0))
+            # Positive Frenet lateral is left of the Center tangent.
+            return (
+                center_x - math.sin(heading) * float(target_lateral),
+                center_y + math.cos(heading) * float(target_lateral),
+                heading,
+            )
+
+        prediction_times = [
+            self._v2x_t_samples[min(index + 2,
+                                   len(self._v2x_t_samples) - 1)]
+            for index in range(len(pred_x))
+        ]
+        for index, (ego_x, ego_y, prediction_time) in enumerate(zip(
+            pred_x, pred_y, prediction_times
+        )):
+            if prediction_time > (
+                self._center_path_collision_prediction_horizon_sec
+            ):
+                break
+            previous_index = max(index - 1, 0)
+            next_index = min(index + 1, len(pred_x) - 1)
+            delta_x = float(pred_x[next_index]) - float(pred_x[previous_index])
+            delta_y = float(pred_y[next_index]) - float(pred_y[previous_index])
+            if math.hypot(delta_x, delta_y) > 1e-6:
+                ego_heading = math.atan2(delta_y, delta_x)
+            else:
+                ego_wp_id = self._carN_center.get_closest_waypoint(
+                    float(ego_x), float(ego_y))
+                ego_heading = float(
+                    self._reference_pathN_center.get_waypoint(ego_wp_id).psi)
+            predicted_target_x, predicted_target_y, target_heading = (
+                center_pose_at_s(target_s + target_speed * prediction_time)
+            )
+            if self._oriented_vehicle_rectangles_overlap(
+                float(ego_x), float(ego_y), ego_heading,
+                predicted_target_x, predicted_target_y, target_heading,
+                margin=self._center_path_collision_prediction_margin,
+            ):
+                return {
+                    "collision": True,
+                    "time": float(prediction_time),
+                    "index": index,
+                    "target_x": predicted_target_x,
+                    "target_y": predicted_target_y,
+                    "target_heading": target_heading,
+                }
+        return {"collision": False}
+
     @staticmethod
     def _oriented_vehicle_rectangles_overlap(
         ego_x, ego_y, ego_heading,
         target_x, target_y, target_heading,
+        margin=0.0,
     ) -> bool:
         """SAT overlap for two 1.5 m wide x 2.0 m long rectangles."""
-        half_length = 1.0
-        half_width = 0.75
+        half_length = 1.0 + 0.5 * max(float(margin), 0.0)
+        half_width = 0.75 + 0.5 * max(float(margin), 0.0)
 
         def axes(heading):
             forward = (math.cos(heading), math.sin(heading))
@@ -3273,6 +3552,7 @@ class MPCController(Node):
         self._prepass_fallback_commit_lane_idx = None
         self._clear_prepass_soft_guidance()
         self._reset_overtake_commit_probe()
+        self._clear_committed_shadow_verification()
         self._mpc.osqp_initialized = False
         self._reset_outer_lane_progress()
         return True
@@ -3283,6 +3563,12 @@ class MPCController(Node):
         self._overtake_commit_probe_lane_idx = None
         self._overtake_commit_probe_success_cycles = 0
         self._overtake_commit_probe_confirmed = False
+        self._overtake_commit_probe_confirmed_at = None
+
+    def _clear_committed_shadow_verification(self):
+        """Invalidate the Shadow proof retained by an active commitment."""
+        self._committed_shadow_vehicle_id = None
+        self._committed_shadow_lane_idx = None
 
     def _prepare_overtake_commit_probe(self, vehicle_id, lane_idx):
         """Latch one candidate without granting it control of the live MPC."""
@@ -3297,6 +3583,7 @@ class MPCController(Node):
             self._overtake_commit_probe_lane_idx = int(lane_idx)
             self._overtake_commit_probe_success_cycles = 0
             self._overtake_commit_probe_confirmed = False
+            self._overtake_commit_probe_confirmed_at = None
             probe = self._mpcN_overtake_commit_probe
             probe.osqp_initialized = False
             probe.current_prediction = None
@@ -3337,7 +3624,6 @@ class MPCController(Node):
         if (
             lane_idx not in (0, 2)
             or vehicle_id is None
-            or self._overtake_commit_probe_confirmed
         ):
             return
         if (
@@ -3347,6 +3633,8 @@ class MPCController(Node):
             or self._reference_path is not self._reference_pathN_center
         ):
             self._overtake_commit_probe_success_cycles = 0
+            self._overtake_commit_probe_confirmed = False
+            self._overtake_commit_probe_confirmed_at = None
             return
 
         reference_path = self._reference_pathN_center
@@ -3364,6 +3652,7 @@ class MPCController(Node):
             self._update_l2_target_objective_offsets(
                 probe, self._carN_overtake_commit_probe.wp_id)
             probe.set_full_width_l1_offset_limits()
+            probe.set_full_width_l0_offset_limits()
             probe.update_wp_id_offset(0)
             probe.previous_steering = self._mpcN_center.previous_steering
             probe.get_control()
@@ -3392,9 +3681,23 @@ class MPCController(Node):
             reference_path.target_lane_idx = saved_lane_idx
             reference_path.is_overtaking = saved_overtaking
 
+        was_confirmed = self._overtake_commit_probe_confirmed
         self._overtake_commit_probe_success_cycles = (
-            self._overtake_commit_probe_success_cycles + 1
+            min(
+                self._overtake_commit_probe_success_cycles + 1,
+                self._overtake_commit_probe_required_success_cycles,
+            )
             if success else 0)
+        if not success and not was_confirmed:
+            # Before confirmation, consecutive success is mandatory.  After
+            # confirmation, however, one transient solver miss must not erase
+            # the exact-lane proof immediately and let the high-level selector
+            # jump to the opposite side.  The original confirmation timestamp
+            # is intentionally not extended here: _is_fresh() still prevents
+            # commitment once the strict proof ages past its short freshness
+            # window, while the candidate hold lets this same lane re-probe.
+            self._overtake_commit_probe_confirmed = False
+            self._overtake_commit_probe_confirmed_at = None
         if collapse_detail is not None:
             self.get_logger().warn(
                 "[OvertakeCommitProbeConstraintCollapse] rejecting shadow "
@@ -3426,10 +3729,26 @@ class MPCController(Node):
             self._overtake_commit_probe_required_success_cycles
         ):
             self._overtake_commit_probe_confirmed = True
-            self.get_logger().info(
-                "[OvertakeCommitProbeConfirmed] candidate outer lane passed "
-                "all pre-commit gates: "
-                f"vehicle_id={vehicle_id}, lane=L{lane_idx}")
+            self._overtake_commit_probe_confirmed_at = float(
+                self.get_clock().now().nanoseconds) / 1e9
+            if not was_confirmed:
+                self.get_logger().info(
+                    "[OvertakeCommitProbeConfirmed] candidate outer lane "
+                    "passed all pre-commit gates: "
+                    f"vehicle_id={vehicle_id}, lane=L{lane_idx}")
+
+    def _overtake_commit_probe_is_fresh(
+        self, vehicle_id, lane_idx, now_sec: float
+    ) -> bool:
+        """Return whether the exact candidate has a recent strict Shadow proof."""
+        return bool(
+            self._overtake_commit_probe_confirmed
+            and self._overtake_commit_probe_vehicle_id == vehicle_id
+            and self._overtake_commit_probe_lane_idx == lane_idx
+            and self._overtake_commit_probe_confirmed_at is not None
+            and now_sec - self._overtake_commit_probe_confirmed_at
+                <= self._overtake_commit_probe_freshness_sec
+        )
 
     def _overtake_commit_curvature_preview(self, center_wp: int):
         """Return signed Center-path curvature samples over the preview distance."""
@@ -3502,6 +3821,13 @@ class MPCController(Node):
                 f"old target: old={old_target}, new={vehicle_id}, "
                 f"distance={distance:.2f}m"
             )
+
+        # ``_reset_overtake_state_for_target_change`` deliberately clears the
+        # old latch.  Promote the emergency blocker immediately, before the
+        # no-passing-lane branch enters Follow.  Otherwise
+        # ``_switch_prepass_to_follow`` clears only the forced-overtake marker
+        # and Follow becomes active with no vehicle ID to track.
+        self._overtake_target_vehicle_id = vehicle_id
 
         samples = self._relative_lane_vehicle_samples(pose, ego_speed)
         conflicts = {
@@ -3576,6 +3902,12 @@ class MPCController(Node):
             and passage.get(candidate, False)
             and lane_conflicts_are_clear(conflicts[candidate])
         ), None)
+        lane_idx = self._apply_l2_restricted_zone_policy(
+            lane_idx,
+            target_vehicle_id=self._overtake_target_vehicle_id,
+            physical_passage=passage,
+            conflicts_by_lane=conflicts,
+        )
         return lane_idx, target_distance, conflicts
 
     def _select_prepass_fallback_lane(
@@ -3584,9 +3916,25 @@ class MPCController(Node):
         """Select opposite outer, failed-lane re-probe, then L1."""
         physical_passage, target_distance = self._latched_target_passage(pose)
         samples = self._relative_lane_vehicle_samples(pose, ego_speed)
+        target_id = self._overtake_target_vehicle_id
+        target_is_ultra_slow = False
+        if (
+            target_id is not None
+            and self._v2x_tracker.has_velocity_estimate(target_id)
+        ):
+            target_vx, target_vy = self._v2x_tracker.velocity(target_id)
+            target_is_ultra_slow = bool(
+                math.hypot(target_vx, target_vy)
+                <= self._strict_shadow_commit_creep_max_target_speed
+            )
         candidate_order = ordered_prepass_fallback_candidates(
             failed_lane_idx,
             self._prepass_attempted_outer_lanes,
+            # A previous transient Shadow failure must not make L1 the final
+            # state behind a stopped/ultra-slow car. Reconsider both outer
+            # lanes from current geometry and traffic; the strict Shadow MPC
+            # below still has to pass before either lane is committed.
+            reconsider_attempted=target_is_ultra_slow,
         )
         conflicts = {
             lane_idx: classify_lane_conflicts(
@@ -3608,6 +3956,20 @@ class MPCController(Node):
                 or physical_passage.get(lane_idx, False)
             )
         ), None)
+        selected_lane_idx = self._apply_l2_restricted_zone_policy(
+            selected_lane_idx,
+            target_vehicle_id=self._overtake_target_vehicle_id,
+            physical_passage=physical_passage,
+            conflicts_by_lane=conflicts,
+        )
+        if target_is_ultra_slow and selected_lane_idx in (0, 2):
+            self.get_logger().info(
+                "[PrepassUltraSlowOuterRetry] current outer corridor is "
+                "clear; reconsidering it ahead of L1 despite an earlier "
+                f"attempt: vehicle_id={target_id}, lane=L{selected_lane_idx}, "
+                f"attempted={sorted(self._prepass_attempted_outer_lanes)}",
+                throttle_duration_sec=1.0,
+            )
         return selected_lane_idx, target_distance, conflicts, physical_passage
 
     def _candidate_lane_heading(self, lane_idx, wp_id: int) -> float:
@@ -4779,6 +5141,7 @@ class MPCController(Node):
         self._prepass_fallback_commit_success_since = None
         self._prepass_attempted_outer_lanes.clear()
         self._follow_latched_cache = None
+        self._clear_committed_shadow_verification()
         self.get_logger().warn(
             "[FollowTargetRelease] releasing latched follow target for "
             f"full-traffic re-evaluation: vehicle_id={lost_id}, reason={reason}"
@@ -4811,6 +5174,7 @@ class MPCController(Node):
         self._prepass_reverse_start_xy = None
         self._prepass_reverse_distance = 0.0
         self._clear_prepass_soft_guidance()
+        self._clear_committed_shadow_verification()
         self._mpc.osqp_initialized = False
         self.get_logger().info(
             "[OvertakeTargetPhysicalComplete] target is behind with "
@@ -7651,6 +8015,48 @@ class MPCController(Node):
                     conflicts_by_lane=horizon_conflicts,
                     center_wp=center_wp_temp,
                 )
+                # Do not discard a strictly verified candidate merely because
+                # the high-level lane preference flips on the next geometry
+                # sample.  Keep the exact target/lane long enough to enter the
+                # commit branch.  Physical passage, live traffic conflicts and
+                # geographic restrictions remain hard invalidation gates.
+                verified_lane_idx = self._overtake_commit_probe_lane_idx
+                verified_lane_conflicts = horizon_conflicts.get(
+                    verified_lane_idx, {})
+                verified_lane_clear = bool(
+                    verified_lane_idx in (0, 2)
+                    and self._overtake_commit_probe_confirmed
+                    and self._overtake_commit_probe_vehicle_id
+                        == opponent_vehicle_id
+                    and self._overtake_commit_probe_confirmed_at is not None
+                    and now_sec - self._overtake_commit_probe_confirmed_at
+                        <= self._overtake_commit_verified_candidate_hold_sec
+                    and horizon_passage.get(verified_lane_idx, False)
+                    and not verified_lane_conflicts.get("front", [])
+                    and not verified_lane_conflicts.get("side", [])
+                    and not verified_lane_conflicts.get("rear", [])
+                    and self._apply_l2_restricted_zone_policy(
+                        verified_lane_idx,
+                        target_vehicle_id=opponent_vehicle_id,
+                        physical_passage=horizon_passage,
+                        conflicts_by_lane=horizon_conflicts,
+                        center_wp=center_wp_temp,
+                    ) == verified_lane_idx
+                )
+                if (
+                    verified_lane_clear
+                    and selected_outer_lane != verified_lane_idx
+                ):
+                    self.get_logger().info(
+                        "[OvertakeVerifiedCandidateHold] preserving the "
+                        "strictly verified candidate through high-level lane "
+                        "preference changes: "
+                        f"vehicle_id={opponent_vehicle_id}, "
+                        f"lane=L{verified_lane_idx}, requested="
+                        f"L{selected_outer_lane}",
+                        throttle_duration_sec=0.5,
+                    )
+                    selected_outer_lane = verified_lane_idx
                 left_is_free = selected_outer_lane == 2
                 right_is_free = selected_outer_lane == 0
                 new_target_lane_idx = (
@@ -7758,6 +8164,145 @@ class MPCController(Node):
             and active_overtake_target_id
                 != self._overtake_completed_target_id
         )
+        if active_target_physically_complete:
+            # If another lead is already ahead in the same committed outer
+            # lane, do not start L1 rejoin before giving that exact target/lane
+            # a strict Shadow MPC check.  This preserves a safe continuous
+            # pass while still falling back to the ordinary completion path
+            # when width, live traffic, policy, or Shadow feasibility fails.
+            handoff_lane_idx = (
+                int(self._overtake_lane_idx)
+                if self._overtake_lane_idx in (0, 2) else None
+            )
+            handoff_candidate = bool(
+                handoff_lane_idx in (0, 2)
+                and opponent_vehicle_id is not None
+                and opponent_vehicle_id != active_overtake_target_id
+                and candidate_target_is_relevant
+                and 0.0 < float(opponent_arc_distance)
+                <= self._slow_lead_overtake_prepare_distance
+            )
+            handoff_passage = {}
+            handoff_conflicts = {}
+            handoff_lane_clear = False
+            if handoff_candidate:
+                handoff_passage, _ = self._vehicle_passage(
+                    opponent_vehicle_id, pose)
+                handoff_samples = self._relative_lane_vehicle_samples(pose, v)
+                handoff_conflicts = classify_lane_conflicts(
+                    handoff_lane_idx,
+                    handoff_samples,
+                    front_distance=self._prepass_lane_fallback_front_distance,
+                    side_distance=self._prepass_lane_fallback_side_distance,
+                    rear_distance=self._prepass_lane_fallback_rear_distance,
+                )
+                # The completed vehicle is expected immediately behind in the
+                # same corridor. It is already envelope-separated above; only
+                # unrelated rear traffic invalidates the handoff.
+                unrelated_rear = [
+                    vehicle_id
+                    for vehicle_id in handoff_conflicts.get("rear", [])
+                    if vehicle_id != active_overtake_target_id
+                ]
+                policy_lane = self._apply_l2_restricted_zone_policy(
+                    handoff_lane_idx,
+                    target_vehicle_id=opponent_vehicle_id,
+                    physical_passage=handoff_passage,
+                    conflicts_by_lane={
+                        handoff_lane_idx: {
+                            **handoff_conflicts,
+                            "rear": unrelated_rear,
+                        }
+                    },
+                    center_wp=center_wp_temp,
+                )
+                handoff_lane_clear = bool(
+                    handoff_passage.get(handoff_lane_idx, False)
+                    and not handoff_conflicts.get("front", [])
+                    and not handoff_conflicts.get("side", [])
+                    and not unrelated_rear
+                    and policy_lane == handoff_lane_idx
+                )
+
+            handoff_pending = bool(
+                handoff_lane_clear
+                and self._consecutive_overtake_handoff_target_id
+                    == opponent_vehicle_id
+                and self._consecutive_overtake_handoff_lane_idx
+                    == handoff_lane_idx
+            )
+            if handoff_lane_clear and not handoff_pending:
+                self._consecutive_overtake_handoff_target_id = (
+                    opponent_vehicle_id)
+                self._consecutive_overtake_handoff_lane_idx = handoff_lane_idx
+                self._consecutive_overtake_handoff_started_at = now_sec
+                self._prepare_overtake_commit_probe(
+                    opponent_vehicle_id, handoff_lane_idx)
+                handoff_pending = True
+
+            handoff_confirmed = bool(
+                handoff_pending
+                and self._overtake_commit_probe_is_fresh(
+                    opponent_vehicle_id, handoff_lane_idx, now_sec)
+            )
+            handoff_elapsed = (
+                now_sec - self._consecutive_overtake_handoff_started_at
+                if (
+                    handoff_pending
+                    and self._consecutive_overtake_handoff_started_at
+                        is not None
+                ) else 0.0
+            )
+            if handoff_confirmed:
+                old_target_id = active_overtake_target_id
+                self._overtake_target_vehicle_id = opponent_vehicle_id
+                self._forced_overtake_vehicle_id = None
+                self._overtake_lane_idx = handoff_lane_idx
+                self._overtake_target_committed = True
+                self._overtake_completed_target_id = None
+                self._outer_lane_released_vehicle_id = None
+                self._committed_shadow_vehicle_id = opponent_vehicle_id
+                self._committed_shadow_lane_idx = handoff_lane_idx
+                self._reset_outer_lane_progress()
+                self._clear_consecutive_overtake_handoff()
+                active_overtake_target_id = opponent_vehicle_id
+                active_target_longitudinal = float(opponent_arc_distance)
+                active_target_distance = float(opponent_arc_distance)
+                candidate_target_is_relevant = False
+                active_target_physically_complete = False
+                self.get_logger().info(
+                    "[ConsecutiveOvertakeHandoff] strict Shadow verification "
+                    "passed for the next lead; preserving the current outer "
+                    "lane without L1 rejoin: "
+                    f"old_vehicle_id={old_target_id}, "
+                    f"new_vehicle_id={opponent_vehicle_id}, "
+                    f"lane=L{handoff_lane_idx}, "
+                    f"distance={opponent_arc_distance:.2f}m"
+                )
+            elif (
+                handoff_pending
+                and handoff_elapsed
+                    <= self._consecutive_overtake_handoff_timeout_sec
+            ):
+                self._prepare_overtake_commit_probe(
+                    opponent_vehicle_id, handoff_lane_idx)
+                candidate_target_is_relevant = False
+                self.get_logger().info(
+                    "[ConsecutiveOvertakeHandoffHold] keeping the current "
+                    "outer lane while strictly probing the next lead: "
+                    f"old_vehicle_id={active_overtake_target_id}, "
+                    f"new_vehicle_id={opponent_vehicle_id}, "
+                    f"lane=L{handoff_lane_idx}, elapsed="
+                    f"{handoff_elapsed:.2f}/"
+                    f"{self._consecutive_overtake_handoff_timeout_sec:.2f}s, "
+                    f"cycles={self._overtake_commit_probe_success_cycles}/"
+                    f"{self._overtake_commit_probe_required_success_cycles}",
+                    throttle_duration_sec=0.25,
+                )
+                active_target_physically_complete = False
+            else:
+                self._clear_consecutive_overtake_handoff()
+
         if active_target_physically_complete:
             # The pass itself is complete even though Center/Race handoff may
             # still be pending.  Release the *artificial* outer-lane bound in
@@ -7973,6 +8518,13 @@ class MPCController(Node):
                 target_passage,
                 target_conflicts,
             )
+            new_target_lane_idx = self._apply_l2_restricted_zone_policy(
+                new_target_lane_idx,
+                target_vehicle_id=opponent_vehicle_id,
+                physical_passage=target_passage,
+                conflicts_by_lane=target_conflicts,
+                center_wp=center_wp_temp,
+            )
             if new_target_lane_idx not in (0, 2):
                 new_target_lane_idx = 1
             self.get_logger().warn(
@@ -8111,9 +8663,10 @@ class MPCController(Node):
                 self._parallel_start_time = None
 
         # Evaluate the geographic hard-lane problem zone before any selector
-        # can create a new L0/L2 latch or advance its shadow probe.  The slow
-        # exception below may preserve an already verified manoeuvre, but it
-        # must not create a fresh hard outer-lane owner inside this zone.
+        # can create a new L0/L2 latch or advance its shadow probe.  A fresh,
+        # identified stopped/ultra-slow target is the only exception.  It may
+        # enter the normal selector below, but still has to pass physical
+        # passage, traffic, strict Shadow MPC and 20 m corridor-width gates.
         outer_lane_mpc_problem_zone = any(
             (
                 start_wp <= center_wp_temp <= end_wp
@@ -8121,6 +8674,36 @@ class MPCController(Node):
                 else center_wp_temp >= start_wp or center_wp_temp <= end_wp
             )
             for start_wp, end_wp in self._outer_lane_mpc_problem_zones
+        )
+        # Latch the low-speed classification at 5 km/h and release it above
+        # 6 km/h.  This must be computed here (rather than only in the final
+        # corridor resolver) so the exception can create a new verified latch.
+        # A missing target ID or velocity estimate can never enable it.
+        if not outer_lane_mpc_problem_zone or opponent_vehicle_id is None:
+            self._outer_lane_problem_slow_override_target_id = None
+        elif (
+            self._outer_lane_problem_slow_override_target_id
+                == opponent_vehicle_id
+        ):
+            if (
+                not opponent_velocity_valid
+                or opponent_v_lead
+                    > self._outer_lane_problem_override_release_speed
+            ):
+                self._outer_lane_problem_slow_override_target_id = None
+        elif (
+            opponent_velocity_valid
+            and opponent_v_lead <= self._outer_lane_problem_override_speed
+        ):
+            self._outer_lane_problem_slow_override_target_id = (
+                opponent_vehicle_id)
+        outer_lane_problem_slow_override = (
+            outer_lane_problem_slow_override_active(
+                latched_target_id=(
+                    self._outer_lane_problem_slow_override_target_id),
+                opponent_vehicle_id=opponent_vehicle_id,
+                velocity_valid=opponent_velocity_valid,
+            )
         )
         prepass_selection_exclusive = (
             recovery_active
@@ -8151,7 +8734,10 @@ class MPCController(Node):
         # normal L1 rejoin regardless of the lead vehicle's stopped state.
         if (
             exclusive_l1_rejoin
-            and not outer_lane_mpc_problem_zone
+            and (
+                not outer_lane_mpc_problem_zone
+                or outer_lane_problem_slow_override
+            )
             and not self._follow_only
             and not startup_overtake_suppressed
             and not self._parallel_abort_active
@@ -8180,6 +8766,13 @@ class MPCController(Node):
                 new_target_lane_idx,
                 preempt_passage,
                 preempt_conflicts,
+            )
+            preempt_lane_idx = self._apply_l2_restricted_zone_policy(
+                preempt_lane_idx,
+                target_vehicle_id=opponent_vehicle_id,
+                physical_passage=preempt_passage,
+                conflicts_by_lane=preempt_conflicts,
+                center_wp=center_wp_temp,
             )
             if preempt_lane_idx in (0, 2):
                 self._cancel_l1_rejoin_for_overtake()
@@ -8219,10 +8812,16 @@ class MPCController(Node):
             # forward probe commits or the existing reverse sequence starts.
             overtake_latch_started = False
             new_target_lane_idx = self._follow_escape_probe_lane_idx
-        elif outer_lane_mpc_problem_zone:
+        elif (
+            outer_lane_mpc_problem_zone
+            and not outer_lane_problem_slow_override
+            and self._consecutive_overtake_handoff_target_id is None
+        ):
             # Do not create a new hard L0/L2 owner in a section known to make
-            # outer-lane MPC constraints collapse.  The final zone policy
-            # below releases any already-existing ordinary latch to full width.
+            # outer-lane MPC constraints collapse. Only an identified target
+            # inside the 5/6 km/h hysteresis may reach the normal verified
+            # selector below. The final zone policy releases any already-
+            # existing ordinary latch to full width.
             self._reset_overtake_commit_probe()
             overtake_latch_started = False
             new_target_lane_idx = None
@@ -8256,9 +8855,12 @@ class MPCController(Node):
             # latch is preserved here and is released by the existing pass and
             # Prepass state machines.
             existing_outer_latch = self._overtake_lane_idx in (0, 2)
+            local_slow_lead_commit_distance = (
+                self._slow_lead_commit_distance_at(center_wp_temp)
+            )
             new_latch_distance = (
-                self._slow_lead_overtake_commit_distance
-                if lead_is_special_slow
+                local_slow_lead_commit_distance
+                if lead_is_stationary or lead_is_special_slow
                 else self._overtake_latch_max_distance
             )
             new_latch_within_distance = is_follow_retry_within_distance(
@@ -8272,9 +8874,23 @@ class MPCController(Node):
                 and new_target_lane_idx in (0, 2)
                 and not new_latch_within_distance
             ):
-                self._reset_overtake_commit_probe()
+                early_shadow_ready = bool(
+                    lead_is_special_slow
+                    and 0.0 < float(opponent_arc_distance)
+                    <= self._slow_lead_overtake_prepare_distance
+                )
+                if early_shadow_ready:
+                    # Submit_0829 approached decisively as soon as its horizon
+                    # check found a clear outer lane. Keep that useful timing,
+                    # but replace the loose horizon result with the current
+                    # strict Shadow checks. No hard lane is applied here.
+                    self._prepare_overtake_commit_probe(
+                        opponent_vehicle_id, new_target_lane_idx)
+                else:
+                    self._reset_overtake_commit_probe()
                 # Stay on Center/L1 while the high-level opponent-ahead mode
-                # is active, then choose and latch an outer lane below 10 m.
+                # is active. A verified early Shadow result may release speed
+                # matching, but commitment still waits for the distance gate.
                 latch_candidate_vehicle_id = None
                 latch_candidate_lane_idx = 1
                 self.get_logger().info(
@@ -8282,7 +8898,10 @@ class MPCController(Node):
                     "new-latch gate; keeping L1: "
                     f"vehicle_id={opponent_vehicle_id}, "
                     f"arc={opponent_arc_distance:.2f}m/"
-                    f"{new_latch_distance:.2f}m",
+                    f"{new_latch_distance:.2f}m, "
+                    f"early_shadow={early_shadow_ready}, cycles="
+                    f"{self._overtake_commit_probe_success_cycles}/"
+                    f"{self._overtake_commit_probe_required_success_cycles}",
                     throttle_duration_sec=1.0,
                 )
             elif (
@@ -8353,12 +8972,10 @@ class MPCController(Node):
                         f"reasons={reasons}",
                         throttle_duration_sec=1.0,
                     )
-                elif not (
-                    self._overtake_commit_probe_confirmed
-                    and self._overtake_commit_probe_vehicle_id
-                        == opponent_vehicle_id
-                    and self._overtake_commit_probe_lane_idx
-                        == new_target_lane_idx
+                elif not self._overtake_commit_probe_is_fresh(
+                    opponent_vehicle_id,
+                    new_target_lane_idx,
+                    float(now.nanoseconds) / 1e9,
                 ):
                     self._prepare_overtake_commit_probe(
                         opponent_vehicle_id, new_target_lane_idx)
@@ -8449,6 +9066,32 @@ class MPCController(Node):
                     "[OvertakeLatch] released for exclusive L1 rejoin."
                 )
         if overtake_latch_started:
+            shadow_verified_latch = self._overtake_commit_probe_is_fresh(
+                self._overtake_target_vehicle_id,
+                self._overtake_lane_idx,
+                float(now.nanoseconds) / 1e9,
+            )
+            if shadow_verified_latch:
+                self._committed_shadow_vehicle_id = (
+                    self._overtake_target_vehicle_id)
+                self._committed_shadow_lane_idx = int(
+                    self._overtake_lane_idx)
+            elif not (
+                self._committed_shadow_vehicle_id
+                    == self._overtake_target_vehicle_id
+                and self._committed_shadow_lane_idx
+                    == self._overtake_lane_idx
+            ):
+                self._clear_committed_shadow_verification()
+            committed_shadow_retained = bool(
+                self._committed_shadow_vehicle_id
+                    == self._overtake_target_vehicle_id
+                and self._committed_shadow_lane_idx
+                    == self._overtake_lane_idx
+            )
+            # The live committed-lane monitor owns safety from this point.
+            # Stop spending a second solve on the pre-commit Shadow instance.
+            self._reset_overtake_commit_probe()
             self._center_lane_rejoin_active = False
             self._center_lane_rejoin_constraint_released = False
             self._center_lane_rejoin_stable_since = None
@@ -8474,7 +9117,8 @@ class MPCController(Node):
             self.get_logger().info(
                 "[OvertakeLatch] fixed passing side: "
                 f"vehicle_id={self._overtake_target_vehicle_id}, "
-                f"lane={lane_label}"
+                f"lane={lane_label}, "
+                f"shadow_verified={committed_shadow_retained}"
             )
 
         current_time_sec = float(now.nanoseconds) / 1e9
@@ -8537,7 +9181,7 @@ class MPCController(Node):
                 elif (
                     retry_target_is_slow
                     and follow_retry_distance
-                        > self._slow_lead_overtake_commit_distance
+                        > self._slow_lead_commit_distance_at(center_wp_temp)
                 ):
                     self.get_logger().info(
                         "[SlowLeadOvertakePrepare] evaluating at high "
@@ -8545,7 +9189,7 @@ class MPCController(Node):
                         "commit waits for the distance gate: vehicle_id="
                         f"{retry_target_id}, arc="
                         f"{follow_retry_distance:.2f}m/"
-                        f"{self._slow_lead_overtake_commit_distance:.2f}m, "
+                        f"{self._slow_lead_commit_distance_at(center_wp_temp):.2f}m, "
                         f"retry={follow_retry_sec:.2f}s",
                         throttle_duration_sec=1.0,
                     )
@@ -8734,36 +9378,106 @@ class MPCController(Node):
                     f"vehicle_ids={held_rear_vehicle_ids}",
                     throttle_duration_sec=0.5,
                 )
+            # Immediately after Shadow MPC commits an outer lane, the live
+            # prediction still belongs to L1/full-width while the tapered
+            # Soft Transition is in progress.  The pass target naturally
+            # collides with that old prediction, so using it here cancels the
+            # verified manoeuvre before the outer corridor is ever applied.
+            # Trust Shadow MPC for the target vehicle until the committed lane
+            # is actually applied and the transition window has ended.  Live
+            # physical-passage loss and unrelated traffic remain immediate
+            # release conditions below.
+            committed_lane_prediction_established = bool(
+                self._reference_path.is_overtaking
+                and self._reference_path.target_lane_idx == latched_lane_idx
+                and current_time_sec >= getattr(
+                    self, "_constraint_transition_until", 0.0)
+            )
             target_prediction_collision = (
                 self._prediction_collision_with_vehicle(latched_target_id)
-                if target_reported_in_corridor else False
+                if (
+                    target_reported_in_corridor
+                    and committed_lane_prediction_established
+                )
+                else False
             )
-            # The pass/follow target naturally appears in L0 front. Keep L0
-            # unless its predicted body envelope collides; unrelated side/front
-            # traffic remains an immediate release condition.
-            physical_passage_lost = bool(
-                not live_passage.get(latched_lane_idx, False)
-                and not (
-                    latched_lane_idx == 0
-                    and self._waypoint_in_configured_zones(
+            if (
+                target_reported_in_corridor
+                and not committed_lane_prediction_established
+            ):
+                self.get_logger().info(
+                    "[OvertakeSoftTransitionTargetHold] ignoring the live "
+                    "L1/full-width prediction for the Shadow-verified pass "
+                    "target until the committed outer-lane prediction is "
+                    f"established: vehicle_id={latched_target_id}, "
+                    f"lane=L{latched_lane_idx}",
+                    throttle_duration_sec=0.5,
+                )
+            # Keep the post-commit check consistent with
+            # L0ZoneFollowGeometryOverride.  Passage includes clearance for
+            # overtaking the target, so it can become false while L0 remains a
+            # valid lane in which to follow that same target.  Do not depend on
+            # target_reported_in_corridor here: that classification can briefly
+            # be empty on a curve even though _latched_target_passage() failed
+            # because of the target.  Real lane-width loss and unrelated
+            # front/side traffic still release immediately.
+            l0_follow_geometry_override_active = bool(
+                latched_lane_idx == 0
+                and l0_restricted_follow_can_ignore_passage(
+                    restriction_active=self._waypoint_in_configured_zones(
                         int(self._carN_center.wp_id),
                         self._l2_entry_restricted_zones,
-                    )
-                    and target_reported_in_corridor
-                    and not non_target_corridor_conflicts.get("side")
+                    ),
+                    lane_has_vehicle_width=(
+                        self._lane_horizon_has_vehicle_width(0)
+                    ),
+                    non_target_conflicts=non_target_corridor_conflicts,
                 )
             )
+            physical_passage_lost = bool(
+                not live_passage.get(latched_lane_idx, False)
+                and not l0_follow_geometry_override_active
+            )
+            if (
+                not live_passage.get(latched_lane_idx, False)
+                and l0_follow_geometry_override_active
+            ):
+                self.get_logger().info(
+                    "[L0ZoneFollowPassageHold] retaining committed L0: "
+                    "the lane has vehicle width and no unrelated front/side "
+                    "conflict; target-only passing-clearance loss is treated "
+                    f"as follow geometry: center_wp={self._carN_center.wp_id}, "
+                    f"vehicle_id={latched_target_id}",
+                    throttle_duration_sec=0.5,
+                )
             latched_lane_unsafe = bool(
                 physical_passage_lost
                 or not lane_conflicts_are_clear(non_target_corridor_conflicts)
-                or target_prediction_collision is True
             )
+            if target_prediction_collision is True:
+                # The target is expected to overlap the ego's longitudinal
+                # prediction while it is being passed.  Cancelling the
+                # Shadow-verified corridor here turns a valid pass back into
+                # slow following.  Emergency/parallel safety still owns the
+                # speed, while geometry loss and every *other* vehicle remain
+                # immediate corridor-release conditions above.
+                self.get_logger().info(
+                    "[OvertakeTargetPredictionSpeedOnly] committed target "
+                    "intersects the live prediction; retaining the verified "
+                    "passing lane and delegating separation to speed safety: "
+                    f"vehicle_id={latched_target_id}, lane=L{latched_lane_idx}",
+                    throttle_duration_sec=0.5,
+                )
             opposite_lane_safe = bool(
                 live_passage.get(opposite_lane_idx, False)
                 and lane_conflicts_are_clear(
                     live_conflicts[opposite_lane_idx])
             )
             if latched_lane_unsafe:
+                # The retained Shadow result only certifies the corridor at
+                # commit time. Any subsequent geometry, traffic, or stalled
+                # target-collision release invalidates that proof.
+                self._clear_committed_shadow_verification()
                 # Limit against the vehicle which actually entered the
                 # corridor, not necessarily the latched overtake target. Rear
                 # traffic requires a lateral release but must not make ego
@@ -9445,36 +10159,6 @@ class MPCController(Node):
             )
             for start_wp, end_wp in self._l0_entry_prohibited_zones
         )
-        # Latch the stopped/ultra-slow exception with speed hysteresis.  The
-        # V2X estimate used to hover around 5 km/h and alternate every cycle
-        # between a hard outer lane and full width, which was itself enough to
-        # destabilize the solve in this map section.
-        if not outer_lane_mpc_problem_zone or opponent_vehicle_id is None:
-            self._outer_lane_problem_slow_override_target_id = None
-        elif (
-            self._outer_lane_problem_slow_override_target_id
-                == opponent_vehicle_id
-        ):
-            if (
-                not opponent_velocity_valid
-                or opponent_v_lead
-                    > self._outer_lane_problem_override_release_speed
-            ):
-                self._outer_lane_problem_slow_override_target_id = None
-        elif (
-            opponent_velocity_valid
-            and opponent_v_lead <= self._outer_lane_problem_override_speed
-        ):
-            self._outer_lane_problem_slow_override_target_id = (
-                opponent_vehicle_id)
-        outer_lane_problem_slow_override = (
-            outer_lane_problem_slow_override_active(
-                latched_target_id=(
-                    self._outer_lane_problem_slow_override_target_id),
-                opponent_vehicle_id=opponent_vehicle_id,
-                velocity_valid=opponent_velocity_valid,
-            )
-        )
         outer_lane_mpc_problem_active = bool(
             outer_lane_mpc_problem_zone
             and not outer_lane_problem_slow_override
@@ -9988,9 +10672,12 @@ class MPCController(Node):
                 self._mpc, self._carN_center.wp_id)
             self._update_full_width_l1_objective_offsets(
                 self._mpc, self._carN_center.wp_id)
+            self._update_full_width_l0_objective_offsets(
+                self._mpc, self._carN_center.wp_id)
         else:
             self._mpc.set_target_lane_lateral_offsets()
             self._mpc.set_full_width_l1_offset_limits()
+            self._mpc.set_full_width_l0_offset_limits()
 
         # MPCの実行
         with self._stats.time_block("control"):
@@ -10460,13 +11147,48 @@ class MPCController(Node):
             not forced_overtake_prediction_clear
             and not slow_lead_lateral_move_established
         )
+        confirmed_precommit_lane_idx = (
+            int(self._overtake_commit_probe_lane_idx)
+            if (
+                self._overtake_commit_probe_lane_idx in (0, 2)
+                and self._overtake_commit_probe_is_fresh(
+                    opponent_vehicle_id,
+                    self._overtake_commit_probe_lane_idx,
+                    current_time_sec,
+                )
+            )
+            else None
+        )
+        committed_shadow_lane_idx = (
+            int(self._committed_shadow_lane_idx)
+            if (
+                self._committed_shadow_lane_idx in (0, 2)
+                and self._committed_shadow_vehicle_id == opponent_vehicle_id
+                and self._overtake_target_vehicle_id == opponent_vehicle_id
+                and self._overtake_lane_idx
+                    == self._committed_shadow_lane_idx
+            )
+            else None
+        )
+        verified_speed_release_lane_idx = (
+            confirmed_precommit_lane_idx
+            if confirmed_precommit_lane_idx in (0, 2)
+            else committed_shadow_lane_idx
+        )
+        confirmed_precommit_lane_still_clear = bool(
+            (verified_speed_release_lane_idx == 2 and left_is_free)
+            or (verified_speed_release_lane_idx == 0 and right_is_free)
+        )
         precommit_safe_outer_corridor = bool(
             (slow_lead_speed_control_active or forced_overtake_active)
             and (
                 not forced_overtake_active
                 or opponent_vehicle_id == self._forced_overtake_vehicle_id
             )
-            and (left_is_free or right_is_free)
+            # A horizon passage result alone is not enough to release speed
+            # matching. Require two consecutive strict Shadow MPC successes
+            # for this exact vehicle and the same lane that is still clear.
+            and confirmed_precommit_lane_still_clear
             and not self._prepass_fallback_recovery_active
             and not self._mpc_safety_recovery_active
             and not recovery_active
@@ -10474,18 +11196,20 @@ class MPCController(Node):
             and not outer_lane_mpc_problem_active
         )
         if precommit_safe_outer_corridor:
-            # The horizon probe has already verified physical width and V2X
-            # traffic for an outer lane. Do not crawl at lead_speed + 0.5 m/s
-            # merely because the commit-distance gate has not been crossed.
+            # Strict Shadow MPC has already verified physical width, V2X
+            # traffic, solution accuracy, relaxation and the forward corridor
+            # for this exact lane. Do not crawl at lead_speed + 0.5 m/s merely
+            # because applying the verified lane is still pending.
             # This intentionally does not depend on the currently applied
             # lane: before commitment it is normally L1/full-width.
             # ParallelSafety, EmergencyBrake and MPC recovery remain able to
             # impose stricter limits independently.
             slow_lead_speed_match_required = False
-            safe_lane_idx = 2 if left_is_free else 0
+            safe_lane_idx = verified_speed_release_lane_idx
             self.get_logger().info(
                 "[SlowLeadPrecommitSpeedRelease] safe outer corridor is "
-                "already verified; keeping normal approach speed before "
+                "Shadow-confirmed for the same target/lane; keeping normal "
+                "approach speed through "
                 f"lane commit: vehicle_id={opponent_vehicle_id}, "
                 f"lane=L{safe_lane_idx}, distance={opponent_distance:.2f}m",
                 throttle_duration_sec=1.0,
@@ -10705,7 +11429,8 @@ class MPCController(Node):
             # wp_diff=0 の場合など waypoint 検出をすり抜けても必ずブレーキがかかる。
             # Front/rear is determined on the Center arc. Ego yaw projection
             # changes sign in corners and must not suppress a relevant car.
-            EMERGENCY_BRAKE_DIST  = 6.0  # [m] この距離以内で前方に車がいたら緊急ブレーキ
+            EMERGENCY_BRAKE_DIST = self._moving_emergency_preview_distance
+            IMMEDIATE_EMERGENCY_BRAKE_DIST = 6.0
             emergency_stopped_blocker_id = None
             emergency_stopped_blocker_dist = float("inf")
             if hasattr(self, '_v2x_tracker'):
@@ -10717,11 +11442,16 @@ class MPCController(Node):
                     in self._moving_vehicle_brake_bypass_since.items()
                     if vehicle_id in active_vehicle_id_set
                 }
+                self._center_path_collision_hazard_until = {
+                    vehicle_id: until
+                    for vehicle_id, until
+                    in self._center_path_collision_hazard_until.items()
+                    if vehicle_id in active_vehicle_id_set
+                    and until > current_time_sec
+                }
                 moving_bypass_candidates = set()
-                # Pre-confirm moving traffic before it enters the 6 m
-                # emergency zone.  The same strict early-clearance and fresh
-                # MPC checks are used, so this removes the one-cycle brake at
-                # zone entry without relaxing the collision criteria.
+                # Pre-confirm moving traffic and arm one simple dynamic-gap
+                # latch before the old fixed 6 m emergency point.
                 for vehicle_id in active_vehicle_ids:
                     preview_buf = self._v2x_tracker._samples.get(vehicle_id)
                     if not preview_buf:
@@ -10734,12 +11464,85 @@ class MPCController(Node):
                     preview_is_relevant = bool(
                         preview_longitudinal is not None
                         and 0.0 < preview_longitudinal
-                        <= self._moving_vehicle_brake_bypass_preview_distance
+                        <= self._moving_emergency_preview_distance
                         and preview_distance
-                        <= self._moving_vehicle_brake_bypass_preview_distance
+                        <= self._moving_emergency_preview_distance
+                    )
+                    center_path_prediction = (
+                        self._center_path_collision_prediction(vehicle_id)
+                        if preview_is_relevant else None
                     )
                     if (
+                        center_path_prediction is not None
+                        and center_path_prediction.get("collision", False)
+                    ):
+                        self._center_path_collision_hazard_until[vehicle_id] = (
+                            current_time_sec
+                            + self._center_path_collision_hazard_hold_sec
+                        )
+                        self.get_logger().warn(
+                            "[CenterPathCollisionPrediction] opponent motion "
+                            "along Center intersects the ego MPC envelope; "
+                            "latching gentle speed matching: "
+                            f"vehicle_id={vehicle_id}, ttc="
+                            f"{center_path_prediction['time']:.2f}s, "
+                            f"hold_sec="
+                            f"{self._center_path_collision_hazard_hold_sec:.2f}",
+                            throttle_duration_sec=0.5,
+                        )
+                    if preview_is_relevant:
+                        _, preview_envelope = (
+                            self._current_center_envelopes_are_separated(
+                                pose, vehicle_id)
+                        )
+                        ego_frenet = self._center_frenet(pose.x, pose.y)
+                        opponent_frenet = self._center_frenet(
+                            preview_x, preview_y)
+                        center_lateral_clearance = None
+                        if ego_frenet is not None and opponent_frenet is not None:
+                            center_lateral_clearance = lateral_vehicle_clearance(
+                                abs(opponent_frenet[1] - ego_frenet[1]),
+                                float(self._cfg.bicycle_model.width),
+                                self._v2x_parallel_vehicle_half_width,
+                            )
+                        preview_vx, preview_vy = self._v2x_tracker.velocity(
+                            vehicle_id)
+                        preview_speed = math.hypot(preview_vx, preview_vy)
+                        closing_speed = max(abs(float(v)) - preview_speed, 0.0)
+                        required_gap = (
+                            self._moving_emergency_desired_distance
+                            + self._moving_emergency_reaction_sec * closing_speed
+                            + closing_speed ** 2
+                            / (2.0
+                               * self._moving_emergency_available_deceleration)
+                        )
+                        dynamic_gap_hazard = bool(
+                            preview_envelope is not None
+                            and center_lateral_clearance is not None
+                            and center_lateral_clearance
+                                <= self._parallel_warning_clearance
+                            and preview_envelope["arc_gap"] <= required_gap
+                        )
+                        if dynamic_gap_hazard:
+                            self._center_path_collision_hazard_until[
+                                vehicle_id] = (
+                                    current_time_sec
+                                    + self._center_path_collision_hazard_hold_sec
+                                )
+                            self.get_logger().warn(
+                                "[DynamicGapHazard] Center body gap is below "
+                                "the braking-distance requirement; holding one "
+                                "continuous speed limit: "
+                                f"vehicle_id={vehicle_id}, gap="
+                                f"{preview_envelope['arc_gap']:.2f}m/"
+                                f"{required_gap:.2f}m, closing="
+                                f"{closing_speed:.2f}m/s",
+                                throttle_duration_sec=0.5,
+                            )
+                    if (
                         preview_is_relevant
+                        and vehicle_id not in (
+                            self._center_path_collision_hazard_until)
                         and self._moving_vehicle_will_clear_after_brief_conflict(
                             vehicle_id, pose, v)
                     ):
@@ -10757,6 +11560,16 @@ class MPCController(Node):
                         dy = opp_y - pose.y
                         dist = math.hypot(dx, dy)
                         if dist < EMERGENCY_BRAKE_DIST and dist > 0.01:
+                            if (
+                                dist >= IMMEDIATE_EMERGENCY_BRAKE_DIST
+                                and self._center_path_collision_hazard_until.get(
+                                    vid, 0.0) <= current_time_sec
+                            ):
+                                # The wider scan exists only to act on an
+                                # already established dynamic/predicted risk.
+                                # Ordinary traffic keeps the original 6 m
+                                # proximity behavior.
+                                continue
                             center_longitudinal = self._center_longitudinal_between(
                                 pose.x, pose.y, opp_x, opp_y)
                             if (
@@ -10808,10 +11621,17 @@ class MPCController(Node):
                                     lateral_clearance
                                     <= self._parallel_critical_clearance
                                 )
+                                center_path_hazard_active = bool(
+                                    self._center_path_collision_hazard_until.get(
+                                        vid, 0.0) > current_time_sec
+                                )
 
                                 # Lane labels overlap near boundaries and are
                                 # not sufficient evidence for braking.
-                                if not lateral_envelopes_conflict:
+                                if (
+                                    not lateral_envelopes_conflict
+                                    and not center_path_hazard_active
+                                ):
                                     self.get_logger().info(
                                         "[EmergencyBrakeSkip] "
                                         f"vehicle_id={vid} ego_lane={ego_lane_idx} "
@@ -10848,6 +11668,7 @@ class MPCController(Node):
                                 if (
                                     fresh_mpc_prediction
                                     and current_envelopes_separated
+                                    and not center_path_hazard_active
                                     and self._prediction_is_clear_of_vehicle(vid)
                                 ):
                                     self.get_logger().info(
@@ -10887,6 +11708,7 @@ class MPCController(Node):
                                 moving_vehicle_will_clear = (
                                     fresh_mpc_prediction
                                     and current_envelopes_separated
+                                    and not center_path_hazard_active
                                     and self._moving_vehicle_will_clear_after_brief_conflict(
                                         vid, pose, v)
                                 )
@@ -10935,10 +11757,104 @@ class MPCController(Node):
                                         self._parallel_vehicle_half_length,
                                     )
                                 )
+                                committed_shadow_lane = (
+                                    int(self._committed_shadow_lane_idx)
+                                    if self._committed_shadow_lane_idx in (0, 2)
+                                    else None
+                                )
+                                fresh_probe_lane = (
+                                    int(self._overtake_commit_probe_lane_idx)
+                                    if (
+                                        self._overtake_commit_probe_lane_idx in (0, 2)
+                                        and self._overtake_commit_probe_is_fresh(
+                                            vid,
+                                            self._overtake_commit_probe_lane_idx,
+                                            current_time_sec,
+                                        )
+                                    )
+                                    else None
+                                )
+                                verified_outer_lane = (
+                                    committed_shadow_lane
+                                    if committed_shadow_lane in (0, 2)
+                                    else fresh_probe_lane
+                                )
+                                committed_outer_prediction_clear = bool(
+                                    committed_shadow_lane in (0, 2)
+                                    and committed_shadow_lane
+                                        == self._overtake_lane_idx
+                                    and self._overtake_target_committed
+                                    and fresh_mpc_prediction
+                                    and self._prediction_is_clear_of_vehicle(vid)
+                                )
+                                precommit_outer_prediction_clear = bool(
+                                    fresh_probe_lane in (0, 2)
+                                    and not self._prepass_fallback_recovery_active
+                                    and not self._mpc_safety_recovery_active
+                                )
+                                outer_bypass_target_matches = (
+                                    outer_prediction_bypass_target_matches(
+                                        vehicle_id=vid,
+                                        latched_target_id=(
+                                            self._overtake_target_vehicle_id),
+                                        handoff_target_id=(
+                                            self._consecutive_overtake_handoff_target_id),
+                                        handoff_lane_idx=(
+                                            self._consecutive_overtake_handoff_lane_idx),
+                                        verified_outer_lane=(
+                                            verified_outer_lane),
+                                    )
+                                )
+                                shadow_outer_prediction_clear = bool(
+                                    center_path_hazard_active
+                                    and outer_bypass_target_matches
+                                    and current_envelopes_separated
+                                    and (
+                                        committed_outer_prediction_clear
+                                        or precommit_outer_prediction_clear
+                                    )
+                                )
+                                if shadow_outer_prediction_clear:
+                                    # Center-path prediction assumes ego stays
+                                    # on Center and can therefore keep matching
+                                    # a slow lead after a strict outer pass is
+                                    # already committed. Ignore only that stale
+                                    # Center hazard when the live outer-lane MPC
+                                    # and the current rotated body envelopes are
+                                    # both clear. A genuinely short dynamic gap
+                                    # remains protected by the normal emergency
+                                    # branch below.
+                                    closing_speed = max(
+                                        abs(float(v)) - opp_spd, 0.0)
+                                    required_dynamic_gap = (
+                                        self._moving_emergency_desired_distance
+                                        + self._moving_emergency_reaction_sec
+                                            * closing_speed
+                                        + closing_speed ** 2
+                                        / (2.0
+                                           * self._moving_emergency_available_deceleration)
+                                    )
+                                    if arc_vehicle_gap > required_dynamic_gap:
+                                        center_path_hazard_active = False
+                                        self.get_logger().info(
+                                            "[CenterPathPredictionOuterBypass] "
+                                            "strict Shadow-verified outer MPC "
+                                            "passes the active/handoff target and the current "
+                                            "dynamic gap is safe; suppressing "
+                                            "Center-only speed matching: "
+                                            f"vehicle_id={vid}, lane=L"
+                                            f"{verified_outer_lane}, gap="
+                                            f"{arc_vehicle_gap:.2f}m/"
+                                            f"{required_dynamic_gap:.2f}m",
+                                            throttle_duration_sec=0.5,
+                                        )
                                 moving_speed_match = bool(
                                     moving_target
-                                    and arc_vehicle_gap
-                                    > self._moving_emergency_critical_distance
+                                    and (
+                                        center_path_hazard_active
+                                        or arc_vehicle_gap
+                                        > self._moving_emergency_critical_distance
+                                    )
                                 )
                                 if moving_speed_match:
                                     # A moving lead should normally be matched,
@@ -10947,20 +11863,41 @@ class MPCController(Node):
                                     # m/s below the lead and immediately lose
                                     # the draft even when relative speed was
                                     # already small.
-                                    v_ref_emg = (
-                                        opp_spd
-                                        + self._moving_emergency_spacing_kp
-                                        * (
+                                    if center_path_hazard_active:
+                                        closing_speed = max(
+                                            abs(float(v)) - opp_spd, 0.0)
+                                        usable_gap = max(
                                             arc_vehicle_gap
                                             - self._moving_emergency_desired_distance
+                                            - self._moving_emergency_reaction_sec
+                                                * closing_speed,
+                                            0.0,
                                         )
+                                        v_ref_emg = math.sqrt(
+                                            opp_spd ** 2
+                                            + 2.0
+                                            * self._moving_emergency_available_deceleration
+                                            * usable_gap
+                                        )
+                                    else:
+                                        v_ref_emg = (
+                                            opp_spd
+                                            + self._moving_emergency_spacing_kp
+                                            * (
+                                                arc_vehicle_gap
+                                                - self._moving_emergency_desired_distance
+                                            )
+                                        )
+                                        v_ref_emg = max(
+                                            opp_spd
+                                            - self._moving_emergency_max_speed_deficit,
+                                            v_ref_emg,
+                                        )
+                                    emergency_mode = (
+                                        "center_path_prediction_match"
+                                        if center_path_hazard_active
+                                        else "moving_speed_match"
                                     )
-                                    v_ref_emg = max(
-                                        opp_spd
-                                        - self._moving_emergency_max_speed_deficit,
-                                        v_ref_emg,
-                                    )
-                                    emergency_mode = "moving_speed_match"
                                 else:
                                     d_target_emg = 5.5
                                     K_p_emg = 1.5
@@ -10988,6 +11925,82 @@ class MPCController(Node):
                                     0.0 if stopped_vehicle_too_close else 0.5)
                                 v_ref_emg = max(min_emergency_speed, v_ref_emg)
                                 ref_vel_kmph = min(ref_vel_kmph, v_ref_emg)
+                                committed_lane_idx = (
+                                    int(self._overtake_lane_idx)
+                                    if self._overtake_lane_idx in (0, 2)
+                                    else None
+                                )
+                                committed_target_matches = bool(
+                                    vid == self._overtake_target_vehicle_id
+                                    and vid == self._committed_shadow_vehicle_id
+                                    and committed_lane_idx
+                                        == self._committed_shadow_lane_idx
+                                )
+                                commit_creep_conflicts = {
+                                    "front": [], "side": [], "rear": []}
+                                commit_creep_passable = False
+                                if committed_target_matches:
+                                    live_passage, _ = self._latched_target_passage(
+                                        pose)
+                                    commit_creep_passable = bool(
+                                        live_passage.get(
+                                            committed_lane_idx, False))
+                                    commit_creep_conflicts = classify_lane_conflicts(
+                                        committed_lane_idx,
+                                        self._relative_lane_vehicle_samples(
+                                            pose, v),
+                                        front_distance=(
+                                            self._prepass_lane_fallback_front_distance),
+                                        side_distance=(
+                                            self._prepass_lane_fallback_side_distance),
+                                        rear_distance=(
+                                            self._prepass_lane_fallback_rear_distance),
+                                    )
+                                strict_commit_creep = (
+                                    strict_shadow_slow_commit_creep_allowed(
+                                        target_matches=committed_target_matches,
+                                        shadow_verified=bool(
+                                            self._committed_shadow_vehicle_id
+                                                is not None),
+                                        committed_outer_lane=bool(
+                                            self._overtake_target_committed
+                                            and committed_lane_idx in (0, 2)
+                                            and self._reference_path.is_overtaking),
+                                        target_is_slow=bool(
+                                            self._v2x_tracker.has_velocity_estimate(
+                                                vid)
+                                            and opp_spd
+                                                <= self._strict_shadow_commit_creep_max_target_speed),
+                                        current_envelopes_separated=bool(
+                                            current_envelopes_separated),
+                                        candidate_passable=(
+                                            commit_creep_passable),
+                                        candidate_conflicts=(
+                                            commit_creep_conflicts),
+                                    )
+                                )
+                                if strict_commit_creep:
+                                    # Break the zero-speed/lateral-no-progress
+                                    # loop without bypassing collision safety.
+                                    # Later ParallelSafety and recovery layers
+                                    # may still impose a stricter command.
+                                    ref_vel_kmph = max(
+                                        ref_vel_kmph,
+                                        self._strict_shadow_stopped_commit_creep_speed,
+                                    )
+                                    emergency_mode = (
+                                        "strict_shadow_stopped_commit_creep")
+                                    self.get_logger().warn(
+                                        "[EmergencyBrakeCommitCreep] strict "
+                                        "Shadow-verified slow-car pass remains "
+                                        "physically and dynamically clear; replacing "
+                                        "the emergency full stop with low-speed "
+                                        f"creep: vehicle_id={vid}, lane=L"
+                                        f"{committed_lane_idx}, speed="
+                                        f"{ref_vel_kmph:.2f}m/s, conflicts="
+                                        f"{commit_creep_conflicts}",
+                                        throttle_duration_sec=0.5,
+                                    )
                                 emergency_brake_active = True
                                 if dist < emergency_brake_vehicle_distance:
                                     emergency_brake_vehicle_distance = dist
@@ -11178,6 +12191,8 @@ class MPCController(Node):
                                 <= self._parallel_safety_arc_ahead
                         )
                         if (
+                            self._parallel_safety_enabled
+                            and
                             safety_arc_ok
                             and is_parallel_vehicle(
                                 ego_lane_idx=ego_parallel_lane_idx,
@@ -11624,6 +12639,47 @@ class MPCController(Node):
         )
         recovering_from_stuck = self._apply_stuck_recovery(now, u, v, pose)
 
+        committed_overtake_acceleration_active = bool(
+            self._committed_overtake_acceleration_boost_enabled
+            and self._overtake_target_committed
+            and self._committed_shadow_vehicle_id
+                == self._overtake_target_vehicle_id
+            and self._committed_shadow_lane_idx in (0, 2)
+            and self._reference_path.is_overtaking
+            and self._reference_path.target_lane_idx
+                == self._committed_shadow_lane_idx
+            and not slow_lead_speed_match_required
+            and not emergency_brake_active
+            and not self._close_obstacle_reverse_requested
+            and not intentional_follow_stop_active
+            and not self._parallel_abort_active
+            and not self._mpc_safety_recovery_active
+            and not self._follow_escape_active
+            and not recovering_from_stuck
+            and self._enable_control
+            and self._mpc.infeasibility_counter == 0
+            and not self._mpc.used_prediction_fallback
+            and not self._mpc.recovery_requested
+            and ref_vel_kmph - abs(v)
+                >= self._committed_overtake_acceleration_min_speed_error
+        )
+        if committed_overtake_acceleration_active:
+            # The solve at the commit edge can still contain the preceding
+            # cycle's lead-speed cap. The same-target/same-lane strict Shadow
+            # proof is retained across Soft Transition, so immediately expose
+            # the already safety-limited reference speed to longitudinal
+            # control. Emergency/Parallel/MPC recovery above always vetoes it.
+            u[0] = max(float(u[0]), float(ref_vel_kmph))
+            self.get_logger().info(
+                "[CommittedOvertakeAcceleration] strict Shadow lane is "
+                "committed and no safety limiter is active; applying maximum "
+                "acceleration without the ordinary LPF delay: "
+                f"vehicle_id={self._overtake_target_vehicle_id}, "
+                f"lane=L{self._committed_shadow_lane_idx}, "
+                f"speed={abs(v):.2f}m/s, target={ref_vel_kmph:.2f}m/s",
+                throttle_duration_sec=0.5,
+            )
+
         acc = 0.
         bug_acc_enabled = False
 
@@ -11692,6 +12748,10 @@ class MPCController(Node):
             bug_acc_enabled = False
             acc = self._mpc_cfg.a_max
             self._pred_marker_color = CYAN
+        elif committed_overtake_acceleration_active:
+            bug_acc_enabled = False
+            acc = self._mpc_cfg.a_max
+            self._pred_marker_color = CYAN
         elif self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
@@ -11733,6 +12793,7 @@ class MPCController(Node):
                 or self._close_obstacle_reverse_requested
                 or follow_restart_active
                 or initial_start_boost_active
+                or committed_overtake_acceleration_active
             ):
                 acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
             u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
