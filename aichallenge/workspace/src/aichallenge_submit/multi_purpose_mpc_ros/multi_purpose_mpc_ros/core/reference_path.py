@@ -24,7 +24,7 @@ OBSTACLE = '#2E4053'
 # Since ub is the left course edge and lb is the right course edge, this
 # becomes the outside margin of L2 and L0 respectively.  It must not be
 # applied to the lane boundaries adjoining L1.
-OUTER_COURSE_MARGIN = 0.6
+OUTER_COURSE_MARGIN = 0.7
 CURVATURE_SAVGOL_WINDOW = 7
 CURVATURE_SAVGOL_POLYORDER = 3
 
@@ -443,7 +443,32 @@ class ReferencePath:
         #print(f"[ReferencePath] bounds_csv: {self._bounds_csv_path}")
         #print(f"[ReferencePath] waypoints={len(self.waypoints)}, bounds={len(self.bounds)}, shape={self.bounds.shape}")
 
+        self._outer_course_margin_applied = False
+        self._apply_outer_course_margin_once()
         self.COUNT = 0
+
+    def _apply_outer_course_margin_once(self) -> bool:
+        """Inset each initialized physical edge once, without inventing width."""
+        if self._outer_course_margin_applied:
+            return False
+        for wp in self.waypoints:
+            if wp.ub is None or wp.lb is None:
+                continue
+            raw_ub, raw_lb = float(wp.ub), float(wp.lb)
+            if not math.isfinite(raw_ub) or not math.isfinite(raw_lb):
+                raise ValueError("Nonfinite physical path bounds")
+            # Preserve Submit's 0.6 m margin. A narrow/inverted result must
+            # reach collapsed-corridor handling, never be expanded to 2.2 m.
+            wp.ub = raw_ub - OUTER_COURSE_MARGIN
+            wp.lb = raw_lb + OUTER_COURSE_MARGIN
+            normal_angle = wp.psi + math.pi / 2.0
+            nx, ny = math.cos(normal_angle), math.sin(normal_angle)
+            wp.static_border_cells = (
+                (wp.x + wp.ub * nx, wp.y + wp.ub * ny),
+                (wp.x + wp.lb * nx, wp.y + wp.lb * ny))
+        self._outer_course_margin_applied = True
+        self.reset_dynamic_constraints()
+        return True
 
     def set_path_constraints(self, upper_bounds: List[float], lower_bounds: List[float], n_rows, n_cols) -> None:
         self.path_constraints = [
@@ -880,152 +905,12 @@ class ReferencePath:
         #)
 
     def update_boundaries_from_markers(self, left_pts, right_pts):
+        """CSV bounds are ready at construction; marker arrival is read-only.
+
+        Do not reset dynamic obstacle cells or constraint snapshots mid-cycle.
+        Vector-map points remain a controller readiness notification.
         """
-        /map/vector_map_marker から取得した左右の点群（絶対座標系）から、
-        各 waypoint に対する正確な ub / lb 距離を cKDTree を用いて計算して上書きする。
-        """
-        import math
-        #from scipy.spatial import cKDTree
-
-        ub_arr = self.bounds[:,1]
-        lb_arr = self.bounds[:,2]
-
-        # Preserve the measured physical walls before applying margin and
-        # minimum-width recovery, so recovery never expands past a real wall.
-        ub_arr = np.clip(ub_arr, 0.3, 8.0)
-        lb_arr = np.clip(lb_arr, -8.0, -0.3)
-        raw_ub_arr = ub_arr.copy()
-        raw_lb_arr = lb_arr.copy()
-
-        #if len(left_pts) == 0 or len(right_pts) == 0:
-        #    print("[ReferencePath] Warning: update_boundaries_from_markers got empty arrays.", flush=True)
-        #    return
-        
-        # 左右それぞれ KDTree を構築
-        #left_tree = cKDTree(left_pts)
-        #right_tree = cKDTree(right_pts)
-        
-        # waypoints の位置座標と角度
-        wp_x_arr = np.array([wp.x for wp in self.waypoints])
-        wp_y_arr = np.array([wp.y for wp in self.waypoints])
-        wp_psi = np.array([wp.psi for wp in self.waypoints])
-        wp_pts = np.column_stack([wp_x_arr, wp_y_arr])
-        N = min(len(self.waypoints), len(ub_arr))
-        
-
-        # 左右それぞれ K=30 近傍点を検索して法線に射影
-        # K = 30
-        # _, left_idx = left_tree.query(wp_pts, k=min(K, len(left_pts)))
-        # _, right_idx = right_tree.query(wp_pts, k=min(K, len(right_pts)))
-
-        #ub_list = []
-        #lb_list = []
-        
-        for i in range(N):
-            P = wp_pts[i]
-            psi = wp_psi[i]
-            # 進行方向ベクトル
-            t_dir = np.array([math.cos(psi), math.sin(psi)])
-            # 左法線ベクトル (psi に対して +90°)
-            n_l = np.array([-math.sin(psi), math.cos(psi)])
-            '''
-            # --- 左側 (ub) ---
-            indices_l = left_idx[i] if isinstance(left_idx[i], (list, np.ndarray)) else [left_idx[i]]
-            candidates_l = []
-            for j in indices_l:
-                pt = left_pts[j]
-                v_lon = float(np.dot(pt - P, t_dir))
-                v_lat = float(np.dot(pt - P, n_l))
-                if v_lat > 0.0:
-                    candidates_l.append((abs(v_lon), v_lat))
-            
-            valid_candidates_l = [c for c in candidates_l if c[0] <= 3.0]
-            if not valid_candidates_l:
-                candidates_l.sort(key=lambda x: x[0])
-                valid_candidates_l = candidates_l[:5]
-            
-            if valid_candidates_l:
-                vals = [c[1] for c in valid_candidates_l]
-                weights = [1.0 / (c[0] + 0.1) for c in valid_candidates_l]
-                d_l = np.average(vals, weights=weights)
-            else:
-                d_l = 2.5
-            '''
-            '''
-            # --- 右側 (lb) ---
-            indices_r = right_idx[i] if isinstance(right_idx[i], (list, np.ndarray)) else [right_idx[i]]
-            candidates_r = []
-            for j in indices_r:
-                pt = right_pts[j]
-                v_lon = float(np.dot(pt - P, t_dir))
-                v_lat = float(np.dot(pt - P, n_l))
-                if v_lat < 0.0:
-                    candidates_r.append((abs(v_lon), v_lat))
-                    '''
-            '''
-            valid_candidates_r = [c for c in candidates_r if c[0] <= 3.0]
-            if not valid_candidates_r:
-                candidates_r.sort(key=lambda x: x[0])
-                valid_candidates_r = candidates_r[:5]
-
-            if valid_candidates_r:
-                vals = [c[1] for c in valid_candidates_r]
-                weights = [1.0 / (c[0] + 0.1) for c in valid_candidates_r]
-                d_r = np.average(vals, weights=weights)
-            else:
-                d_r = -2.5
-                '''
-
-            #ub_list.append(d_l)
-            #lb_list.append(d_r)
-
-        #ub_arr = np.array(ub_list)
-        #lb_arr = np.array(lb_list)
-        ub_arr = self.bounds[:,1]
-        lb_arr = self.bounds[:,2]
-
-        # Apply 0.3 m only to the two physical outside course edges.  Lane
-        # splitting happens after this operation, so no extra margin is added
-        # at the L0-L1 or L1-L2 boundaries.
-        ub_arr = ub_arr - OUTER_COURSE_MARGIN  # left outside edge (L2 side)
-        lb_arr = lb_arr + OUTER_COURSE_MARGIN  # right outside edge (L0 side)
-
-        # 最低幅の保証（自車の幅 2.0m に対して、最低でも 2.2m の全幅を確保）
-        center = (ub_arr + lb_arr) / 2.0 #中心線
-        width = ub_arr - lb_arr #コース幅
-        MIN_ROAD_WIDTH = 2.2 
-        narrow_mask = width < MIN_ROAD_WIDTH
-        ub_arr[narrow_mask] = center[narrow_mask] + (MIN_ROAD_WIDTH / 2.0)
-        lb_arr[narrow_mask] = center[narrow_mask] - (MIN_ROAD_WIDTH / 2.0)
-
-        # Minimum-width recovery must not cancel the outside margin by
-        # expanding beyond the measured physical walls.
-        ub_arr = np.minimum(ub_arr, raw_ub_arr)
-        lb_arr = np.maximum(lb_arr, raw_lb_arr)
-
-        # 平滑化（ガタつきをさらに抑制するために移動平均をかける）
-        #_window = 10
-        #_kernel = np.ones(_window) / _window
-        #ub_arr_s = np.convolve(np.tile(ub_arr, 3), _kernel, mode='same')[N:2 * N]
-        #lb_arr_s = np.convolve(np.tile(lb_arr, 3), _kernel, mode='same')[N:2 * N]
-
-        for i in range(N):
-            self.waypoints[i].ub = ub_arr[i]
-            self.waypoints[i].lb = lb_arr[i]
-            if len(self.waypoints) == len(ub_arr) + 1:
-                self.waypoints[-1].ub = ub_arr[0]
-                self.waypoints[-1].lb = lb_arr[0]
-
-        # Hard outer-lane selection uses static_border_cells directly.
-        for wp in self.waypoints:
-            normal_angle = wp.psi + math.pi / 2.0
-            nx, ny = math.cos(normal_angle), math.sin(normal_angle)
-            wp.static_border_cells = (
-                (wp.x + wp.ub * nx, wp.y + wp.ub * ny),
-                (wp.x + wp.lb * nx, wp.y + wp.lb * ny),
-            )
-
-        self.reset_dynamic_constraints()
+        return
 
     def get_lane_bounds(self, wp_id: int, n_lanes: int = None, max_half_width: float = 3.8, lane_width: float = 1.7, inner_lane_width: float = None) -> list:
         """

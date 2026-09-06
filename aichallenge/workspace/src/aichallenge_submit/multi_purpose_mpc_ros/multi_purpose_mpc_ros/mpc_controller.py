@@ -22,11 +22,13 @@ from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from rclpy.parameter import Parameter
 from visualization_msgs.msg import Marker, MarkerArray
+from . import collision_geometry as collision
+from . import lane_evaluation
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from std_msgs.msg import Empty, Bool, Float32MultiArray, Int32, String
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Quaternion, Pose2D, Point, Vector3, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, Quaternion, Pose2D, Point, Vector3, PoseWithCovarianceStamped
 from std_msgs.msg import ColorRGBA
 
 from rcl_interfaces.msg import SetParametersResult
@@ -87,6 +89,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     slow_lead_commit_distance,
     hybrid_lateral_escape_creep_allowed,
     rolling_precommit_speed_margin,
+    l1_rejoin_preemption_target_relevant,
     select_parallel_abort_lane,
     signed_closed_path_arc_distance,
     should_release_latched_overtake_lane,
@@ -1324,6 +1327,19 @@ class MPCController(Node):
             # Only callbacks mutate this live tracker.  _v2x_tracker is replaced
             # by an immutable-for-the-cycle snapshot at the start of _control.
             self._v2x_input_tracker = self._v2x_tracker
+            body_cfg = getattr(self._cfg, 'collision_geometry', None)
+            self._collision_geometry = collision.BodyGeometry(
+                float(getattr(body_cfg,'length',2.064)),float(getattr(body_cfg,'width',1.45)))
+            self._collision_ego_origin = str(getattr(body_cfg,'ego_position_origin','unconfirmed'))
+            self._collision_v2x_origin = str(getattr(body_cfg,'v2x_position_origin','unconfirmed'))
+            self._collision_center_offset = float(getattr(body_cfg,'rear_axle_to_center',0.522))
+            self._collision_origin_lateral_margin = max(float(getattr(body_cfg,'origin_lateral_margin',0.272)),0.0)
+            self._collision_max_age = float(getattr(body_cfg,'max_observation_age',0.5))
+            self._collision_body_publisher = self.create_publisher(MarkerArray,'/mpc/collision_bodies',1)
+            self._collision_pose_subscriptions = [self.create_subscription(
+                PoseStamped, f'/v2x/{vid}/body_pose',
+                lambda msg, vehicle_id=vid: self._measured_body_pose_callback(vehicle_id,msg), 1)
+                for vid in getattr(body_cfg,'measured_pose_vehicle_ids',['d1','d2','d3','d4'])]
             self._v2x_applied_generation = -1
             self._v2x_vehicle_radius = float(v2x_cfg.vehicle_radius)
             self._moving_vehicle_brake_bypass_min_speed = 2.0
@@ -2058,7 +2074,7 @@ class MPCController(Node):
             samples.append((vehicle_id, future_lane_idx, future_longitudinal))
         return samples
 
-    def _committed_lane_traffic_evidence(self, pose, ego_speed, lane_idx, conflicts, target_id):
+    def _committed_lane_traffic_evidence(self, pose, ego_speed, lane_idx, conflicts, target_id, *, remember=True):
         """Evaluate every possibly relevant other vehicle, retaining unknowns.
 
         Fixed-distance front/rear categories alone miss fast closers outside
@@ -2146,38 +2162,18 @@ class MPCController(Node):
                 available_deceleration=self._moving_emergency_available_deceleration,
             ):
                 unsafe.append(vehicle_id)
-        self._overtake.traffic_key = key
-        self._overtake.traffic_relevant_ids = relevant
-        self._committed_lane_unknown_reasons = unknown_reasons
+        if remember:
+            self._overtake.traffic_key = key
+            self._overtake.traffic_relevant_ids = relevant
+            self._committed_lane_unknown_reasons = unknown_reasons
         return tuple(unsafe), tuple(unknown)
 
     def _committed_target_body_overlap(self, pose, target_id):
-        """Current OBB evidence on either side of longitudinal zero; None is unknown."""
-        if target_id not in self._v2x_tracker.active_vehicle_ids():
+        target = collision.target_body(self, target_id)
+        if target is None:
             return None
-        buf = self._v2x_tracker._samples.get(target_id)
-        if not buf:
-            return None
-        _, x, y = buf[-1]
-        vx, vy = self._v2x_tracker.velocity(target_id)
-        if not all(math.isfinite(float(value)) for value in (x, y, pose.x, pose.y, pose.theta)):
-            return None
-        if (not self._v2x_tracker.has_velocity_estimate(target_id)
-                or not math.isfinite(vx) or not math.isfinite(vy)):
-            # Position is usable even when motion is not. Bound all possible
-            # target headings with its circumscribed circle (same 2 x 1.5 m
-            # body as SAT), instead of declaring the entire road unknown.
-            dx, dy = x - pose.x, y - pose.y
-            longitudinal = dx * math.cos(pose.theta) + dy * math.sin(pose.theta)
-            lateral = -dx * math.sin(pose.theta) + dy * math.cos(pose.theta)
-            return math.hypot(max(abs(longitudinal) - 1.0, 0.0),
-                              max(abs(lateral) - 0.75, 0.0)) <= math.hypot(1.0, 0.75)
-        wp = self._reference_pathN_center.get_waypoint(self._carN_center.get_closest_waypoint(x, y))
-        heading = math.atan2(vy, vx) if math.hypot(vx, vy) > 0.15 else float(wp.psi)
-        if not math.isfinite(heading):
-            return None
-        return self._oriented_vehicle_rectangles_overlap(
-            float(pose.x), float(pose.y), float(pose.theta), x, y, heading)
+        return collision.overlaps(collision.ego_body(self, pose), target, collision.geometry(self))
+
 
     def _evaluate_committed_lane_hold(
         self, *, pose, ego_speed, lane_idx, target_id, target_longitudinal,
@@ -2212,13 +2208,19 @@ class MPCController(Node):
             confirm_sec=self._hybrid_passage_loss_confirm_sec,
             lock_ratio=self._hybrid_side_lock_progress_ratio,
             legacy_target_hold=legacy_target_hold)
+        if result.motion_blocked or not geometry_known:
+            self._collision_evidence_hold = True
         if result.unsafe or result.waiting or result.locked:
             self.get_logger().info(
                 f"[OvertakeLaneHold] vehicle={target_id}, lane=L{lane_idx}, "
                 f"unsafe={result.unsafe}, waiting={result.waiting}, locked={result.locked}, "
                 f"width_valid={width_valid}, progress={progress:.2f}, "
                 f"reasons={result.reasons}, traffic_unsafe={unsafe}, traffic_unknown={unknown}, "
-                f"unknown_details={self._committed_lane_unknown_reasons}",
+                f"unknown_details={self._committed_lane_unknown_reasons}, "
+                f"body_overlap={overlap}, longitudinal={target_longitudinal}, "
+                f"passage_available={lane_idx in live_passage}, "
+                f"ego_body={collision.ego_body(self,pose)}, "
+                f"target_body={collision.target_body(self,target_id)}",
                 throttle_duration_sec=0.5)
         return result
 
@@ -2278,7 +2280,58 @@ class MPCController(Node):
                     conflicts.append((vehicle_id, vehicle_lane, sample_kind))
                     break
         self._reverse_rear_conflicts = conflicts
+        if getattr(self, "_adaptive_reverse_active", False):
+            if self._reverse_vehicle_clear_distance(pose, reverse_distance) + 1e-6 < reverse_distance:
+                return False
         return not conflicts
+
+    def _reverse_vehicle_clear_distance(self, pose, maximum):
+        """Bound straight reverse by vehicle bodies and closing motion, not centers."""
+        maximum = max(float(maximum), 0.0)
+        reverse_speed = max(self._stuck_forward_reverse_speed, 0.1)
+        reaction = self._moving_emergency_reaction_sec
+        horizon = maximum / reverse_speed + reaction
+        other_radius = math.hypot(self._parallel_vehicle_half_length, self._v2x_vehicle_radius)
+        body_length = self._parallel_ego_half_length + other_radius
+        body_gap = (body_length
+                    + self._adaptive_reverse_wall_margin
+                    + reverse_speed ** 2 / (2.0 * max(self._moving_emergency_available_deceleration, 0.1)))
+        half_width = 0.5 * self._cfg.bicycle_model.width + other_radius + 0.20
+        heading_x, heading_y = math.cos(pose.theta), math.sin(pose.theta)
+        available = maximum
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            buf = self._v2x_tracker._samples.get(vid)
+            if not buf or not all(math.isfinite(float(v)) for v in buf[-1]):
+                return 0.0
+            _, x, y = buf[-1]
+            dx, dy = x - pose.x, y - pose.y
+            longitudinal = dx * heading_x + dy * heading_y
+            lateral = -dx * heading_y + dy * heading_x
+            vx, vy = self._v2x_tracker.velocity(vid)
+            if (not self._v2x_tracker.has_velocity_estimate(vid)
+                    or not all(math.isfinite(v) for v in (vx, vy))):
+                # Unknown nearby traffic cannot be assumed stationary.
+                reach = maximum + body_gap + self._v2x_tracker._v_max_safety * horizon
+                if math.hypot(dx, dy) <= reach:
+                    return 0.0
+                continue
+            forward_speed = vx * heading_x + vy * heading_y
+            lateral_speed = -vx * heading_y + vy * heading_x
+            lateral_end = lateral + lateral_speed * horizon
+            if min(lateral, lateral_end) > half_width or max(lateral, lateral_end) < -half_width:
+                continue
+            # A vehicle wholly ahead and not approaching the reverse sweep
+            # does not block a retreat. Crossing/approaching traffic is retained.
+            nearest_lon = min(longitudinal, longitudinal + forward_speed * horizon)
+            if nearest_lon > body_length:
+                continue
+            if longitudinal >= 0.0:
+                return 0.0
+            closing = max(forward_speed, 0.0)
+            gap = -longitudinal - body_gap - closing * reaction
+            limit = gap / (1.0 + closing / reverse_speed)
+            available = min(available, max(limit, 0.0))
+        return available
 
     def _reverse_rear_conflict_summary(self) -> str:
         conflicts = getattr(self, "_reverse_rear_conflicts", [])
@@ -2412,9 +2465,13 @@ class MPCController(Node):
         )
         if target_distance < self._adaptive_reverse_min_clear_distance:
             return "blocked"
-        if not self._reverse_rear_is_clear(
-            pose, ego_speed, reverse_distance=target_distance
-        ):
+        vehicle_distance = self._reverse_vehicle_clear_distance(pose, target_distance)
+        if vehicle_distance < target_distance:
+            target_distance = vehicle_distance
+            mode = "vehicle_bounded"
+        if (target_distance < self._adaptive_reverse_min_clear_distance
+                or not self._reverse_rear_is_clear(
+                    pose, ego_speed, reverse_distance=target_distance)):
             self.get_logger().warn(
                 "[AdaptiveReverseBlocked] static sweep is free but a V2X "
                 "vehicle occupies the planned reverse path: "
@@ -2620,10 +2677,15 @@ class MPCController(Node):
                     physical_passage=physical_passage,
                     conflicts_by_lane=all_conflicts,
                 )
-                if selected_lane_idx == 0:
-                    return 0, all_conflicts
-                if selected_lane_idx == 1:
-                    break
+                if selected_lane_idx == lane_idx and lane_idx in (0, 2):
+                    if (self._lane_horizon_has_vehicle_width(lane_idx)
+                            and not (lane_idx == 0 and self._waypoint_in_configured_zones(
+                                int(self._carN_center.wp_id), self._l0_entry_prohibited_zones))):
+                        unsafe, unknown = self._committed_lane_traffic_evidence(
+                            pose, ego_speed, lane_idx, all_conflicts[lane_idx],
+                            None, remember=False)
+                        if not unsafe and not unknown:
+                            return lane_idx, all_conflicts
         if (
             1 not in self._follow_escape_attempted_lanes
             and lane_conflicts_are_clear(all_conflicts[1])
@@ -2825,114 +2887,152 @@ class MPCController(Node):
         return selected
 
     def _prediction_collision_with_vehicle(self, target_id):
-        """Return True/False for predicted OBB collision, or None if unknown."""
-        if (
-            target_id is None
-            or self._mpc.current_prediction is None
-            or self._mpc.infeasibility_counter != 0
-            or self._mpc.used_prediction_fallback
-            or self._mpc.recovery_requested
-        ):
+        if (self._mpc.current_prediction is None or self._mpc.infeasibility_counter != 0
+                or self._mpc.used_prediction_fallback or self._mpc.recovery_requested):
             return None
-        target_buf = self._v2x_tracker._samples.get(target_id)
-        if not target_buf:
+        target = collision.target_body(self, target_id)
+        if target is None or not target.position_valid:
             return None
-        _, target_x, target_y = target_buf[-1]
-        velocity_x, velocity_y = self._v2x_tracker.velocity(target_id)
-        pred_x, pred_y = self._mpc.current_prediction
-        if not pred_x or len(pred_x) != len(pred_y):
+        xs, ys = self._mpc.current_prediction
+        if not xs or len(xs) != len(ys):
             return None
-        prediction_times = [
-            self._v2x_t_samples[min(index + 2, len(self._v2x_t_samples) - 1)]
-            for index in range(len(pred_x))
-        ]
-        target_speed = math.hypot(velocity_x, velocity_y)
-        target_heading = (
-            math.atan2(velocity_y, velocity_x)
-            if target_speed > 0.15 else None
-        )
-        for index, (ego_x, ego_y, prediction_time) in enumerate(zip(
-            pred_x, pred_y, prediction_times
-        )):
-            previous_index = max(index - 1, 0)
-            next_index = min(index + 1, len(pred_x) - 1)
-            delta_x = float(pred_x[next_index]) - float(pred_x[previous_index])
-            delta_y = float(pred_y[next_index]) - float(pred_y[previous_index])
-            if math.hypot(delta_x, delta_y) > 1e-6:
-                ego_heading = math.atan2(delta_y, delta_x)
-            else:
-                ego_wp_id = self._carN_center.get_closest_waypoint(
-                    float(ego_x), float(ego_y))
-                ego_heading = float(
-                    self._reference_pathN_center.get_waypoint(ego_wp_id).psi)
-            predicted_target_x = target_x + velocity_x * prediction_time
-            predicted_target_y = target_y + velocity_y * prediction_time
-            if target_heading is None:
-                target_wp_id = self._carN_center.get_closest_waypoint(
-                    predicted_target_x, predicted_target_y)
-                predicted_target_heading = float(
-                    self._reference_pathN_center.get_waypoint(target_wp_id).psi)
-            else:
-                predicted_target_heading = target_heading
-            if self._oriented_vehicle_rectangles_overlap(
-                float(ego_x), float(ego_y), ego_heading,
-                predicted_target_x, predicted_target_y,
-                predicted_target_heading,
-            ):
-                return True
+        vx, vy = self._v2x_tracker.velocity(target_id)
+        if not self._v2x_tracker.has_velocity_estimate(target_id):
+            return None
+        for i in range(len(xs)):
+            t = self._v2x_t_samples[min(i+2, len(self._v2x_t_samples)-1)]
+            predicted = dataclasses.replace(target, x=target.x+vx*t, y=target.y+vy*t)
+            result = collision.overlaps(collision.predicted_ego(self,xs,ys,i), predicted, collision.geometry(self))
+            if result is not False:
+                return result
         return False
 
+
     def _prediction_is_clear_of_vehicle(self, target_id) -> bool:
-        """Check MPC points using 1.5 m x 2.0 m oriented rectangles."""
-        if target_id is None or self._mpc.current_prediction is None:
+        return self._prediction_collision_with_vehicle(target_id) is False
+
+
+    def _slow_pass_spacing_release_ids(self, pose):
+        """Per-cycle proof for slow traffic, including the unfinished lane transition.
+
+        Do not require present lateral separation: prove the connecting swept
+        path instead. All observed traffic must be clear before releasing any
+        spacing cap; recovery, physical bounds and later safety retain priority.
+        """
+        def reject(reason):
+            self._slow_pass_release_reason = reason
+            return set()
+        self._slow_pass_release_reason = 'no_slow_vehicle_with_terminal_clearance'
+        mpc = self._mpc
+        lane = self._reference_path.target_lane_idx
+        if (self._follow_only or not self._reference_path.is_overtaking
+                or lane not in (0, 2) or lane != self._overtake.requested_lane
+                or self._steering_fallback_armed or self._mpc_safety_recovery_active
+                or self._prepass_fallback_recovery_active or self._parallel_abort_active
+                or self._close_obstacle_reverse_requested
+                or self._stuck_recovery_until is not None
+                or mpc.current_prediction is None or mpc.infeasibility_counter != 0
+                or mpc.used_prediction_fallback or mpc.recovery_requested
+                or mpc.time_budget_exceeded or not mpc.last_solution_accurate
+                or str(mpc.last_solution_status).lower() != 'solved'
+                or getattr(mpc,'_constraint_target_lane',None) != lane
+                or getattr(mpc,'_constraint_lane_relaxation',math.inf) != 0.0
+                or self._outer_lane_constraint_is_collapsed(lane)[0]):
+            return reject(f'controller_state: lane={lane}, prepass={self._prepass_fallback_recovery_active}, mpc_recovery={self._mpc_safety_recovery_active}, status={mpc.last_solution_status}')
+        context = self._live_prediction_context
+        if (context is None or context[0] is not mpc
+                or context[1] is not mpc.current_prediction or context[2] != lane
+                or context[3] is not self._reference_path or context[4] is not self._v2x_tracker
+                or not self._lane_horizon_has_vehicle_width(lane)):
+            return reject('prediction_context_or_width')
+        # Visualization starts at waypoint +2. Use the actual near states for
+        # the swept connection, bound to this exact successful solve.
+        near = getattr(mpc,'collision_prediction_context',None)
+        xs, ys = (near[1] if near is not None and near[0] is mpc.current_prediction
+                  else mpc.current_prediction)
+        if (len(xs) < 2 or len(xs) != len(ys)
+                or not all(math.isfinite(float(v)) for v in (*xs,*ys))):
+            return reject('invalid_prediction')
+        ego = collision.ego_body(self,pose)
+        path = [ego] + [collision.predicted_ego(self,xs,ys,i) for i in range(len(xs))]
+        # Reject disconnected/stationary predictions, including stale spatial solutions.
+        if (math.hypot(path[1].x-ego.x,path[1].y-ego.y) > 1.0
+                or math.hypot(path[-1].x-ego.x,path[-1].y-ego.y) < 0.5):
+            return reject('disconnected_or_stationary_prediction')
+        times = [0.] + [float(self._v2x_t_samples[min(i+2,len(self._v2x_t_samples)-1)])
+                        for i in range(len(xs))]
+        approved = set()
+        geometry = collision.geometry(self)
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            target = collision.target_body(self,vid)
+            if (target is None or not target.position_valid
+                    or not self._v2x_tracker.has_velocity_estimate(vid)):
+                return reject(f'observation_unknown:{vid}')
+            velocity = self._v2x_tracker.velocity(vid)
+            age = max(self._collision_now-target.stamp,0.)
+            if not collision.swept_path_clear(path,[t+age for t in times],target,
+                                             velocity,geometry):
+                return reject(f'swept_path_not_clear:{vid}')
+            center = self._center_path_collision_prediction(vid)
+            if center is None or center.get('collision') is not False:
+                return reject(f'center_prediction_not_clear:{vid}')
+            speed = math.hypot(*velocity)
+            if speed > self._strict_shadow_commit_creep_max_target_speed:
+                continue
+            passage, _ = self._vehicle_passage(vid,pose)
+            if not passage.get(lane,False):
+                continue
+            # Horizon must reach lateral clearance or pass the vehicle; a short
+            # collision-free prefix ending behind the blocker cannot release ACC.
+            end = path[-1]
+            dx = target.x+velocity[0]*(times[-1]+age)-end.x
+            dy = target.y+velocity[1]*(times[-1]+age)-end.y
+            longitudinal = dx*math.cos(end.yaw)+dy*math.sin(end.yaw)
+            lateral = abs(-dx*math.sin(end.yaw)+dy*math.cos(end.yaw))
+            ego_long,ego_lat = collision.extents(end,geometry,end.yaw)
+            other_long,other_lat = collision.extents(target,geometry,end.yaw)
+            if (lateral > ego_lat+other_lat+self._parallel_critical_clearance
+                    or longitudinal < -ego_long-other_long-self._parallel_critical_clearance):
+                approved.add(vid)
+        return approved
+
+
+    def _fresh_outer_prediction_releases_center_stop(self, vehicle_id, envelope):
+        """Release only this vehicle's stale Center hazard with live motion proof."""
+        mpc = self._mpc
+        if (
+            envelope is None or envelope.get("rectangles_overlap", True)
+            or not math.isfinite(float(envelope.get("lateral_gap", math.nan)))
+            or float(envelope["lateral_gap"]) < self._parallel_warning_clearance
+            or not self._reference_path.is_overtaking
+            or self._reference_path.target_lane_idx not in (0, 2)
+            or mpc.current_prediction is None
+            or mpc.infeasibility_counter != 0
+            or mpc.used_prediction_fallback or mpc.recovery_requested
+            or mpc.time_budget_exceeded
+            or not mpc.last_solution_accurate
+            or str(mpc.last_solution_status).lower() != "solved"
+            or self._steering_fallback_armed
+            or self._mpc_safety_recovery_active
+            or not self._v2x_tracker.has_velocity_estimate(vehicle_id)
+        ):
             return False
-        target_buf = self._v2x_tracker._samples.get(target_id)
-        if not target_buf:
+        context = self._live_prediction_context
+        if (context is None or context[0] is not mpc
+                or context[1] is not mpc.current_prediction
+                or context[2] != self._reference_path.target_lane_idx
+                or context[3] is not self._reference_path
+                or context[4] is not self._v2x_tracker):
             return False
-        _, target_x, target_y = target_buf[-1]
-        velocity_x, velocity_y = self._v2x_tracker.velocity(target_id)
-        pred_x, pred_y = self._mpc.current_prediction
-        if not pred_x or len(pred_x) != len(pred_y):
+        xs, ys = mpc.current_prediction
+        if (len(xs) < 2 or len(xs) != len(ys)
+                or not all(math.isfinite(float(v)) for v in (*xs, *ys))
+                or math.hypot(xs[-1] - xs[0], ys[-1] - ys[0]) < 0.5
+                or not self._prediction_is_clear_of_vehicle(vehicle_id)):
             return False
-        prediction_times = [
-            self._v2x_t_samples[min(index + 2, len(self._v2x_t_samples) - 1)]
-            for index in range(len(pred_x))
-        ]
-        target_speed = math.hypot(velocity_x, velocity_y)
-        target_heading = (
-            math.atan2(velocity_y, velocity_x)
-            if target_speed > 0.15 else None
-        )
-        for index, (ego_x, ego_y, prediction_time) in enumerate(zip(
-            pred_x, pred_y, prediction_times
-        )):
-            previous_index = max(index - 1, 0)
-            next_index = min(index + 1, len(pred_x) - 1)
-            delta_x = float(pred_x[next_index]) - float(pred_x[previous_index])
-            delta_y = float(pred_y[next_index]) - float(pred_y[previous_index])
-            if math.hypot(delta_x, delta_y) > 1e-6:
-                ego_heading = math.atan2(delta_y, delta_x)
-            else:
-                ego_wp_id = self._carN_center.get_closest_waypoint(
-                    float(ego_x), float(ego_y))
-                ego_heading = float(
-                    self._reference_pathN_center.get_waypoint(ego_wp_id).psi)
-            predicted_target_x = target_x + velocity_x * prediction_time
-            predicted_target_y = target_y + velocity_y * prediction_time
-            if target_heading is None:
-                target_wp_id = self._carN_center.get_closest_waypoint(
-                    predicted_target_x, predicted_target_y)
-                predicted_target_heading = float(
-                    self._reference_pathN_center.get_waypoint(target_wp_id).psi)
-            else:
-                predicted_target_heading = target_heading
-            if self._oriented_vehicle_rectangles_overlap(
-                float(ego_x), float(ego_y), ego_heading,
-                predicted_target_x, predicted_target_y,
-                predicted_target_heading,
-            ):
-                return False
-        return True
+        center_prediction = self._center_path_collision_prediction(vehicle_id)
+        return bool(center_prediction is not None
+                    and center_prediction.get("collision") is False)
 
     def _center_path_collision_prediction(self, target_id):
         """Predict an opponent along Center and check ego/opponent OBBs.
@@ -2950,6 +3050,9 @@ class MPCController(Node):
             or self._mpc.recovery_requested
         ):
             return None
+        target_body = collision.target_body(self, target_id)
+        if target_body is None or not target_body.position_valid:
+            return None
         target_buf = self._v2x_tracker._samples.get(target_id)
         if not target_buf:
             return None
@@ -2962,15 +3065,14 @@ class MPCController(Node):
             target_x, target_y)
         target_center_heading = float(
             self._reference_pathN_center.get_waypoint(target_wp_id).psi)
-        # Only forward progress on Center advances the opponent. Lateral V2X
-        # velocity and corner-heading lag must not inflate its arc speed.
-        target_speed = max(
+        # Signed Center progress also supports reversing opponents. Body yaw
+        # remains independent of the direction of travel.
+        target_speed = (
             target_vx * math.cos(target_center_heading)
-            + target_vy * math.sin(target_center_heading),
-            0.0,
+            + target_vy * math.sin(target_center_heading)
         )
         if not self._v2x_tracker.has_velocity_estimate(target_id):
-            target_speed = 0.0
+            return None
 
         pred_x, pred_y = self._mpc.current_prediction
         if not pred_x or len(pred_x) != len(pred_y):
@@ -3016,25 +3118,18 @@ class MPCController(Node):
                 self._center_path_collision_prediction_horizon_sec
             ):
                 break
-            previous_index = max(index - 1, 0)
-            next_index = min(index + 1, len(pred_x) - 1)
-            delta_x = float(pred_x[next_index]) - float(pred_x[previous_index])
-            delta_y = float(pred_y[next_index]) - float(pred_y[previous_index])
-            if math.hypot(delta_x, delta_y) > 1e-6:
-                ego_heading = math.atan2(delta_y, delta_x)
-            else:
-                ego_wp_id = self._carN_center.get_closest_waypoint(
-                    float(ego_x), float(ego_y))
-                ego_heading = float(
-                    self._reference_pathN_center.get_waypoint(ego_wp_id).psi)
-            predicted_target_x, predicted_target_y, target_heading = (
-                center_pose_at_s(target_s + target_speed * prediction_time)
-            )
-            if self._oriented_vehicle_rectangles_overlap(
-                float(ego_x), float(ego_y), ego_heading,
-                predicted_target_x, predicted_target_y, target_heading,
-                margin=self._center_path_collision_prediction_margin,
-            ):
+            path_x, path_y, tangent = center_pose_at_s(target_s + target_speed * prediction_time)
+            base_x, base_y, base_tangent = center_pose_at_s(target_s)
+            rotation = math.atan2(math.sin(tangent-base_tangent),math.cos(tangent-base_tangent)) if abs(target_speed) > 0.15 else 0.0
+            target_heading = target_body.yaw + rotation if target_body.yaw_valid else None
+            predicted_target_x = target_body.x + path_x-base_x
+            predicted_target_y = target_body.y + path_y-base_y
+            predicted = dataclasses.replace(target_body, x=predicted_target_x, y=predicted_target_y, yaw=target_heading)
+            overlap = collision.overlaps(collision.predicted_ego(self,pred_x,pred_y,index),
+                predicted, collision.geometry(self), margin=self._center_path_collision_prediction_margin)
+            if overlap is None:
+                return None
+            if overlap:
                 return {
                     "collision": True,
                     "time": float(prediction_time),
@@ -3046,129 +3141,135 @@ class MPCController(Node):
         return {"collision": False}
 
     @staticmethod
-    def _oriented_vehicle_rectangles_overlap(
-        ego_x, ego_y, ego_heading,
-        target_x, target_y, target_heading,
-        margin=0.0,
-    ) -> bool:
-        """SAT overlap for two 1.5 m wide x 2.0 m long rectangles."""
-        half_length = 1.0 + 0.5 * max(float(margin), 0.0)
-        half_width = 0.75 + 0.5 * max(float(margin), 0.0)
-
-        def axes(heading):
-            forward = (math.cos(heading), math.sin(heading))
-            lateral = (-math.sin(heading), math.cos(heading))
-            return forward, lateral
-
-        ego_forward, ego_lateral = axes(float(ego_heading))
-        target_forward, target_lateral = axes(float(target_heading))
-        center_dx = float(target_x) - float(ego_x)
-        center_dy = float(target_y) - float(ego_y)
-        for axis_x, axis_y in (
-            ego_forward, ego_lateral, target_forward, target_lateral
-        ):
-            center_distance = abs(center_dx * axis_x + center_dy * axis_y)
-            ego_radius = (
-                half_length
-                * abs(ego_forward[0] * axis_x + ego_forward[1] * axis_y)
-                + half_width
-                * abs(ego_lateral[0] * axis_x + ego_lateral[1] * axis_y)
-            )
-            target_radius = (
-                half_length
-                * abs(target_forward[0] * axis_x + target_forward[1] * axis_y)
-                + half_width
-                * abs(target_lateral[0] * axis_x + target_lateral[1] * axis_y)
-            )
-            if center_distance > ego_radius + target_radius:
-                return False
-        return True
+    def _oriented_vehicle_rectangles_overlap(ego_x, ego_y, ego_heading,
+                                             target_x, target_y, target_heading, margin=0.0):
+        """Compatibility entry point using the shared physical body dimensions."""
+        return collision.overlaps(collision.body_pose(ego_x,ego_y,ego_heading,0.),
+            collision.body_pose(target_x,target_y,target_heading,0.),collision.BodyGeometry(),margin)
 
     def _current_center_envelopes_are_separated(self, pose, target_id):
-        """Check current vehicle envelopes in the Center Frenet frame.
-
-        Center arc length determines front/rear separation. The projected
-        rectangle extents grow when either vehicle is angled relative to the
-        Center tangent, preventing cornering nose/tail overlap from being
-        treated as width-only clearance.
-        """
-        if target_id is None:
+        ego = collision.ego_body(self,pose)
+        target = collision.target_body(self,target_id)
+        if target is None:
             return False, None
-        target_buf = self._v2x_tracker._samples.get(target_id)
-        if not target_buf:
+        result = collision.overlaps(ego,target,collision.geometry(self))
+        if result is None:
             return False, None
-        _, target_x, target_y = target_buf[-1]
-        ego_frenet = self._center_frenet(float(pose.x), float(pose.y))
-        target_frenet = self._center_frenet(target_x, target_y)
+        ego_frenet = self._center_frenet(ego.x,ego.y)
+        target_frenet = self._center_frenet(target.x,target.y)
         if ego_frenet is None or target_frenet is None:
             return False, None
-
-        arc_delta = signed_closed_path_arc_distance(
-            ego_frenet[0], target_frenet[0], self._center_arc_total_length)
+        arc_delta = signed_closed_path_arc_distance(ego_frenet[0],target_frenet[0],self._center_arc_total_length)
         if arc_delta is None or arc_delta <= 0.0:
             return False, None
+        wp = self._carN_center.get_closest_waypoint(target.x,target.y)
+        heading = float(self._reference_pathN_center.get_waypoint(wp).psi)
+        ego_lon,ego_lat = collision.extents(ego,collision.geometry(self),heading)
+        target_lon,target_lat = collision.extents(target,collision.geometry(self),heading)
+        arc_gap = arc_delta-ego_lon-target_lon
+        lateral_gap = abs(target_frenet[1]-ego_frenet[1])-ego_lat-target_lat
+        clearance_result = collision.overlaps(ego,target,collision.geometry(self),
+                                               margin=self._parallel_critical_clearance)
+        return bool(not result and clearance_result is False), {
+            'arc_delta':float(arc_delta),'arc_gap':float(arc_gap),'lateral_gap':float(lateral_gap),
+            'rectangles_overlap':result, 'yaw_known':ego.yaw_valid and target.yaw_valid,
+            'overlap_kind':'possible' if (not target.yaw_valid or target.uncertainty or ego.uncertainty) else 'body',
+            'ego_body':ego,'target_body':target}
 
-        target_wp_id = self._carN_center.get_closest_waypoint(
-            target_x, target_y)
-        center_heading = float(
-            self._reference_pathN_center.get_waypoint(target_wp_id).psi)
-        target_vx, target_vy = self._v2x_tracker.velocity(target_id)
-        target_heading = (
-            math.atan2(target_vy, target_vx)
-            if math.hypot(target_vx, target_vy) > 0.15
-            else center_heading
-        )
 
-        def projected_extents(heading, half_length, half_width):
-            relative_heading = heading - center_heading
-            tangent_extent = (
-                half_length * abs(math.cos(relative_heading))
-                + half_width * abs(math.sin(relative_heading))
-            )
-            normal_extent = (
-                half_length * abs(math.sin(relative_heading))
-                + half_width * abs(math.cos(relative_heading))
-            )
-            return tangent_extent, normal_extent
+    def _stationary_lane_group(self, pose, ego_speed, lane):
+        """Current stopped blockers sharing one physical passage; never motion proof."""
+        if lane not in (0, 2) or not self._lane_horizon_has_vehicle_width(lane):
+            return {}
+        wp = int(self._carN_center.wp_id)
+        if lane == 0 and self._waypoint_in_configured_zones(wp, self._l0_entry_prohibited_zones):
+            return {}
+        members = {}
+        blocked_at = math.inf
+        samples = self._relative_lane_vehicle_samples(pose, ego_speed)
+        conflicts = classify_lane_conflicts(
+            lane, samples, front_distance=self._prepass_lane_fallback_front_distance,
+            side_distance=self._prepass_lane_fallback_side_distance,
+            rear_distance=self._prepass_lane_fallback_rear_distance)
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            buf = self._v2x_tracker._samples.get(vid)
+            if not buf or not self._v2x_tracker.has_velocity_estimate(vid):
+                continue
+            _, x, y = buf[-1]
+            lon = self._center_longitudinal_between(pose.x, pose.y, x, y)
+            speed = math.hypot(*self._v2x_tracker.velocity(vid))
+            if (lon is None or not math.isfinite(lon) or not math.isfinite(speed)
+                    or not -3.0 <= lon < self._overtake_latch_max_distance
+                    or speed > self._stopped_lead_speed_threshold):
+                continue
+            # Stopped cars occupying the destination cannot become members
+            # just because some other car has room on that side.
+            passage, _ = self._vehicle_passage(vid, pose)
+            if self._committed_target_body_overlap(pose, vid) is not False:
+                return {}
+            if not passage.get(lane, False):
+                blocked_at = min(blocked_at, lon)
+            else:
+                members[vid] = lon
+        if math.isfinite(blocked_at):
+            # Keep only a prefix that can be fully passed before the next
+            # blockage's stopping line. The excluded car stays in all MPC,
+            # traffic and emergency evaluations; it gets no creep exemption.
+            speed = max(abs(float(ego_speed)), self._hybrid_escape_creep_speed)
+            body = self._parallel_ego_half_length + self._parallel_vehicle_half_length
+            stopping_gap = (body + self._moving_emergency_desired_distance
+                            + speed * self._moving_emergency_reaction_sec
+                            + speed ** 2 / (2.0 * max(self._moving_emergency_available_deceleration, 0.1)))
+            if blocked_at <= stopping_gap:
+                return {}
+            last_passable = blocked_at - stopping_gap - body - self._parallel_critical_clearance
+            members = {vid: lon for vid, lon in members.items() if lon < last_passable}
+        if not members:
+            return {}
+        unsafe, unknown = self._committed_lane_traffic_evidence(pose, ego_speed, lane, conflicts, self._overtake.target_id, remember=False)
+        if unsafe or unknown or any(conflicts.get(key) for key in ("front", "side", "rear")):
+            return {}
+        policy_lane = self._apply_l2_restricted_zone_policy(
+            lane, target_vehicle_id=self._overtake.target_id,
+            physical_passage={lane: True}, conflicts_by_lane={lane: conflicts}, center_wp=wp)
+        return members if policy_lane == lane else {}
 
-        # Collision geometry is deliberately identical for ego and opponent:
-        # full length 2.0 m, full width 1.5 m.
-        vehicle_half_length = 1.0
-        vehicle_half_width = 0.75
-        ego_long_extent, ego_lat_extent = projected_extents(
-            float(pose.theta), vehicle_half_length, vehicle_half_width)
-        target_long_extent, target_lat_extent = projected_extents(
-            target_heading, vehicle_half_length, vehicle_half_width,
-        )
-        arc_gap = float(arc_delta) - ego_long_extent - target_long_extent
-        lateral_gap = (
-            abs(float(target_frenet[1]) - float(ego_frenet[1]))
-            - ego_lat_extent
-            - target_lat_extent
-        )
-        rectangles_overlap = self._oriented_vehicle_rectangles_overlap(
-            float(pose.x), float(pose.y), float(pose.theta),
-            target_x, target_y, target_heading,
-        )
-        margin = self._parallel_critical_clearance
-        separated = bool(
-            not rectangles_overlap
-            and (arc_gap > margin or lateral_gap > margin)
-        )
-        return separated, {
-            "arc_delta": float(arc_delta),
-            "arc_gap": arc_gap,
-            "lateral_gap": lateral_gap,
-            "rectangles_overlap": rectangles_overlap,
-        }
+    def _release_stationary_parallel_abort(self, pose, ego_speed):
+        """Transfer a stopped yield to ordinary Shadow acquisition, not forward control."""
+        target = self._parallel_abort_vehicle_id
+        if (not self._parallel_abort_active or self._follow_only
+                or self._mpc_safety_recovery_active
+                or self._post_reverse_full_width_recovery_active
+                or not self._v2x_tracker.has_velocity_estimate(target)
+                or math.hypot(*self._v2x_tracker.velocity(target)) > self._stopped_lead_speed_threshold):
+            return False
+        preferred = getattr(self, '_parallel_abort_previous_lane', None)
+        for lane in dict.fromkeys((preferred, 0, 2)):
+            if lane not in (0, 2):
+                continue
+            members = self._stationary_lane_group(pose, ego_speed, lane)
+            if target not in members:
+                continue
+            self._parallel_abort_active = False
+            self._parallel_abort_vehicle_id = None
+            self._parallel_abort_target_lane_idx = None
+            self._parallel_timer_vehicle_id = None
+            self._parallel_start_time = None
+            self._cancel_l1_rejoin_for_overtake()
+            self.get_logger().info(
+                f"[StationaryAbortReacquire] stopped group={tuple(members)}, candidate=L{lane}; "
+                "yield released for fresh Shadow acquisition; no motion permission")
+            return True
+        return False
 
-    def _hybrid_escape_speed(self, pose, ego_speed):
+    def _hybrid_escape_speed(self, pose, ego_speed, vehicle_id=None):
         """Permission for this target's ACC/emergency cap only, not a global floor."""
         hybrid = self._overtake.hybrid
-        target = hybrid.vehicle_id
+        target = hybrid.vehicle_id if vehicle_id is None else vehicle_id
         lane = hybrid.lane_idx
+        grouped = (target != hybrid.vehicle_id and target in self._stationary_lane_group(pose, ego_speed, lane))
         if (target is None or lane not in (0, 2)
-                or target != self._overtake.target_id
+                or (target != self._overtake.target_id and not grouped)
                 or lane != self._overtake.requested_lane
                 or lane != self._reference_path.target_lane_idx
                 or hybrid.paused or hybrid.completed
@@ -3179,14 +3280,14 @@ class MPCController(Node):
         _, envelope = self._current_center_envelopes_are_separated(pose, target)
         if envelope is None:
             return 0.0
-        passage, _ = self._latched_target_passage(pose)
+        passage, _ = self._vehicle_passage(target, pose)
         conflicts = classify_lane_conflicts(
             lane, self._relative_lane_vehicle_samples(pose, ego_speed),
             front_distance=self._prepass_lane_fallback_front_distance,
             side_distance=self._prepass_lane_fallback_side_distance,
             rear_distance=self._prepass_lane_fallback_rear_distance)
         unsafe, unknown = self._committed_lane_traffic_evidence(
-            pose, ego_speed, lane, conflicts, target)
+            pose, ego_speed, lane, conflicts, target, remember=False)
         speed = math.hypot(*self._v2x_tracker.velocity(target))
         allowed = hybrid_lateral_escape_creep_allowed(
             target_matches=True, transition_active=True,
@@ -3303,6 +3404,52 @@ class MPCController(Node):
             return False
         return progress >= self._follow_deadlock_gnss_distance_threshold
 
+    def _handoff_prepass_to_follow_probe(self, pose, ego_speed, now_sec):
+        """Give a stopped, validated lane trial exclusive ownership of Prepass.
+
+        This grants a constrained solve, not permission to move. Solver/reverse
+        recovery and real traffic hazards remain exclusive higher priorities.
+        """
+        lane = self._follow_escape_probe_lane_idx
+        target = self._follow_escape_target_id
+        if (not self._follow_escape_active or lane not in (0,2)
+                or not self._prepass_fallback_recovery_active
+                or target != self._overtake.target_id or abs(ego_speed) > .3
+                or self._mpc_safety_recovery_active or self._post_reverse_full_width_recovery_active
+                or self._parallel_abort_active or self._stuck_recovery_until is not None
+                or self._close_obstacle_reverse_requested
+                or self._follow_only
+                or not self._v2x_tracker.has_velocity_estimate(target)
+                or math.hypot(*self._v2x_tracker.velocity(target))
+                    > self._strict_shadow_commit_creep_max_target_speed
+                or not self._lane_horizon_has_vehicle_width(lane)
+                or not self._follow_escape_lane_traffic_is_clear(pose,ego_speed,lane)):
+            return False
+        passage,_ = self._vehicle_passage(target,pose)
+        if not passage.get(lane,False):
+            return False
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            if (not self._v2x_tracker.has_velocity_estimate(vid)
+                    or self._committed_target_body_overlap(pose,vid) is not False):
+                return False
+        self._prepass_fallback_recovery_active = False
+        self._prepass_fallback_recovery_started_at = None
+        self._prepass_fallback_recovery_stable_since = None
+        self._prepass_fallback_blocked = False
+        self._prepass_fallback_commit_pending = False
+        self._prepass_fallback_commit_lane_idx = None
+        self._prepass_fallback_commit_success_since = None
+        self._prepass_fallback_lane_idx = None
+        self._clear_prepass_soft_guidance()
+        self._overtake.requested_lane = lane
+        self._follow_escape_probe_started_at = now_sec
+        self._follow_escape_probe_success_cycles = 0
+        self._mpc.osqp_initialized = False
+        self.get_logger().info(
+            f"[FollowProbePrepassHandoff] vehicle={target}, lane=L{lane}; "
+            "holding output until fresh constrained forward proof succeeds")
+        return True
+
     def _update_follow_deadlock_escape(
         self,
         *,
@@ -3403,6 +3550,7 @@ class MPCController(Node):
                     self._follow_escape_probe_started_at = now_sec
                     self._follow_escape_probe_success_cycles = 0
                     self._mpc.osqp_initialized = False
+                    self._handoff_prepass_to_follow_probe(pose,ego_speed,now_sec)
                     self.get_logger().warn(
                         "[FollowDeadlockForwardProbe] probing a stopped-follow "
                         f"escape lane: vehicle_id={self._follow_escape_target_id}, "
@@ -3463,6 +3611,17 @@ class MPCController(Node):
             lane_applied = (
                 applied_lane_idx == self._follow_escape_probe_lane_idx
             )
+            if not lane_applied:
+                # No constrained trial occurred: do not consume this lane's
+                # failure budget or reverse because another owner deferred it.
+                self._follow_escape_probe_started_at = now_sec
+                self._follow_escape_probe_success_cycles = 0
+                self._handoff_prepass_to_follow_probe(pose,ego_speed,now_sec)
+                self.get_logger().info(
+                    f"[FollowProbeDeferred] lane=L{self._follow_escape_probe_lane_idx}, "
+                    f"applied={applied_lane_idx}; awaiting lane ownership",
+                    throttle_duration_sec=1.0)
+                return
             feasible_solution = (
                 self._mpc.infeasibility_counter == 0
                 and self._mpc.current_prediction is not None
@@ -3472,8 +3631,10 @@ class MPCController(Node):
             )
             executable_prediction = self._prediction_has_forward_progress(
                 pose, [forward_command, 0.0])
-            prediction_clear = self._prediction_is_clear_of_vehicle(
-                self._follow_escape_target_id)
+            prediction_clear = (
+                self._follow_escape_target_id in self._slow_pass_spacing_release_ids(pose)
+                if self._follow_escape_probe_lane_idx in (0,2)
+                else self._prediction_is_clear_of_vehicle(self._follow_escape_target_id))
             self._follow_escape_probe_success_cycles = (
                 update_follow_escape_probe_success_cycles(
                     self._follow_escape_probe_success_cycles,
@@ -3696,6 +3857,90 @@ class MPCController(Node):
     def _latched_target_passage(self, pose):
         """Return passable outer lanes and distance for the latched target only."""
         return self._vehicle_passage(self._overtake.target_id, pose)
+
+    def _propose_traffic_lane(self, preferred, passage, conflicts, target_id, pose):
+        """Read-only ranking. Never feed future blockers into live lane release."""
+        active = (self._overtake.requested_lane if self._overtake.committed
+                  or self._overtake.can_resume_hybrid(self._overtake.requested_lane) else None)
+        if active in (0, 2) and lane_evaluation.propose_lane(
+                preferred, passage, conflicts, active_lane=active) == active:
+            return active
+        rows = []
+        unknown = []
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            if vid == target_id:
+                continue
+            body = collision.target_body(self, vid)
+            if body is None or not body.position_valid:
+                unknown.append(vid)
+                continue
+            distance = self._center_longitudinal_between(pose.x, pose.y, body.x, body.y)
+            if distance is None or not math.isfinite(distance):
+                unknown.append(vid)
+                continue
+            if not 0. <= distance <= self._overtake_latch_max_distance:
+                continue
+            if not self._v2x_tracker.has_velocity_estimate(vid):
+                unknown.append(vid)
+                continue
+            other_passage, _ = self._vehicle_passage(vid, pose)
+            rows.append(lane_evaluation.LaneObstruction(
+                vid, distance, tuple(lane for lane in (0, 2)
+                                     if not other_passage.get(lane, False))))
+        proposed = lane_evaluation.propose_lane(preferred, passage, conflicts, rows)
+        self.get_logger().info(
+            f"[TrafficLaneProposal] target={target_id}, proposed={proposed}, "
+            f"future_obstructions={rows}, unknown={unknown}; ranking_only=True",
+            throttle_duration_sec=1.0)
+        return proposed
+
+    def _same_lane_target_handoff_available(self, successor, pose, ego_speed):
+        """Geometry admission for preparing a successor Shadow without tearing down."""
+        lane = self._overtake.requested_lane
+        if (successor is None or not self._overtake.can_resume_hybrid(lane)
+                or self._overtake.hybrid.paused
+                or any(getattr(self, flag, False) for flag in (
+                    '_parallel_abort_active', '_follow_escape_active',
+                    '_mpc_safety_recovery_active', '_prepass_fallback_recovery_active',
+                    '_post_reverse_full_width_recovery_active'))
+                or self._stuck_recovery_until is not None):
+            return False
+        passage, _ = self._vehicle_passage(successor, pose)
+        if (not passage.get(lane, False)
+                or not self._lane_horizon_has_vehicle_width(lane)
+                or not self._follow_escape_lane_traffic_is_clear(pose, ego_speed, lane)):
+            return False
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            if (not self._v2x_tracker.has_velocity_estimate(vid)
+                    or self._committed_target_body_overlap(pose, vid) is not False):
+                return False
+        return True
+
+    def _accept_same_lane_target_handoff(self, successor, lane):
+        """Called only with fresh successor Shadow; leave boundaries and timer intact."""
+        old = self._overtake.target_id
+        if not self._overtake.handoff_target(successor, lane):
+            return False
+        self._overtake.verification.vehicle_id = successor
+        self._overtake.verification.lane_idx = lane
+        self._overtake.committed = True
+        if self._lane_decision is not None:
+            self._lane_decision = dataclasses.replace(self._lane_decision, target_id=successor)
+        self._hybrid_reference_key = (successor, lane)
+        self._follow_latched_cache = None
+        self._prepass_dynamic_conflict_speed_limit = None
+        self._prepass_target_behind_since = None
+        self._overtake_completed_target_id = None
+        self._forced_overtake_vehicle_id = None
+        self._reset_outer_lane_progress()
+        self._clear_consecutive_overtake_handoff()
+        self._overtake_switch_candidate_id = None
+        self._overtake_switch_candidate_since = None
+        self._clear_urgent_overtake_switch_candidate()
+        self.get_logger().info(
+            f"[SameLaneTargetHandoff] {old}->{successor}, lane=L{lane}; "
+            "fresh Shadow accepted; spatial anchor and boundary deadline retained")
+        return True
 
     def _reset_outer_lane_progress(self):
         self._outer_lane_progress_vehicle_id = None
@@ -4941,19 +5186,24 @@ class MPCController(Node):
             f"continuity={'used' if continuity_used else 'nominal'}",
             throttle_duration_sec=0.5,
         )
-        if distances[0] >= 0.98 * self._overtake.hybrid.length:
-            # The kart has spatially reached the selected lane. End the
-            # transition on the next cycle instead of waiting for the timeout.
-            self._constraint_transition_until = min(
-                float(self._constraint_transition_until), float(now_sec))
-            if not self._overtake.hybrid.completed:
-                self._overtake.hybrid.completed = True
+        hybrid = self._overtake.hybrid
+        hybrid.reference_completed = bool(distances[0] >= 0.98 * hybrid.length)
+        lateral_error = abs(float(self._carN_center.spatial_state.e_y) - float(lane_centers[0]))
+        # Finishing the reference is not evidence that the kart reached it.
+        # Keep saturated spatial guidance and side-lock/creep ownership until
+        # actual lateral tracking has caught up. Never restart the anchor.
+        if hybrid.reference_completed and lateral_error <= self._slow_lead_speed_match_release_lateral_error:
+            self._constraint_transition_until = min(float(self._constraint_transition_until), float(now_sec))
+            if not hybrid.completed:
+                hybrid.completed = True
                 self.get_logger().info(
-                    "[HybridOvertakeCompleted] spatial transition reached "
-                    f"the selected lane: vehicle_id={vehicle_id}, "
-                    f"lane=L{lane_idx}, travelled={distances[0]:.2f}m/"
-                    f"{self._overtake.hybrid.length:.2f}m"
-                )
+                    f"[HybridOvertakeCompleted] reference and actual lane arrival confirmed: "
+                    f"vehicle_id={vehicle_id}, lane=L{lane_idx}, lateral_error={lateral_error:.2f}m")
+        elif hybrid.reference_completed:
+            self.get_logger().info(
+                f"[HybridLaneArrivalWait] vehicle_id={vehicle_id}, lane=L{lane_idx}, "
+                f"lateral_error={lateral_error:.2f}m; retaining spatial manoeuvre",
+                throttle_duration_sec=0.5)
 
     def _latch_prepass_soft_candidate(self, lane_idx, now_sec: float):
         """Debounce the L0/L2 candidate used only by Prepass soft guidance."""
@@ -5637,6 +5887,40 @@ class MPCController(Node):
             f"full-traffic re-evaluation: vehicle_id={lost_id}, reason={reason}"
         )
 
+    def _preserve_stationary_group_hybrid(self, successor, lane, pose, ego_speed, now_sec):
+        """Preserve geometry only after the existing next-target Shadow gate succeeds."""
+        old_target = self._overtake.target_id
+        hybrid = self._overtake.hybrid
+        if ((hybrid.vehicle_id, hybrid.lane_idx) != (old_target, lane)
+                or hybrid.start_wp is None
+                or not self._v2x_tracker.has_velocity_estimate(old_target)
+                or not math.isfinite(math.hypot(*self._v2x_tracker.velocity(old_target)))
+                or math.hypot(*self._v2x_tracker.velocity(old_target)) > self._stopped_lead_speed_threshold
+                or successor not in self._stationary_lane_group(pose, ego_speed, lane)
+                or not self._overtake_commit_probe_is_fresh(successor, lane, now_sec)):
+            return False
+        hybrid.vehicle_id = successor
+        self._overtake.accepted_key = (successor, lane)
+        if self._lane_decision is not None:
+            previous = self._lane_decision
+            self._lane_decision = type(previous)(target_id=successor,
+                requested_lane=previous.requested_lane, applied_lane=previous.applied_lane,
+                mode=previous.mode)
+        # The caller installs successor's fresh verification. Never reuse the
+        # completed target's speed cap, passage-loss timer or traffic history.
+        self._overtake.clear_verification()
+        self._overtake.passage_hold.reset()
+        self._overtake.traffic_key = (None, None)
+        self._overtake.traffic_relevant_ids.clear()
+        self._follow_latched_cache = None
+        self._prepass_dynamic_conflict_speed_limit = None
+        self._prepass_target_behind_since = None
+        self._hybrid_reference_key = (successor, lane)
+        self.get_logger().info(
+            f"[StationaryGroupHandoff] {old_target}->{successor}, lane=L{lane}; "
+            "fresh successor Shadow accepted; retaining spatial anchor")
+        return True
+
     def _complete_overtake_target_behind(
         self, target_id, longitudinal: float, *, source: str
     ) -> None:
@@ -6145,7 +6429,9 @@ class MPCController(Node):
         if (
             self._prepass_retry_after_reverse
             and self._stuck_recovery_until is None
-            and not self._reverse_rear_is_clear(pose, actual_speed)
+            and not self._reverse_rear_is_clear(
+                pose, actual_speed,
+                reverse_distance=self._stuck_reverse_target_distance)
         ):
             self._switch_prepass_to_follow(
                 "rear corridor became occupied while waiting to start reverse: "
@@ -6909,6 +7195,54 @@ class MPCController(Node):
         self._reference_path.set_path_constraints(
             msg.upper_bounds, msg.lower_bounds, msg.rows, msg.cols)
 
+    def _measured_body_pose_callback(self, vehicle_id, msg):
+        q = msg.pose.orientation
+        norm = q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w
+        if abs(norm-1.0) > 0.01:
+            return
+        self._v2x_input_tracker.set_measured_body_pose(vehicle_id,
+            msg.pose.position.x,msg.pose.position.y,yaw_from_quaternion(q),
+            msg.header.stamp.sec+msg.header.stamp.nanosec/1e9,msg.header.frame_id)
+
+    def _publish_collision_bodies(self, pose):
+        markers = MarkerArray()
+        clear = Marker(); clear.action = Marker.DELETEALL
+        markers.markers.append(clear)
+        ego = collision.ego_body(self,pose)
+        diagnostic_lines = []
+        for i,vid in enumerate(self._v2x_tracker.active_vehicle_ids()):
+            target = collision.target_body(self,vid)
+            if target is None:
+                continue
+            overlap = collision.overlaps(ego,target,collision.geometry(self))
+            for j,body in enumerate((ego,target)):
+                marker = Marker(); marker.header.frame_id='map'
+                marker.header.stamp=self.get_clock().now().to_msg()
+                marker.ns=f'collision/{vid}';marker.id=j;marker.type=Marker.LINE_STRIP
+                marker.action=Marker.ADD;marker.pose.orientation.w=1.0;marker.scale.x=0.04
+                marker.color.a=1.0;marker.color.r=1.0 if overlap is not False else 0.0
+                marker.color.g=0.5 if not body.yaw_valid else (1.0 if overlap is False else 0.0)
+                if body.position_valid:
+                    for x,y in collision.outline(body,collision.geometry(self)):
+                        point=Point();point.x=float(x);point.y=float(y);point.z=0.3
+                        marker.points.append(point)
+                    markers.markers.append(marker)
+                    label=Marker();label.header=marker.header;label.ns=marker.ns;label.id=j+2
+                    label.type=Marker.TEXT_VIEW_FACING;label.action=Marker.ADD;label.pose.orientation.w=1.0
+                    label.pose.position.x=float(body.x);label.pose.position.y=float(body.y);label.pose.position.z=1.0+j*0.4
+                    label.scale.z=0.22;label.color=marker.color
+                    label.text=(f"{'ego' if j==0 else vid}: {body.yaw_source} "
+                                f"origin={body.origin} offset={body.center_offset:.3f} "
+                                f"uncertainty={body.uncertainty:.3f} lateral={body.lateral_padding:.3f} age={self._collision_now-body.stamp:.2f}s")
+                    markers.markers.append(label)
+            diagnostic_lines.append(
+                f'[CollisionBodyPair] target={vid}, overlap={overlap}, '
+                f'ego={ego}, target_body={target}, '
+                f'ego_age={self._collision_now-ego.stamp:.3f}, target_age={self._collision_now-target.stamp:.3f}')
+        if diagnostic_lines:
+            self.get_logger().info(' | '.join(diagnostic_lines),throttle_duration_sec=1.0)
+        self._collision_body_publisher.publish(markers)
+
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
         # If obstacle avoidance is disabled, clear tracker and bypass V2X processing entirely.
         if not self.USE_OBSTACLE_AVOIDANCE:
@@ -6952,7 +7286,7 @@ class MPCController(Node):
             )
             left_arr = np.array(left_pts)
             right_arr = np.array(right_pts)
-            # Race / Center 両軌道に境界線を反映（切り替え後も正しく動作するよう両方更新）
+            # Race/CenterのCSV境界は生成時に確定済み。受信で幅を変更しない。
             self._reference_pathN_race.update_boundaries_from_markers(left_arr, right_arr)
             self._reference_pathN_center.update_boundaries_from_markers(left_arr, right_arr)
 
@@ -7365,6 +7699,8 @@ class MPCController(Node):
 
 
     def _control(self):
+        # No pre-solve/early-return path may reuse last cycle's release proof.
+        self._live_prediction_context = None
         now = self.get_clock().now()
         t = (now - self._t_start).nanoseconds / 1e9
         dt = (now - self._last_t).nanoseconds / 1e9
@@ -7378,6 +7714,8 @@ class MPCController(Node):
 
         # 制御周期を維持
         self._control_rate.sleep()
+
+        self._collision_evidence_hold = False
 
         # Take the snapshot after the rate wait and apply exactly that generation
         # to the obstacle map.  A boolean notification can be overwritten by the
@@ -7414,6 +7752,25 @@ class MPCController(Node):
 
         #オドメトリ(x,y,yaw,v)取得
         pose = self.get_ego_pose()
+        self._collision_now = float(self.get_clock().now().nanoseconds)/1e9
+        self._collision_ego_yaw = float(pose.theta)
+        position_msg = self._gnss_pose if self._gnss_pose is not None else self._odom
+        position_stamp = position_msg.header.stamp.sec + position_msg.header.stamp.nanosec/1e9
+        yaw_stamp = self._odom.header.stamp.sec + self._odom.header.stamp.nanosec/1e9
+        valid = (0.0 <= self._collision_now-position_stamp <= getattr(self,"_collision_max_age",0.5)
+                 and 0.0 <= self._collision_now-yaw_stamp <= getattr(self,"_collision_max_age",0.5)
+                 and abs(position_stamp-yaw_stamp) <= 0.2)
+        self._collision_ego_metadata = (position_stamp,position_msg.header.frame_id,valid)
+        self._collision_ego_alignment = None
+        if self.USE_OBSTACLE_AVOIDANCE:
+            measured = self._v2x_tracker._measured_bodies.get(self._ego_vehicle_id)
+            if (measured and valid and 0.0 <= self._collision_now-measured.stamp <= self._collision_max_age
+                    and abs(position_stamp-measured.stamp) <= 0.2):
+                dx,dy=measured.x-pose.x,measured.y-pose.y
+                c,s=math.cos(pose.theta),math.sin(pose.theta)
+                self._collision_ego_alignment = (dx*c+dy*s,-dx*s+dy*c,measured.yaw-pose.theta,measured.stamp)
+        if self.USE_OBSTACLE_AVOIDANCE:
+            self._publish_collision_bodies(pose)
         v = self._odom.twist.twist.linear.x
 
         # Capture the L0 grid layout before any opponent-driven trajectory
@@ -8569,10 +8926,10 @@ class MPCController(Node):
                     )
                     for lane_idx in (0, 2)
                 }
-                selected_outer_lane = select_safe_outer_lane(
+                selected_outer_lane = self._propose_traffic_lane(
                     new_target_lane_idx,
                     horizon_passage,
-                    horizon_conflicts,
+                    horizon_conflicts, opponent_vehicle_id, pose,
                 )
                 selected_outer_lane = self._apply_l2_restricted_zone_policy(
                     selected_outer_lane,
@@ -8821,6 +9178,11 @@ class MPCController(Node):
             )
             if handoff_confirmed:
                 old_target_id = active_overtake_target_id
+                if self._same_lane_target_handoff_available(opponent_vehicle_id, pose, v):
+                    self._accept_same_lane_target_handoff(opponent_vehicle_id, handoff_lane_idx)
+                else:
+                    self._preserve_stationary_group_hybrid(
+                        opponent_vehicle_id, handoff_lane_idx, pose, v, now_sec)
                 self._overtake.target_id = opponent_vehicle_id
                 self._forced_overtake_vehicle_id = None
                 self._overtake.requested_lane = handoff_lane_idx
@@ -9050,7 +9412,27 @@ class MPCController(Node):
             self._overtake_switch_candidate_id = None
             self._overtake_switch_candidate_since = None
 
-        if target_switch_confirmed:
+        same_lane_handoff = False
+        if (target_switch_confirmed
+                and self._same_lane_target_handoff_available(opponent_vehicle_id, pose, v)):
+            handoff_lane = self._overtake.requested_lane
+            if self._overtake_commit_probe_is_fresh(opponent_vehicle_id, handoff_lane, now_sec):
+                same_lane_handoff = self._accept_same_lane_target_handoff(
+                    opponent_vehicle_id, handoff_lane)
+                if same_lane_handoff:
+                    active_overtake_target_id = opponent_vehicle_id
+                    active_target_longitudinal = opponent_arc_distance
+                    active_target_distance = opponent_arc_distance
+                    active_target_physically_complete = False
+                    new_target_lane_idx = handoff_lane
+            else:
+                self._prepare_overtake_commit_probe(opponent_vehicle_id, handoff_lane)
+                target_switch_confirmed = False
+                self.get_logger().info(
+                    f"[SameLaneTargetProbe] keeping lane=L{handoff_lane} and spatial anchor "
+                    f"while verifying successor={opponent_vehicle_id}", throttle_duration_sec=0.5)
+
+        if target_switch_confirmed and not same_lane_handoff:
             old_target_id = active_overtake_target_id
             self._reset_overtake_state_for_target_change(
                 opponent_vehicle_id,
@@ -9079,10 +9461,10 @@ class MPCController(Node):
                 )
                 for lane_idx in (0, 2)
             }
-            new_target_lane_idx = select_safe_outer_lane(
+            new_target_lane_idx = self._propose_traffic_lane(
                 new_target_lane_idx,
                 target_passage,
-                target_conflicts,
+                target_conflicts, opponent_vehicle_id, pose,
             )
             new_target_lane_idx = self._apply_l2_restricted_zone_policy(
                 new_target_lane_idx,
@@ -9197,6 +9579,8 @@ class MPCController(Node):
             )
 
         if self._parallel_abort_active and not recovery_active:
+            self._release_stationary_parallel_abort(pose, v)
+        if self._parallel_abort_active and not recovery_active:
             abort_vehicle_active = (
                 self._parallel_abort_vehicle_id
                 in self._v2x_tracker.active_vehicle_ids()
@@ -9307,10 +9691,13 @@ class MPCController(Node):
             and not self._follow_only
             and not startup_overtake_suppressed
             and not self._parallel_abort_active
-            and opponent_ahead_detected
-            and opponent_vehicle_id is not None
-            and is_follow_retry_within_distance(
-                opponent_arc_distance, self._overtake_latch_max_distance)
+            and l1_rejoin_preemption_target_relevant(
+                opponent_ahead_detected=opponent_ahead_detected,
+                lead_is_stationary=bool(opponent_velocity_valid and lead_is_stationary),
+                lead_is_special_slow=bool(opponent_velocity_valid and lead_is_special_slow),
+                opponent_vehicle_id=opponent_vehicle_id,
+                opponent_arc_distance=opponent_arc_distance,
+                maximum_distance=self._overtake_latch_max_distance)
             and self._mpc.infeasibility_counter == 0
             and self._mpc.current_prediction is not None
             and not self._mpc_safety_recovery_active
@@ -9328,10 +9715,10 @@ class MPCController(Node):
                 )
                 for lane_idx in (0, 2)
             }
-            preempt_lane_idx = select_safe_outer_lane(
+            preempt_lane_idx = self._propose_traffic_lane(
                 new_target_lane_idx,
                 preempt_passage,
-                preempt_conflicts,
+                preempt_conflicts, opponent_vehicle_id, pose,
             )
             preempt_lane_idx = self._apply_l2_restricted_zone_policy(
                 preempt_lane_idx,
@@ -9391,6 +9778,11 @@ class MPCController(Node):
             self._reset_overtake_commit_probe()
             overtake_latch_started = False
             new_target_lane_idx = None
+        elif self._parallel_abort_active:
+            # Yield owns selection. Do not prepare a Shadow that release_target
+            # below would discard before its execution.
+            overtake_latch_started = False
+            new_target_lane_idx = self._parallel_abort_target_lane_idx
         elif exclusive_l1_rejoin:
             # L1 rejoin exclusively owns lateral selection. Calling the outer
             # lane selector here would recreate an L0/L2 latch every cycle,
@@ -9563,7 +9955,15 @@ class MPCController(Node):
                 self._overtake.requested_lane,
                 overtake_latch_started,
             ) = select_latched_overtake_lane(
-                opponent_ahead_detected and not self._parallel_abort_active,
+                # A metric slow-lead preemption must reach the latch writer
+                # even when the waypoint-only detector remains false. The
+                # candidate above is still withheld until strict Shadow passes.
+                (opponent_ahead_detected or (
+                    opponent_velocity_valid
+                    and (lead_is_stationary or lead_is_special_slow)
+                    and is_follow_retry_within_distance(
+                        opponent_arc_distance, new_latch_distance)))
+                and not self._parallel_abort_active,
                 latch_candidate_vehicle_id,
                 (
                     # ``_prepass_fallback_lane_idx == 1`` only records that
@@ -11229,9 +11629,25 @@ class MPCController(Node):
             self._mpc.set_full_width_l1_offset_limits()
             self._mpc.set_full_width_l0_offset_limits()
 
+        if (self._follow_escape_active and not self._follow_escape_forward_active
+                and self._follow_escape_probe_lane_idx in (0,2)
+                and self._reference_path.target_lane_idx == self._follow_escape_probe_lane_idx
+                and not self._prepass_fallback_recovery_active
+                and not self._mpc_safety_recovery_active
+                and not self._post_reverse_full_width_recovery_active
+                and not recovery_active and not self._parallel_abort_active
+                and not self._collision_evidence_hold):
+            self._mpc.update_v_max(self._follow_escape_creep_speed)
+            self._reference_path.set_v_ref(
+                [self._follow_escape_creep_speed]*len(self._reference_path.waypoints))
+
         # MPCの実行
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
+        self._live_prediction_context = (
+            self._mpc, self._mpc.current_prediction,
+            self._reference_path.target_lane_idx, self._reference_path,
+            self._v2x_tracker)
 
         pure_pursuit_safe_this_cycle = False
         if self._steering_fallback_enabled:
@@ -11672,6 +12088,17 @@ class MPCController(Node):
             else:
                 self._mpc_safety_recovery_success_cycles = 0
 
+        slow_pass_release_ids = (self._slow_pass_spacing_release_ids(pose)
+                                 if self.USE_OBSTACLE_AVOIDANCE else set())
+        if slow_pass_release_ids:
+            self.get_logger().info(
+                f"[SlowPassSpacingRelease] lane=L{self._reference_path.target_lane_idx}, "
+                f"vehicles={sorted(slow_pass_release_ids)}; fresh swept transition clear",
+                throttle_duration_sec=0.5)
+        elif self.USE_OBSTACLE_AVOIDANCE and self._overtake.target_id is not None:
+            self.get_logger().info(
+                f"[SlowPassSpacingHold] target={self._overtake.target_id}, "
+                f"reason={self._slow_pass_release_reason}", throttle_duration_sec=1.0)
         forced_overtake_prediction_clear = (
             forced_overtake_active
             and not in_transition
@@ -11695,6 +12122,7 @@ class MPCController(Node):
         )
         slow_lead_speed_match_required = bool(
             not forced_overtake_prediction_clear
+            and opponent_vehicle_id not in slow_pass_release_ids
             and not slow_lead_lateral_move_established
         )
         confirmed_precommit_lane_idx = (
@@ -11816,7 +12244,14 @@ class MPCController(Node):
         hybrid_escape_target = self._overtake.hybrid.vehicle_id
         hybrid_escape_speed = (self._hybrid_escape_speed(pose, v)
                                if self.USE_OBSTACLE_AVOIDANCE else 0.0)
+        hybrid_escape_speeds = {hybrid_escape_target: hybrid_escape_speed}
         if self.USE_OBSTACLE_AVOIDANCE:
+            for member in self._stationary_lane_group(pose, v, self._overtake.hybrid.lane_idx):
+                hybrid_escape_speeds[member] = self._hybrid_escape_speed(pose, v, member)
+            for member in slow_pass_release_ids:
+                hybrid_escape_speeds[member] = max(
+                    hybrid_escape_speeds.get(member,0.), self._hybrid_escape_creep_speed)
+            hybrid_escape_speed = max(hybrid_escape_speeds.values(), default=0.0)
             # --- ACC spacing control (車間距離維持制御) ---
             # 前方車両がいて、かつ自車の走行ライン上（横方向の差が 1.2m 未満）に他車が位置する場合に
             # 追従状態とみなして、設定された距離内で車間制御を有効化する。
@@ -11872,6 +12307,7 @@ class MPCController(Node):
                     or self._prepass_fallback_follow_active
                 )
                 and not forced_overtake_active
+                and acc_vehicle_id not in slow_pass_release_ids
                 and (
                     not initial_start_boost_active
                     or self._follow_only
@@ -11897,8 +12333,8 @@ class MPCController(Node):
                         v_ref_acc = min(
                             v_ref_acc, self._follow_target_lost_max_speed)
 
-                    if acc_vehicle_id == hybrid_escape_target and hybrid_escape_speed > 0.0:
-                        v_ref_acc = max(v_ref_acc, hybrid_escape_speed)
+                    if hybrid_escape_speeds.get(acc_vehicle_id, 0.0) > 0.0:
+                        v_ref_acc = max(v_ref_acc, hybrid_escape_speeds[acc_vehicle_id])
                     ref_vel_kmph = min(ref_vel_kmph, v_ref_acc)
 
                     ego_is_stopped = (
@@ -12108,6 +12544,9 @@ class MPCController(Node):
                         self._moving_vehicle_brake_bypass_since.pop(
                             vehicle_id, None)
                 for vid in active_vehicle_ids:
+                    if vid in slow_pass_release_ids:
+                        self._center_path_collision_hazard_until.pop(vid,None)
+                        continue
                     buf = self._v2x_tracker._samples.get(vid)
                     if buf:
                         _, opp_x, opp_y = buf[-1]
@@ -12221,6 +12660,19 @@ class MPCController(Node):
                                     and not self._mpc.recovery_requested
                                 )
                                 if (
+                                    center_path_hazard_active
+                                    and self._fresh_outer_prediction_releases_center_stop(
+                                        vid, current_envelope_state)
+                                ):
+                                    self._center_path_collision_hazard_until.pop(vid, None)
+                                    self.get_logger().info(
+                                        f"[FreshOuterEmergencyRelease] vehicle_id={vid}, "
+                                        f"target={self._overtake.target_id}, "
+                                        f"lane=L{self._reference_path.target_lane_idx}; "
+                                        "lateral separation and both fresh moving predictions are clear",
+                                        throttle_duration_sec=0.5)
+                                    continue
+                                if (
                                     fresh_mpc_prediction
                                     and current_envelopes_separated
                                     and not center_path_hazard_active
@@ -12237,7 +12689,9 @@ class MPCController(Node):
                                         f"body_lateral_gap="
                                         f"{current_envelope_state['lateral_gap']:+.2f}m, "
                                         f"rect_overlap="
-                                        f"{current_envelope_state['rectangles_overlap']}",
+                                        f"{current_envelope_state['rectangles_overlap']}, "
+                                        f"overlap_kind={current_envelope_state.get('overlap_kind','unknown')}, "
+                                        f"yaw_known={current_envelope_state.get('yaw_known',False)}",
                                         throttle_duration_sec=1.0,
                                     )
                                     continue
@@ -12257,7 +12711,9 @@ class MPCController(Node):
                                         f"body_lateral_gap="
                                         f"{current_envelope_state['lateral_gap']:+.2f}m, "
                                         f"rect_overlap="
-                                        f"{current_envelope_state['rectangles_overlap']}",
+                                        f"{current_envelope_state['rectangles_overlap']}, "
+                                        f"overlap_kind={current_envelope_state.get('overlap_kind','unknown')}, "
+                                        f"yaw_known={current_envelope_state.get('yaw_known',False)}",
                                         throttle_duration_sec=1.0,
                                     )
                                 moving_vehicle_will_clear = (
@@ -12469,7 +12925,7 @@ class MPCController(Node):
                                 )
                                 if (
                                     stopped_vehicle_too_close
-                                    and not (vid == hybrid_escape_target and hybrid_escape_speed > 0.0)
+                                    and not (hybrid_escape_speeds.get(vid, 0.0) > 0.0)
                                     and same_lane
                                     and self._v2x_tracker.has_velocity_estimate(vid)
                                     and arc_vehicle_gap
@@ -12556,8 +13012,8 @@ class MPCController(Node):
                                         f"{commit_creep_conflicts}",
                                         throttle_duration_sec=0.5,
                                     )
-                                if vid == hybrid_escape_target and hybrid_escape_speed > 0.0:
-                                    v_ref_emg = max(v_ref_emg, hybrid_escape_speed)
+                                if hybrid_escape_speeds.get(vid, 0.0) > 0.0:
+                                    v_ref_emg = max(v_ref_emg, hybrid_escape_speeds[vid])
                                     if not strict_commit_creep:
                                         emergency_mode = "hybrid_lateral_escape_creep"
                                 # Apply only this vehicle's adjusted cap. A preceding
@@ -12956,6 +13412,17 @@ class MPCController(Node):
                     self._parallel_start_time = current_time_sec
                 parallel_duration = current_time_sec - self._parallel_start_time
 
+            stationary_parallel_group = (
+                self._stationary_lane_group(pose, v, self._target_lane_idx)
+                if (parallel_abort_candidate is not None
+                    and parallel_duration > self._parallel_abort_sec) else {})
+            if abort_vehicle_id in stationary_parallel_group:
+                self.get_logger().info(
+                    f"[StationaryParallelContinue] group={tuple(stationary_parallel_group)}, "
+                    f"lane=L{self._target_lane_idx}; retaining pass instead of stationary yield",
+                    throttle_duration_sec=1.0)
+                self._parallel_start_time = current_time_sec
+                parallel_duration = 0.0
             if (
                 parallel_abort_candidate is not None
                 and parallel_duration > self._parallel_abort_sec
@@ -12982,6 +13449,7 @@ class MPCController(Node):
                     "next cycle.",
                     throttle_duration_sec=1.0
                 )
+                self._parallel_abort_previous_lane = self._target_lane_idx
                 self._parallel_abort_active = True
                 self._parallel_abort_vehicle_id = abort["vehicle_id"]
                 self._parallel_abort_target_lane_idx = abort_target_lane_idx
@@ -13130,6 +13598,7 @@ class MPCController(Node):
             if creep_command > 0.0:
                 self.get_logger().info(
                     f"[EmergencyBrakeHybridEscapeCreep] vehicle_id={hybrid_escape_target}, "
+                    f"permitted_ids={tuple(vid for vid, speed in hybrid_escape_speeds.items() if speed > 0.0)}, "
                     f"lane=L{self._overtake.hybrid.lane_idx}, speed={creep_command:.2f}m/s",
                     throttle_duration_sec=0.5)
 
@@ -13213,6 +13682,10 @@ class MPCController(Node):
             else:
                 # Probe and rear-blocked states are observation-only.
                 u[0] = 0.0
+
+        if self._collision_evidence_hold:
+            # Do not let restart, Hybrid creep or another vehicle override missing evidence.
+            u[0] = 0.0
 
         # 停止命令がコマンドで入力させたら減速させる
         if not self._enable_control:

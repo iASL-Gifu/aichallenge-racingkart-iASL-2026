@@ -29,6 +29,7 @@ def escape_controller():
     c._prepass_lane_fallback_rear_distance=10.
     c._current_center_envelopes_are_separated=lambda *a: (False,dict(rectangles_overlap=False,lateral_gap=.1))
     c._latched_target_passage=lambda *a: ({2:True},None)
+    c._vehicle_passage=lambda *a: ({2:True},None)
     c._relative_lane_vehicle_samples=lambda *a: []
     c._v2x_tracker.update(_msg(0.,[('target',3.,0.)]))
     c._v2x_tracker.update(_msg(.1,[('target',3.,0.)]))
@@ -66,7 +67,7 @@ def actual_speed_nodes():
         for _,body in ast.iter_fields(parent):
             if not isinstance(body,list):continue
             for i,n in enumerate(body):
-                if isinstance(n,ast.If) and ast.unparse(n.test)=='vid == hybrid_escape_target and hybrid_escape_speed > 0.0':
+                if isinstance(n,ast.If) and ast.unparse(n.test) == "hybrid_escape_speeds.get(vid, 0.0) > 0.0":
                     return copy.deepcopy(body[i:i+2])
     raise AssertionError('emergency creep clamp not found')
 
@@ -74,7 +75,7 @@ def actual_speed_nodes():
 @pytest.mark.parametrize('order',[('other','target'),('target','other')])
 @pytest.mark.parametrize('other_limit',[0.,.2])
 def test_other_vehicle_cap_survives_emergency_iteration_order(order,other_limit):
-    ns=dict(ref_vel_kmph=8.,hybrid_escape_target='target',hybrid_escape_speed=.6,strict_commit_creep=False)
+    ns=dict(ref_vel_kmph=8.,hybrid_escape_target='target',hybrid_escape_speed=.6,hybrid_escape_speeds={"target":.6},strict_commit_creep=False)
     code=compile(ast.Module(body=actual_speed_nodes(),type_ignores=[]),'<actual-emergency-cap>','exec')
     for vid in order:
         ns.update(vid=vid,v_ref_emg=0. if vid=='target' else other_limit)
@@ -92,7 +93,7 @@ def test_actual_creep_command_respects_all_preceding_reference_limits(cap,expect
         if isinstance(n,ast.Attribute) and isinstance(n.value,ast.Name) and n.value.id=='self' and not hasattr(c,n.attr):
             setattr(c,n.attr,False)
     c._stuck_recovery_until=None
-    ns=dict(self=c,hybrid_escape_speed=.6,hybrid_escape_target='target',
+    ns=dict(self=c,hybrid_escape_speed=.6,hybrid_escape_target='target',hybrid_escape_speeds={'target':.6},
         intentional_follow_stop_active=False,close_overtake_blocked=False,
         fallback_stop_requested=False,pure_pursuit_safe_this_cycle=True,
         ref_vel_kmph=cap,u=[0.])

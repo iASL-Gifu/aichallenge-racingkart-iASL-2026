@@ -1189,6 +1189,8 @@ class MPC:
             # Commit the candidate only after solver and geometry validation.
             self.current_control = control_signals
             self.current_prediction = candidate_prediction
+            self.collision_prediction_context = (
+                candidate_prediction, self.update_prediction(x,N,start_index=0))
             self.last_solution_accurate = solution_is_accurate
 
             u = np.array([v, delta])
@@ -1276,7 +1278,7 @@ class MPC:
 
         return u, max_delta
 
-    def update_prediction(self, spatial_state_prediction, N):
+    def update_prediction(self, spatial_state_prediction, N, start_index=2):
         """
         Transform the predicted states to predicted x and y coordinates.
         Mainly for visualization purposes.
@@ -1288,7 +1290,7 @@ class MPC:
         x_pred, y_pred = [], []
 
         # Iterate over prediction horizon
-        for n in range(2, N):
+        for n in range(start_index, N):
             # Get associated waypoint
             associated_waypoint = self.model.reference_path.\
                 get_waypoint(self.model.wp_id+n)

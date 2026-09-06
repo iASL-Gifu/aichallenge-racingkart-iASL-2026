@@ -6,6 +6,9 @@ operates on duck-typed messages whose attributes match
 and reusable from non-ROS contexts (e.g. offline replay of rosbag CSVs).
 """
 
+from .collision_geometry import body_pose
+from dataclasses import replace
+
 import math
 import threading
 from collections import deque
@@ -329,6 +332,10 @@ class V2XVehicleTracker:
         self._velocity_valid: Dict[str, bool] = {}
         self._last_moving_velocities: Dict[str, Tuple[float, float]] = {}
         self._last_moving_velocity_times: Dict[str, float] = {}
+        self._body_headings = {}
+        self._body_frames = {}
+        self._measured_bodies = {}
+        self._body_position_uncertainty = {}
         self._active: List[str] = []
         self._generation = 0
         self._lock = threading.RLock()
@@ -340,13 +347,39 @@ class V2XVehicleTracker:
 
     def _update_locked(self, msg) -> None:
         active: List[str] = []
+        incoming = {v.vehicle_id for v in msg.vehicles}
+        for vid in set(self._samples) - incoming:
+            self._samples.pop(vid, None)
+            self._velocities.pop(vid, None)
+            self._velocity_valid.pop(vid, None)
+            self._body_headings.pop(vid, None)
+            self._body_frames.pop(vid, None)
+            self._measured_bodies.pop(vid, None)
+            self._last_moving_velocities.pop(vid, None)
+            self._last_moving_velocity_times.pop(vid, None)
+            self._body_position_uncertainty.pop(vid, None)
         for v in msg.vehicles:
             vid = v.vehicle_id
             t = _stamp_to_seconds(v.header.stamp)
             x = float(v.position.x)
             y = float(v.position.y)
             buf = self._samples.setdefault(vid, deque(maxlen=2))
-
+            previous = buf[-1] if buf else None
+            frame = getattr(v.header, 'frame_id', 'map')
+            old_frame = self._body_frames.get(vid, frame)
+            self._body_frames[vid] = frame
+            covariance = getattr(v, 'covariance', None)
+            sigma = max(abs(float(getattr(covariance, 'x', 0.))), abs(float(getattr(covariance, 'y', 0.))))
+            self._body_position_uncertainty[vid] = 2.0 * sigma if math.isfinite(sigma) else math.inf
+            discontinuity = (previous is not None and (
+                t <= previous[0] or t-previous[0] > 1.0
+                or math.hypot(x-previous[1], y-previous[2]) > self._jump_thresh
+                or frame != old_frame))
+            if previous == (t, x, y) and frame == old_frame:
+                discontinuity = False
+            if discontinuity or not all(math.isfinite(value) for value in (t,x,y)):
+                self._body_headings.pop(vid, None)
+                self._measured_bodies.pop(vid, None)
             if not all(math.isfinite(value) for value in (t, x, y)):
                 buf.clear()
                 self._velocities[vid] = (0.0, 0.0)
@@ -420,6 +453,18 @@ class V2XVehicleTracker:
                     self._velocity_valid[vid] = False
                     self._last_moving_velocities.pop(vid, None)
                     self._last_moving_velocity_times.pop(vid, None)
+            if (previous is not None and not discontinuity and self._velocity_valid.get(vid)
+                    and t > previous[0]):
+                vx,vy = (x-previous[1])/(t-previous[0]), (y-previous[2])/(t-previous[0])
+                if math.hypot(vx,vy) > 0.15:
+                    yaw = math.atan2(vy,vx)
+                    old = self._body_headings.get(vid)
+                    directional = bool(old and old[2])
+                    if old and math.cos(yaw-old[0]) < 0.0:
+                        yaw = math.atan2(math.sin(yaw+math.pi),math.cos(yaw+math.pi))
+                    self._body_headings[vid] = (yaw,'motion_axis',directional,t)
+            if not self._velocity_valid.get(vid) and previous is not None:
+                self._body_headings.pop(vid, None)
             active.append(vid)
         self._active = active
 
@@ -444,6 +489,10 @@ class V2XVehicleTracker:
             result._last_moving_velocities = dict(self._last_moving_velocities)
             result._last_moving_velocity_times = dict(
                 self._last_moving_velocity_times)
+            result._body_headings = dict(self._body_headings)
+            result._body_frames = dict(self._body_frames)
+            result._measured_bodies = dict(self._measured_bodies)
+            result._body_position_uncertainty = dict(self._body_position_uncertainty)
             result._active = list(self._active)
             result._generation = self._generation
             return result
@@ -456,7 +505,55 @@ class V2XVehicleTracker:
         """Publish an empty active set without exposing internal collections."""
         with self._lock:
             self._active = []
+            self._samples.clear()
+            self._velocities.clear()
+            self._velocity_valid.clear()
+            self._body_frames.clear()
+            self._body_position_uncertainty.clear()
+            self._body_headings.clear()
+            self._measured_bodies.clear()
+            self._last_moving_velocities.clear()
+            self._last_moving_velocity_times.clear()
             self._generation += 1
+
+    def set_measured_body_pose(self, vehicle_id, x, y, yaw, stamp, frame='map'):
+        """Optional synchronized map/body-center PoseStamped; no wire-format change."""
+        with self._lock:
+            if frame != 'map' or not all(math.isfinite(v) for v in (x,y,yaw,stamp)):
+                self._measured_bodies.pop(vehicle_id, None)
+                return
+            samples = self._samples.get(vehicle_id)
+            if samples and stamp < samples[-1][0] - 0.2:
+                return
+            previous = self._measured_bodies.get(vehicle_id)
+            if previous and stamp <= previous.stamp:
+                return
+            self._measured_bodies[vehicle_id] = body_pose(
+                x,y,yaw,stamp,frame=frame,source='measured',direction_valid=True)
+            self._body_headings[vehicle_id] = (yaw,'measured',True,stamp)
+            self._generation += 1
+
+    def collision_body(self, vehicle_id, now, *, origin='unconfirmed', offset=0.522, max_age=0.5, origin_lateral_margin=None):
+        with self._lock:
+            if vehicle_id not in self._active or not self._samples.get(vehicle_id):
+                return None
+            stamp,x,y = self._samples[vehicle_id][-1]
+            measured = self._measured_bodies.get(vehicle_id)
+            if measured and 0.0 <= now-measured.stamp <= max_age and abs(stamp-measured.stamp) <= 0.2:
+                return measured
+            heading = self._body_headings.get(vehicle_id)
+            fresh = 0.0 <= now-stamp <= max_age
+            body = body_pose(x,y,heading[0] if heading else None,stamp,
+                frame=self._body_frames.get(vehicle_id,'map'),
+                source=(heading[1]+'_held' if heading else 'unknown'),
+                direction_valid=bool(heading and heading[2]),origin=origin,offset=offset,
+                uncertainty=self._body_position_uncertainty.get(vehicle_id,0.),
+                origin_lateral_margin=origin_lateral_margin)
+            if heading:
+                body = replace(body,yaw_stamp=heading[3])
+            if not fresh:
+                body = replace(body, position_valid=False, yaw_source='stale')
+            return body
 
     def velocity(self, vehicle_id: str) -> Tuple[float, float]:
         return self._velocities.get(vehicle_id, (0.0, 0.0))
@@ -1368,3 +1465,24 @@ def rolling_precommit_speed_margin(
         0.0,
     ), 1.0)
     return max(float(base_margin), 0.0) + max(float(far_bonus), 0.0) * alpha
+
+
+def l1_rejoin_preemption_target_relevant(
+    *, opponent_ahead_detected: bool, lead_is_stationary: bool,
+    lead_is_special_slow: bool, opponent_vehicle_id,
+    opponent_arc_distance: float, maximum_distance: float,
+) -> bool:
+    """Use metric slow-lead detection to preempt L1 rejoin after recovery.
+
+    Waypoint-difference detection can be false for a physically forward target
+    near a curve or lap seam. A valid stopped/slow target must still get the
+    chance to re-acquire a verified outer lane instead of deadlocking in L1.
+    """
+    return bool(
+        opponent_vehicle_id is not None
+        and (opponent_ahead_detected
+             or lead_is_stationary
+             or lead_is_special_slow)
+        and is_follow_retry_within_distance(
+            opponent_arc_distance, maximum_distance)
+    )

@@ -26,8 +26,7 @@ def configured_mpc(kind='center'):
             ref['resolution'], ref['smoothing_distance'], ref['max_width'],
             ref['circular'], wp_psi=trajectory['psi_rad'],
             bounds_csv_path=str(root / ref[f'{kind}_bounds_csv_path']))
-        # Match the current controller's margin application when the map is ready.
-        path.update_boundaries_from_markers([], [])
+        # Physical margins are ready before any vector-map callback.
         path.compute_speed_profile(dict(a_min=c['a_min'], a_max=c['a_max'],
                                         v_min=0., v_max=c['v_max']/3.6, ay_max=c['ay_max']))
     path.unsafe_static_fallback_on_narrow = ref['unsafe_static_fallback_on_narrow']

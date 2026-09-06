@@ -37,6 +37,7 @@ def controller():
         _hybrid_overtake_low_speed_start_threshold=2.0,
         _hybrid_overtake_low_speed_max_length=8.0,
         _hybrid_overtake_continuity_weight=0.30,
+        _slow_lead_speed_match_release_lateral_error=.45,
         _hybrid_overtake_continuity_max_deviation=0.75,
         _mpcN_center=mpc, _reference_path=path, _reference_pathN=path,
         _reference_pathN_center=path,
@@ -131,6 +132,7 @@ def test_completion_ends_hybrid_without_restarting_it():
     apply(c)
     reference(c)
     c._carN_center.wp_id = 8
+    c._carN_center.spatial_state.e_y = 2.0
     reference(c, now=11.0)
     assert c._overtake.hybrid.completed
     assert apply(c, now=11.1) == (2, False, False)

@@ -456,3 +456,17 @@ stuck_recovery:
   joy_steer_axis: 3
   joy_reverse_value: -1.0
   joy_steer_value: 0.0
+
+# Collision dimensions from racing_kart_description/vehicle_info.param.yaml.
+# Confirm GNSS/V2X publication origins before choosing center or rear_axle.
+collision_geometry:
+  length: 2.064
+  width: 1.45
+  rear_axle_to_center: 0.522
+  # Per-side origin uncertainty for known yaw; longitudinal/unknown-yaw padding stays 0.522 m.
+  origin_lateral_margin: 0.272
+  ego_position_origin: unconfirmed
+  v2x_position_origin: unconfirmed
+  max_observation_age: 0.5
+  # Optional PoseStamped topics /v2x/<id>/body_pose: map-frame BODY CENTER + real yaw.
+  measured_pose_vehicle_ids: [d1, d2, d3, d4]

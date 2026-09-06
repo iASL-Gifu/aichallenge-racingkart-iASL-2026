@@ -18,6 +18,7 @@ class HybridTransition:
     last_wp: Optional[int] = None
     travelled: float = 0.0
     paused: bool = False
+    reference_completed: bool = False
     completed: bool = False
     # Historical admission of this spatial transition, NOT live safety proof.
     verified_start: bool = False
@@ -96,6 +97,21 @@ class OvertakeSession:
         self.passage_hold.reset()
         self.traffic_key = (None, None)
         self.traffic_relevant_ids.clear()
+
+    def handoff_target(self, target_id, lane):
+        """Caller verified the successor on the same lane; preserve spatial geometry.
+
+        Tracking identity changes independently of the ongoing lateral motion.
+        No old target's executable evidence is inherited.
+        """
+        if (target_id is None or lane != self.requested_lane
+                or not self.can_resume_hybrid(lane)):
+            return False
+        self.clear_proof()
+        self.target_id = target_id
+        self.hybrid.vehicle_id = target_id
+        self.accepted_key = (target_id, lane)
+        return True
 
     def start_hybrid(self, *, vehicle_id, lane_idx, start_wp, started_at,
                      start_e_y, length):

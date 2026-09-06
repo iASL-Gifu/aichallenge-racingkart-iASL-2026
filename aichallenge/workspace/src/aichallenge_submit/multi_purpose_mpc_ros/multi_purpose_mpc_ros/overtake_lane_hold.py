@@ -35,15 +35,17 @@ class LaneHoldDecision:
     waiting: bool
     locked: bool
     reasons: tuple
+    motion_blocked: bool = False
 
 
 @dataclass
 class PassageHold:
     key: object = None
     since: object = None
+    unknown_since: object = None
 
     def reset(self):
-        self.key = self.since = None
+        self.key = self.since = self.unknown_since = None
 
     def evaluate(self, *, key, now_sec, lane_width_valid, target_geometry_known,
                  target_clearance_lost, body_overlap, hybrid_matches, hybrid_progress,
@@ -52,6 +54,18 @@ class PassageHold:
         if self.key != key:
             self.reset()
             self.key = key
+        # Missing evidence pauses longitudinal motion before changing sides.
+        # A real overlap, width loss or unrelated traffic still acts immediately.
+        geometry_missing = not target_geometry_known or body_overlap is None
+        if (geometry_missing and lane_width_valid and not unrelated_unsafe
+                and body_overlap is not True and math.isfinite(now_sec)):
+            if self.unknown_since is None or now_sec < self.unknown_since:
+                self.unknown_since = now_sec
+            if now_sec-self.unknown_since < max(confirm_sec,0.0)-1e-9:
+                return LaneHoldDecision(False,False,True,False,
+                                        ('target_geometry_pending',),True)
+        else:
+            self.unknown_since = None
         reasons = []
         if not lane_width_valid:
             reasons.append('lane_width_lost')

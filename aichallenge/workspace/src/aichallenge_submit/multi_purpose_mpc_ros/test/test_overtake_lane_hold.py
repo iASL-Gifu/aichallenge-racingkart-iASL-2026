@@ -41,7 +41,7 @@ def test_target_only_loss_remains_locked(change):
 
 
 @pytest.mark.parametrize('change', [dict(lane_width_valid=False), dict(body_overlap=True),
-    dict(target_geometry_known=False), dict(body_overlap=None), dict(unrelated_unsafe=True)])
+    dict(unrelated_unsafe=True)])
 def test_immediate_safety_overrides_every_lock(change):
     result = evaluate(PassageHold(), alongside=True, hybrid_progress=.9,
                       legacy_target_hold=True, **change)
@@ -109,6 +109,9 @@ def controller():
     for name in ('_committed_lane_traffic_evidence', '_committed_target_body_overlap',
                  '_evaluate_committed_lane_hold'):
         setattr(c, name, MethodType(controller_method(name), c))
+    from multi_purpose_mpc_ros.collision_geometry import BodyGeometry
+    c._collision_geometry=BodyGeometry(2.,1.5)
+    c._collision_ego_origin=c._collision_v2x_origin='center'
     c._oriented_vehicle_rectangles_overlap = controller_method('_oriented_vehicle_rectangles_overlap')
     return c
 
@@ -159,6 +162,7 @@ def test_actual_overlap_handles_alongside_on_both_sides_of_zero(x):
     c = controller()
     c._v2x_tracker.update(_msg(0., [('target', x, 0.)]))
     c._v2x_tracker.update(_msg(.1, [('target', x, 0.)]))
+    c._v2x_tracker.set_measured_body_pose('target',x,0.,0.,.1)
     assert c._committed_target_body_overlap(POSE, 'target') is False
     assert c._committed_target_body_overlap(SimpleNamespace(x=0., y=0., theta=0.), 'target') is True
 
@@ -167,6 +171,7 @@ def test_actual_lane_hold_width_and_unknown_rear_override_alongside_and_l0_excep
     c = controller()
     c._v2x_tracker.update(_msg(0., [('target', 0., 0.)]))
     c._v2x_tracker.update(_msg(.1, [('target', 0., 0.)]))
+    c._v2x_tracker.set_measured_body_pose('target',0.,0.,0.,.1)
     args = dict(pose=POSE, ego_speed=5., lane_idx=2, target_id='target',
                 target_longitudinal=0., live_passage={2: False}, conflicts=EMPTY,
                 now_sec=10., legacy_target_hold=True)
@@ -252,3 +257,16 @@ def test_explicit_predicted_cut_in_is_not_removed_by_distance_prefilter():
     c=controller()
     c._v2x_tracker.update(_msg(0., [('car',2000.,0.)]))
     assert evidence(c,dict(front=(),side=('car',),rear=())) == (('car',),())
+
+
+@pytest.mark.parametrize('missing',[dict(target_geometry_known=False),dict(body_overlap=None)])
+def test_transient_unknown_stops_motion_without_discarding_lane(missing):
+    h=PassageHold()
+    evaluate(h,9.,target_clearance_lost=False)
+    result=evaluate(h,10.,**missing)
+    assert result.waiting and result.motion_blocked and not result.unsafe
+    assert not evaluate(h,10.2,target_clearance_lost=False).motion_blocked
+    assert evaluate(h,11.,**missing).motion_blocked
+    assert evaluate(h,11.4,**missing).unsafe
+    # An actual road-width loss never waits for unknown-observation recovery.
+    assert evaluate(h,12.,lane_width_valid=False,**missing).unsafe

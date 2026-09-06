@@ -107,7 +107,10 @@ def controller_method(name):
     from multi_purpose_mpc_ros.overtake_lane_hold import dynamic_longitudinal_conflict_unsafe
     from multi_purpose_mpc_ros.v2x_vehicle_tracker import slow_lead_commit_distance
     from multi_purpose_mpc_ros.v2x_vehicle_tracker import hybrid_lateral_escape_creep_allowed, classify_lane_conflicts
-    namespace = dict(hybrid_lateral_escape_creep_allowed=hybrid_lateral_escape_creep_allowed,
+    from multi_purpose_mpc_ros import collision_geometry as collision
+    from multi_purpose_mpc_ros import lane_evaluation
+    import dataclasses
+    namespace = dict(lane_evaluation=lane_evaluation, collision=collision, dataclasses=dataclasses, hybrid_lateral_escape_creep_allowed=hybrid_lateral_escape_creep_allowed,
                      classify_lane_conflicts=classify_lane_conflicts, dynamic_longitudinal_conflict_unsafe=dynamic_longitudinal_conflict_unsafe,
                      slow_lead_commit_distance=slow_lead_commit_distance, decide_lane=decide_lane, copy=copy, contextmanager=contextmanager,
                      np=np, math=math, spatial_lane_transition_reference=spatial_lane_transition_reference,
