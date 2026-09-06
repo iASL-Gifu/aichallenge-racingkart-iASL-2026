@@ -287,7 +287,7 @@ def test_two_vehicles_tracked_independently():
     tracker.update(_msg(0.5, [("d2", 5.0, 0.0), ("d3", 10.0, 11.1)]))
 
     assert tracker.velocity("d2") == pytest.approx((10.0, 0.0))
-    assert tracker.velocity("d3") == pytest.approx((0.0, 5.0))
+    assert tracker.velocity("d3") == pytest.approx((0.0, 2.2))
     assert tracker.has_velocity_estimate("d2") is True
     assert tracker.has_velocity_estimate("d3") is True
 

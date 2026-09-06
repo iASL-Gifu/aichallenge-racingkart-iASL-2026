@@ -52,8 +52,8 @@ def test_negative_margin_is_clamped():
     assert lane_constraint_margins(None, -0.3) == (0.0, 0.0)
 
 
-def test_outer_course_margin_is_point_three_metres():
-    assert OUTER_COURSE_MARGIN == pytest.approx(0.8)
+def test_outer_course_margin_remains_point_six_metres():
+    assert OUTER_COURSE_MARGIN == pytest.approx(0.6)
 
 
 def test_l1_uses_center_corridor_width_instead_of_full_vehicle_width():

@@ -262,6 +262,47 @@ def lateral_reference_ramp_duration(
     distance = abs(float(lane_center_e_y) - float(start_e_y))
     return max(minimum, distance / speed)
 
+def smootherstep01(values):
+    """Quintic [0, 1] easing with continuous slope and curvature."""
+    t = np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
+    return t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+
+
+def spatial_lane_transition_reference(
+    distances, start_e_y, lane_centers, transition_length,
+):
+    """Build an N+1 lane-change reference as a function of path distance."""
+    distance_values = np.asarray(distances, dtype=float).reshape(-1)
+    center_values = np.asarray(lane_centers, dtype=float).reshape(-1)
+    if distance_values.size != center_values.size:
+        raise ValueError("distances and lane_centers must have equal length")
+    length = max(float(transition_length), 1e-6)
+    weights = smootherstep01(distance_values / length)
+    targets = (
+        (1.0 - weights) * float(start_e_y)
+        + weights * center_values
+    )
+    return targets, weights
+
+
+def blend_previous_lateral_prediction(
+    nominal, previous, continuity_weight, max_deviation,
+):
+    """Blend a valid shifted MPC prediction without overpowering the plan."""
+    nominal_values = np.asarray(nominal, dtype=float).reshape(-1)
+    if previous is None:
+        return nominal_values.copy()
+    previous_values = np.asarray(previous, dtype=float).reshape(-1)
+    if previous_values.size != nominal_values.size:
+        return nominal_values.copy()
+    if not np.all(np.isfinite(previous_values)):
+        return nominal_values.copy()
+    if np.max(np.abs(previous_values - nominal_values)) > max(float(max_deviation), 0.0):
+        return nominal_values.copy()
+    weight = float(np.clip(continuity_weight, 0.0, 1.0))
+    return (1.0 - weight) * nominal_values + weight * previous_values
+
+
 ##################
 # MPC Controller #
 ##################
@@ -310,6 +351,7 @@ class MPC:
         self.soft_target_alpha = 0.0
         self.soft_target_lateral_offset = 0.0
         self.soft_lateral_targets = None
+        self.lane_transition_weights = None
         # Per-horizon objective offsets. These alter xr only; hard lane and
         # physical-course bounds remain unchanged.
         self.target_lane_lateral_offsets = None
@@ -494,6 +536,17 @@ class MPC:
         )
         self.target_lane_lateral_offsets = (
             values if values is not None and values.size else None)
+
+    def set_lane_transition_weights(self, weights=None) -> None:
+        """Set per-horizon artificial-lane contraction progress."""
+        values = (
+            None if weights is None
+            else np.asarray(weights, dtype=float).reshape(-1).copy()
+        )
+        self.lane_transition_weights = (
+            np.clip(values, 0.0, 1.0)
+            if values is not None and values.size else None)
+
 
     def set_full_width_l1_offset_limits(self, offsets=None) -> None:
         """Cap objective-only motion from full-width midpoint toward L1."""
@@ -709,7 +762,8 @@ class MPC:
                     self.lane_constraint_retry_terminal_ratio),
                 connect_lane_from_current_pose=True,
                 lane_connection_points=(
-                    self.lane_constraint_connection_points))
+                    self.lane_constraint_connection_points),
+                lane_transition_weights=self.lane_transition_weights)
         else:
             ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
@@ -766,7 +820,12 @@ class MPC:
         self._prediction_upper_bounds = np.array(ub, copy=True)
         # If a target lane is active, preserve lane-center targets for the e_y references.
         target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
-        if target_lane is not None:
+        # Only a synchronized Hybrid reference may override an applied lane.
+        # Existing L1/startup/offset precedence remains hard-lane-first.
+        if target_lane is not None and not (
+            self.lane_transition_weights is not None
+            and self.soft_lateral_targets is not None
+        ):
             lane_centers = []
             for n in range(N):
                 lane_center = self._compute_lane_center(

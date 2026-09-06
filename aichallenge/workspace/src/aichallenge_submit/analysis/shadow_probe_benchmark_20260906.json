@@ -1,0 +1,40 @@
+{
+  "python": "3.13.13",
+  "controller_sha256": "108bc2dc9751b4c3cf8864945318f31476cac50ac23322af0008c58553c35b66",
+  "scope": "context entry/copy and exit; excludes MPC, map load and ROS",
+  "iterations": 500,
+  "paths": [
+    {
+      "path": "center",
+      "populated": false,
+      "waypoints": 354,
+      "median_ms": 0.395737,
+      "p95_ms": 0.40766345,
+      "max_ms": 0.448559
+    },
+    {
+      "path": "center",
+      "populated": true,
+      "waypoints": 354,
+      "median_ms": 0.38923399999999997,
+      "p95_ms": 0.40283735000000004,
+      "max_ms": 0.438787
+    },
+    {
+      "path": "race",
+      "populated": false,
+      "waypoints": 345,
+      "median_ms": 0.3842415,
+      "p95_ms": 0.3974601,
+      "max_ms": 0.644723
+    },
+    {
+      "path": "race",
+      "populated": true,
+      "waypoints": 345,
+      "median_ms": 0.3813365,
+      "p95_ms": 0.39462664999999997,
+      "max_ms": 0.458235
+    }
+  ]
+}

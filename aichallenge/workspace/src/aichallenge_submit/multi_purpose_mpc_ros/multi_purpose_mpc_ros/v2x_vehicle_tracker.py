@@ -314,13 +314,21 @@ class V2XVehicleTracker:
     """Tracks the latest two samples per ``vehicle_id`` and exposes
     constant-velocity predictions over a caller-provided time grid."""
 
-    def __init__(self, v_max_safety: float, position_jump_threshold: float, warn_callback=None):
+    def __init__(
+        self, v_max_safety: float, position_jump_threshold: float,
+        warn_callback=None, zero_velocity_hold_sec: float = 0.20,
+        zero_velocity_threshold: float = 0.10,
+    ):
         self._v_max_safety = float(v_max_safety)
         self._jump_thresh = float(position_jump_threshold)
         self._warn = warn_callback if warn_callback is not None else (lambda _msg: None)
+        self._zero_velocity_hold_sec = max(float(zero_velocity_hold_sec), 0.0)
+        self._zero_velocity_threshold = max(float(zero_velocity_threshold), 0.0)
         self._samples: Dict[str, Deque[Tuple[float, float, float]]] = {}
         self._velocities: Dict[str, Tuple[float, float]] = {}
         self._velocity_valid: Dict[str, bool] = {}
+        self._last_moving_velocities: Dict[str, Tuple[float, float]] = {}
+        self._last_moving_velocity_times: Dict[str, float] = {}
         self._active: List[str] = []
         self._generation = 0
         self._lock = threading.RLock()
@@ -339,6 +347,22 @@ class V2XVehicleTracker:
             y = float(v.position.y)
             buf = self._samples.setdefault(vid, deque(maxlen=2))
 
+            if not all(math.isfinite(value) for value in (t, x, y)):
+                buf.clear()
+                self._velocities[vid] = (0.0, 0.0)
+                self._velocity_valid[vid] = False
+                self._last_moving_velocities.pop(vid, None)
+                self._last_moving_velocity_times.pop(vid, None)
+                active.append(vid)
+                continue
+
+            # A retransmission is not a new motion sample. In particular it
+            # must not replace a valid velocity with zero or renew its hold.
+            # Equal timestamps with changed coordinates are still invalid.
+            if buf and (t, x, y) == buf[-1]:
+                active.append(vid)
+                continue
+
             # Detect a position jump against the previous sample (if any).
             jumped = False
             if buf:
@@ -346,6 +370,8 @@ class V2XVehicleTracker:
                 if math.hypot(x - x_prev, y - y_prev) > self._jump_thresh:
                     buf.clear()
                     jumped = True
+                    self._last_moving_velocities.pop(vid, None)
+                    self._last_moving_velocity_times.pop(vid, None)
                     self._warn(
                         f"V2X: position jump for vehicle '{vid}' "
                         f"(>{self._jump_thresh} m) — velocity reset")
@@ -365,15 +391,35 @@ class V2XVehicleTracker:
                     if math.hypot(vx, vy) > self._v_max_safety:
                         self._velocities[vid] = (0.0, 0.0)
                         self._velocity_valid[vid] = False
+                        self._last_moving_velocities.pop(vid, None)
+                        self._last_moving_velocity_times.pop(vid, None)
                         self._warn(
                             f"V2X: velocity for vehicle '{vid}' exceeds "
                             f"{self._v_max_safety} m/s — clamped to zero")
                     else:
-                        self._velocities[vid] = (vx, vy)
+                        measured_speed = math.hypot(vx, vy)
+                        last_moving_time = self._last_moving_velocity_times.get(vid)
+                        hold_previous = bool(
+                            measured_speed <= self._zero_velocity_threshold
+                            and last_moving_time is not None
+                            and t1 >= last_moving_time
+                            and t1 - last_moving_time
+                                <= self._zero_velocity_hold_sec
+                            and vid in self._last_moving_velocities
+                        )
+                        if hold_previous:
+                            self._velocities[vid] = self._last_moving_velocities[vid]
+                        else:
+                            self._velocities[vid] = (vx, vy)
+                        if measured_speed > self._zero_velocity_threshold:
+                            self._last_moving_velocities[vid] = (vx, vy)
+                            self._last_moving_velocity_times[vid] = t1
                         self._velocity_valid[vid] = True
                 else:
                     self._velocities[vid] = (0.0, 0.0)
                     self._velocity_valid[vid] = False
+                    self._last_moving_velocities.pop(vid, None)
+                    self._last_moving_velocity_times.pop(vid, None)
             active.append(vid)
         self._active = active
 
@@ -387,13 +433,17 @@ class V2XVehicleTracker:
         """
         with self._lock:
             result = V2XVehicleTracker(
-                self._v_max_safety, self._jump_thresh, self._warn)
+                self._v_max_safety, self._jump_thresh, self._warn,
+                self._zero_velocity_hold_sec, self._zero_velocity_threshold)
             result._samples = {
                 vehicle_id: deque(samples, maxlen=2)
                 for vehicle_id, samples in self._samples.items()
             }
             result._velocities = dict(self._velocities)
             result._velocity_valid = dict(self._velocity_valid)
+            result._last_moving_velocities = dict(self._last_moving_velocities)
+            result._last_moving_velocity_times = dict(
+                self._last_moving_velocity_times)
             result._active = list(self._active)
             result._generation = self._generation
             return result
@@ -1249,3 +1299,72 @@ def evaluate_overtake_commit_gate(
         "curvature_ready": curvature_ready,
         "outside_curvature": outside_curvature,
     }
+
+
+def slow_lead_commit_distance(
+    *, lead_is_stationary: bool, lead_speed: float,
+    ultra_slow_speed_threshold: float, early_commit_distance: float,
+    ordinary_slow_commit_distance: float,
+) -> float:
+    """Give only stopped/ultra-slow leads the longer commit distance."""
+    use_early_commit = bool(
+        lead_is_stationary
+        or (
+            math.isfinite(float(lead_speed))
+            and float(lead_speed) <= max(
+                float(ultra_slow_speed_threshold), 0.0)
+        )
+    )
+    return float(
+        early_commit_distance
+        if use_early_commit else ordinary_slow_commit_distance
+    )
+
+
+def hybrid_lateral_escape_creep_allowed(
+    *,
+    target_matches: bool,
+    transition_active: bool,
+    target_is_slow: bool,
+    rectangles_overlap: bool,
+    lateral_body_gap: float,
+    minimum_lateral_body_gap: float,
+    candidate_passable: bool,
+    candidate_conflicts,
+) -> bool:
+    """Break the zero-speed/spatial-transition interlock safely.
+
+    Unlike the strict Shadow creep, this is usable immediately after reverse
+    recovery, when a new Shadow proof may not yet exist.  It therefore requires
+    the exact active Hybrid target, positive corner-aware lateral separation,
+    a physically passable candidate lane, and no live front/side traffic.
+    """
+    return bool(
+        target_matches
+        and transition_active
+        and target_is_slow
+        and not rectangles_overlap
+        and float(lateral_body_gap) >= float(minimum_lateral_body_gap)
+        and candidate_passable
+        and not candidate_conflicts.get("front")
+        and not candidate_conflicts.get("side")
+    )
+
+
+def rolling_precommit_speed_margin(
+    *, base_margin: float, far_bonus: float, target_distance: float,
+    commit_distance: float, prepare_distance: float,
+) -> float:
+    """Preserve momentum while an early Shadow overtake is being verified.
+
+    The extra closing margin is largest at the far prepare gate and fades to
+    zero at the configured close-range gate. A candidate that is still
+    unverified near the target therefore returns to the conservative base
+    margin automatically without sacrificing momentum at Shadow start.
+    """
+    span = max(float(prepare_distance) - float(commit_distance), 1e-6)
+    alpha = min(max(
+        (float(target_distance) - float(commit_distance)) / span,
+        0.0,
+    ), 1.0)
+    return max(float(base_margin), 0.0) + max(float(far_bonus), 0.0) * alpha

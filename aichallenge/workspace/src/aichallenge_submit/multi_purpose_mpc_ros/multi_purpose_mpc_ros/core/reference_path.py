@@ -116,6 +116,15 @@ def intersect_constraint_bounds(hard_lb, hard_ub, lane_lb, lane_ub):
         float(hard_ub), float(lane_ub))
 
 
+def blend_artificial_lane_bounds(full_lb, full_ub, lane_lb, lane_ub, progress):
+    """Contract full width toward a selected lane without changing topology."""
+    weight = float(np.clip(progress, 0.0, 1.0))
+    return (
+        float(full_lb) + weight * (float(lane_lb) - float(full_lb)),
+        float(full_ub) + weight * (float(lane_ub) - float(full_ub)),
+    )
+
+
 def smooth_circular_waypoint_curvatures(
     waypoints,
     window_length=CURVATURE_SAVGOL_WINDOW,
@@ -1364,6 +1373,7 @@ class ReferencePath:
         lane_relaxation=0.0, toward_center_only=True,
         taper_retry_over_horizon=True, retry_terminal_ratio=0.0,
         connect_lane_from_current_pose=True, lane_connection_points=10,
+        lane_transition_weights=None,
     ):
         """
         Compute upper and lower bounds of the drivable area orthogonal to
@@ -1413,6 +1423,8 @@ class ReferencePath:
                 - np.sin(current_wp.psi) * (pose[0] - current_wp.x)
             )
         connection_points = max(int(lane_connection_points), 1)
+        transition_weights = (None if lane_transition_weights is None else
+            np.clip(np.asarray(lane_transition_weights, dtype=float).reshape(-1), 0.0, 1.0))
 
         def lane_bounds_for(index, wp):
             if target_lane not in (0, 1, 2):
@@ -1421,6 +1433,10 @@ class ReferencePath:
             if not lanes or target_lane >= len(lanes):
                 return float(wp.lb), float(wp.ub)
             lane_ub, lane_lb = lanes[target_lane]
+            if transition_weights is not None and transition_weights.size:
+                progress = transition_weights[min(index, transition_weights.size - 1)]
+                lane_lb, lane_ub = blend_artificial_lane_bounds(
+                    wp.lb, wp.ub, lane_lb, lane_ub, progress)
             # Connect only the artificial layer from the current lateral
             # position. The final hard intersection still prevents crossing
             # physical edges or obstacles.

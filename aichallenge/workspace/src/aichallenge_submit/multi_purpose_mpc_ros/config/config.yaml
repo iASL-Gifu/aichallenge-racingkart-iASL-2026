@@ -53,7 +53,7 @@ reference_path:
 trajectory_switch:
   enter_center_wps: 18   # 前方車がこのWaypoint差未満ならCenterへ切り替え
   exit_center_wps: 20    # Center中はこのWaypoint差を超えるまで維持
-  overtake_latch_max_distance: 15.0 # [m] L0/L2の新規追い越しラッチを生成する最大実距離（この値未満のみ）
+  overtake_latch_max_distance: 35.0 # [m] 遠方から追越し対象を検証
   overtake_commit_min_distance: 8.0 # [m] 姿勢を崩しやすい過近距離では新規車線変更を開始しない
   overtake_commit_preview_distance: 12.0 # [m] 外側カーブ曲率を確認する前方距離
   overtake_outside_curvature_threshold: 0.12 # [1/m] 選択レーンがカーブ外側になる場合の開始上限
@@ -63,20 +63,37 @@ trajectory_switch:
   outer_lane_progress_timeout_sec: 2.5 # [s] 外側車線中心到達後、追越し距離が縮まらなければL1復帰を評価
   outer_lane_min_progress_m: 0.5 # [m] 追越し進捗タイマーを更新する相対距離の最小減少量
   slow_lead_overtake_speed_kmh: 16.0 # [km/h] 停止車とは分離して特別追越しする低速前方車の上限
-  slow_lead_overtake_speed_margin: 0.5 # [m/s] 車線分離まで対象速度に加える接近余裕
-  slow_lead_overtake_committed_speed_margin: 1.5 # [m/s] 外側車線適用後、車体分離までの速度差
+  slow_lead_overtake_speed_margin: 0.8 # [m/s] 車線分離まで対象速度に加える接近余裕
+  slow_lead_overtake_far_speed_bonus: 2.2 # [m/s] 遠方準備時の追加速度差
+  slow_lead_overtake_speed_margin_fade_distance: 10.0 # [m] ここまでに追加速度差をゼロへ減衰
+  slow_lead_overtake_committed_speed_margin: 2.5 # [m/s] 外側車線適用後、車体分離までの速度差
   slow_lead_speed_match_release_lateral_error: 0.45 # [m] 外側車線中心へ到達後は低速車への速度合わせを解除
   slow_lead_overtake_infeasible_cycles: 8 # 低速車追越し中に古い予測を安全に再利用する最大失敗周期
-  slow_lead_overtake_prepare_distance: 25.0 # [m] Center移行・通過車線評価の開始距離（安全車線があれば速度合わせはしない）
-  slow_lead_overtake_commit_distance: 20.0 # [m] 25mから先行Shadow検証し、厳格Shadow確認済みの低速車は20m以内で外側車線へ確定
-  late_defense_slow_lead_overtake_commit_distance: 20.0 # [m] 終盤防御区間（l2_entry_restricted_zones）の停止・低速車に限定した早期L0/L2確定距離
+  slow_lead_overtake_prepare_distance: 35.0 # [m] Center移行・通過車線評価・Shadow検証の準備距離
+  slow_lead_overtake_commit_distance: 28.0 # [m] 厳格Shadow確認済み低速車への確定距離
+  late_defense_slow_lead_overtake_commit_distance: 28.0 # [m] 終盤防御区間の低速車も厳格Shadow検証後に確定
   overtake_commit_probe_freshness_sec: 0.75 # [s] 車線確定に使用できる直近Shadow正確解の最大経過時間
   overtake_commit_verified_candidate_hold_sec: 1.5 # [s] 厳格Shadow確認済み候補を、物理幅・交通・地理規制の喪失まで高位選択の揺れから保護
+  # 参照と人工境界を移動距離で同期。壁・障害物・車線選択の規則は従来通り。
+  hybrid_overtake_enabled: true
+  hybrid_overtake_base_length_m: 6.0
+  hybrid_overtake_offset_gain: 2.5 # [m/m] 必要横移動量に応じて進入距離を延長
+  hybrid_overtake_speed_gain: 0.8 # [s] 速度1m/sあたりの追加進入距離
+  hybrid_overtake_min_length_m: 8.0
+  hybrid_overtake_max_length_m: 20.0
+  hybrid_overtake_low_speed_start_threshold_mps: 2.0 # [m/s] 停止・低速開始では並走前に横分離を作る
+  hybrid_overtake_low_speed_max_length_m: 8.0 # [m] 低速開始時の横移動距離上限。五次曲線は維持
+  hybrid_overtake_continuity_weight: 0.30 # 正確な前回MPC予測を今回参照へ混ぜる割合
+  hybrid_overtake_continuity_max_deviation_m: 0.75 # 参照との差が大きい古い予測は不採用
+  hybrid_overtake_transition_timeout_sec: 8.0 # [s] 初期の遷移監視窓。距離未達を時間だけで完了させない
   committed_overtake_acceleration_boost_enabled: true # 厳格Shadow確認済みコミット後、安全Limiterが無い周期は加速度LPFを介さず最大加速
   committed_overtake_acceleration_min_speed_error: 0.5 # [m/s] 最大加速を有効にする参照速度と実速度の最低差
   consecutive_overtake_handoff_timeout_sec: 1.0 # [s] 同じ外側車線の次車両を厳格Shadow検証する間、L1復帰を保留する上限
+  ultra_slow_early_commit_speed_kmh: 5.4 # [km/h] 停止・超低速車は厳格Shadow成功後35mから確定
+  hybrid_passage_loss_confirm_sec: 0.40 # [s] 対象車の通過余裕の揺れだけを確認待ち
+  hybrid_side_lock_progress_ratio: 0.35 # 車体重複・幅不足・他車危険には適用しない
   slow_lead_overtake_retry_sec: 0.25 # [s] 低速車追従中の通過車線再評価周期
-  overtake_release_distance: 22.0 # [m] ラッチ後は20m以上で解除し、15m開始とのヒステリシスを持たせる
+  overtake_release_distance: 42.0 # [m] 35mラッチに対する解除ヒステリシス
   overtake_target_switch_margin_m: 3.0 # [m] 現在対象よりこの距離以上近い候補にだけ切り替える
   overtake_target_switch_confirm_sec: 0.5 # [s] ACQUIRE中に新候補が継続して近い場合だけ対象変更
   overtake_target_immediate_switch_distance: 5.0 # [m] 現対象より明確に近い前方車なら確認待ちなしで対象変更
@@ -309,6 +326,8 @@ v2x_obstacle_avoidance:
   vehicle_radius: 0.725          # [m]
   v_max_safety: 35.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
+  zero_velocity_hold_sec: 0.20 # [s] 有効な移動速度を一時的なゼロ観測に対して保持
+  zero_velocity_threshold: 0.10 # [m/s] ゼロ補間対象の観測速度上限
   parallel_safety_enabled: false # 並走時の追加速度抑制を無効化。EmergencyBrake/MPC障害物制約/ParallelAbortは維持
   moving_emergency_desired_distance: 3.0 # [m] 移動車EmergencyBrakeの目標車間。停止車の5.5m式とは分離
   moving_emergency_spacing_kp: 0.5 # [1/s] 移動車への穏やかな車間補正
@@ -341,6 +360,8 @@ v2x_obstacle_avoidance:
 stopped_vehicle_overtake:
   speed_threshold: 0.3     # [m/s] 前走車を停止とみなす速度
   max_speed: 10.0          # [m/s] 強制追い越し中の上限速度
+  hybrid_escape_creep_speed: 0.6 # [m/s] 安全な空間Hybridの停止からの脱出
+  hybrid_escape_min_lateral_gap: 0.10 # [m] 車体非接触に加えて必要な横余裕
   strict_shadow_commit_creep_speed: 1.0 # [m/s] 厳格Shadow済み低速車コミット中、包絡非重複かつ候補車線前方/側方安全時の最低前進速度
   strict_shadow_commit_creep_max_target_speed_kmh: 5.0 # [km/h] この速度以下の低速対象までコミット中クリープを許可
   reverse_distance: 3.0    # [m] 安全な追い越しが解けない場合に後退を待つ車間

@@ -59,6 +59,8 @@ v2x_obstacle_avoidance:
   vehicle_radius: 0.5          # [m]
   v_max_safety: 40.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
+  zero_velocity_hold_sec: 0.20 # [s] 有効な移動速度を一時的なゼロ観測に対して保持
+  zero_velocity_threshold: 0.10 # [m/s] ゼロ補間対象の観測速度上限
 
 stuck_recovery:
   enabled: true
