@@ -1,0 +1,5501 @@
+[
+  {
+    "line": 819,
+    "data": {
+      "window_wall_sec": 5.1,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 106.4,
+      "context": {
+        "wp": 2,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 32,
+        "live_mpc_calls": 114,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 32,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 114,
+        "cycles": 114,
+        "work_over_period": 102,
+        "fallback_owned_cycles": 114,
+        "live_mpc_solver:solved": 5,
+        "live_mpc:solved": 5,
+        "live_mpc_solver:solved inaccurate": 77,
+        "live_mpc:solved inaccurate": 77
+      },
+      "metrics": {
+        "live_mpc_iterations": {
+          "n": 114,
+          "p50": 4000.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 114,
+          "p50": 7.763,
+          "p95": 12.774,
+          "max": 21.944
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 114,
+          "p50": 7.731,
+          "p95": 11.721,
+          "max": 18.878
+        },
+        "live_mpc_wall_ms": {
+          "n": 114,
+          "p50": 11.618,
+          "p95": 19.164,
+          "max": 38.653
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 114,
+          "p50": 11.431,
+          "p95": 18.424,
+          "max": 31.476
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 114,
+          "p50": 4.329,
+          "p95": 8.171,
+          "max": 16.723
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 114,
+          "p50": 40.0,
+          "p95": 90.0,
+          "max": 180.0
+        },
+        "work_wall_ms": {
+          "n": 114,
+          "p50": 38.274,
+          "p95": 77.532,
+          "max": 168.631
+        },
+        "work_thread_cpu_ms": {
+          "n": 114,
+          "p50": 31.722,
+          "p95": 57.277,
+          "max": 84.012
+        },
+        "rate_wait_wall_ms": {
+          "n": 114,
+          "p50": 0.009,
+          "p95": 13.161,
+          "max": 28.398
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 114,
+          "p50": 29.525,
+          "p95": 63.83,
+          "max": 129.978
+        },
+        "non_thread_wall_ms": {
+          "n": 114,
+          "p50": 9.719,
+          "p95": 34.589,
+          "max": 84.619
+        },
+        "cycle_wall_ms": {
+          "n": 113,
+          "p50": 39.851,
+          "p95": 77.46,
+          "max": 122.599
+        },
+        "sim_wall_ratio": {
+          "n": 113,
+          "p50": 1.044,
+          "p95": 1.527,
+          "max": 1.728
+        },
+        "command_gap_wall_ms": {
+          "n": 113,
+          "p50": 40.302,
+          "p95": 77.567,
+          "max": 168.69
+        }
+      }
+    }
+  },
+  {
+    "line": 923,
+    "data": {
+      "window_wall_sec": 5.004,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 107.8,
+      "context": {
+        "wp": 4,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved inaccurate": 18,
+        "live_mpc_calls": 44,
+        "live_mpc:solved inaccurate": 18,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 44,
+        "cycles": 44,
+        "work_over_period": 44,
+        "fallback_owned_cycles": 25,
+        "live_mpc_solver:solved": 26,
+        "live_mpc:solved": 26,
+        "probe_mpc_solver:solved": 2,
+        "probe_mpc_calls": 2,
+        "probe_mpc:solved": 2,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 44,
+          "p50": 102.471,
+          "p95": 179.807,
+          "max": 278.732
+        },
+        "sim_wall_ratio": {
+          "n": 44,
+          "p50": 0.995,
+          "p95": 1.316,
+          "max": 1.406
+        },
+        "live_mpc_iterations": {
+          "n": 44,
+          "p50": 800.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 44,
+          "p50": 3.9,
+          "p95": 20.729,
+          "max": 25.476
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 44,
+          "p50": 3.014,
+          "p95": 20.031,
+          "max": 21.873
+        },
+        "live_mpc_wall_ms": {
+          "n": 44,
+          "p50": 14.855,
+          "p95": 31.771,
+          "max": 32.834
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 44,
+          "p50": 11.426,
+          "p95": 29.224,
+          "max": 29.9
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 44,
+          "p50": 8.28,
+          "p95": 14.065,
+          "max": 20.027
+        },
+        "command_gap_wall_ms": {
+          "n": 44,
+          "p50": 102.477,
+          "p95": 185.229,
+          "max": 256.28
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 44,
+          "p50": 105.0,
+          "p95": 180.0,
+          "max": 210.0
+        },
+        "work_wall_ms": {
+          "n": 44,
+          "p50": 102.418,
+          "p95": 179.723,
+          "max": 278.628
+        },
+        "work_thread_cpu_ms": {
+          "n": 44,
+          "p50": 63.528,
+          "p95": 85.599,
+          "max": 151.96
+        },
+        "rate_wait_wall_ms": {
+          "n": 44,
+          "p50": 0.015,
+          "p95": 0.021,
+          "max": 0.027
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 44,
+          "p50": 85.774,
+          "p95": 151.041,
+          "max": 253.192
+        },
+        "non_thread_wall_ms": {
+          "n": 44,
+          "p50": 45.657,
+          "p95": 96.96,
+          "max": 126.668
+        },
+        "probe_mpc_iterations": {
+          "n": 2,
+          "p50": 575.0,
+          "p95": 575.0,
+          "max": 575.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 2,
+          "p50": 6.154,
+          "p95": 6.154,
+          "max": 6.154
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 2,
+          "p50": 3.561,
+          "p95": 3.561,
+          "max": 3.561
+        },
+        "probe_mpc_wall_ms": {
+          "n": 2,
+          "p50": 21.469,
+          "p95": 21.469,
+          "max": 21.469
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 2,
+          "p50": 12.766,
+          "p95": 12.766,
+          "max": 12.766
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 2,
+          "p50": 15.348,
+          "p95": 15.348,
+          "max": 15.348
+        }
+      }
+    }
+  },
+  {
+    "line": 1005,
+    "data": {
+      "window_wall_sec": 5.052,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.2,
+      "context": {
+        "wp": 23,
+        "lane": 0,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 54,
+        "live_mpc_calls": 54,
+        "live_mpc:solved": 54,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 54,
+        "cycles": 54,
+        "work_over_period": 54,
+        "fallback_owned_cycles": 0,
+        "live_mpc_solver:primal infeasible": 1,
+        "probe_mpc_solver:solved": 2,
+        "probe_mpc_calls": 2,
+        "probe_mpc:solved": 2,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 54,
+          "p50": 89.371,
+          "p95": 143.035,
+          "max": 157.494
+        },
+        "sim_wall_ratio": {
+          "n": 54,
+          "p50": 1.011,
+          "p95": 1.351,
+          "max": 1.424
+        },
+        "live_mpc_iterations": {
+          "n": 55,
+          "p50": 50.0,
+          "p95": 350.0,
+          "max": 1300.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 55,
+          "p50": 0.646,
+          "p95": 2.985,
+          "max": 4.373
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 55,
+          "p50": 0.194,
+          "p95": 1.203,
+          "max": 4.374
+        },
+        "live_mpc_wall_ms": {
+          "n": 54,
+          "p50": 8.912,
+          "p95": 18.368,
+          "max": 22.819
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 54,
+          "p50": 7.81,
+          "p95": 17.042,
+          "max": 19.366
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 54,
+          "p50": 8.155,
+          "p95": 15.945,
+          "max": 21.927
+        },
+        "command_gap_wall_ms": {
+          "n": 54,
+          "p50": 87.829,
+          "p95": 143.101,
+          "max": 189.367
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 54,
+          "p50": 85.0,
+          "p95": 140.0,
+          "max": 155.0
+        },
+        "work_wall_ms": {
+          "n": 54,
+          "p50": 88.897,
+          "p95": 139.999,
+          "max": 145.284
+        },
+        "work_thread_cpu_ms": {
+          "n": 54,
+          "p50": 56.765,
+          "p95": 78.756,
+          "max": 106.803
+        },
+        "rate_wait_wall_ms": {
+          "n": 54,
+          "p50": 0.014,
+          "p95": 0.025,
+          "max": 0.03
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 54,
+          "p50": 78.558,
+          "p95": 127.059,
+          "max": 138.602
+        },
+        "non_thread_wall_ms": {
+          "n": 54,
+          "p50": 33.329,
+          "p95": 64.435,
+          "max": 83.463
+        },
+        "probe_mpc_iterations": {
+          "n": 2,
+          "p50": 50.0,
+          "p95": 50.0,
+          "max": 50.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 2,
+          "p50": 0.983,
+          "p95": 0.983,
+          "max": 0.983
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 2,
+          "p50": 0.259,
+          "p95": 0.259,
+          "max": 0.259
+        },
+        "probe_mpc_wall_ms": {
+          "n": 2,
+          "p50": 15.512,
+          "p95": 15.512,
+          "max": 15.512
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 2,
+          "p50": 10.285,
+          "p95": 10.285,
+          "max": 10.285
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 2,
+          "p50": 14.545,
+          "p95": 14.545,
+          "max": 14.545
+        }
+      }
+    }
+  },
+  {
+    "line": 1098,
+    "data": {
+      "window_wall_sec": 5.079,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 105.4,
+      "context": {
+        "wp": 47,
+        "lane": 0,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 55,
+        "live_mpc_calls": 67,
+        "live_mpc:solved": 55,
+        "live_mpc_prediction_fallback": 10,
+        "live_mpc_exception": 0,
+        "command_publishes": 67,
+        "cycles": 67,
+        "work_over_period": 67,
+        "fallback_owned_cycles": 35,
+        "live_mpc_solver:primal infeasible": 31,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 10,
+        "live_mpc_solver:solved inaccurate": 2,
+        "live_mpc:solved inaccurate": 2,
+        "live_mpc_solver:primal infeasible inaccurate": 7
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 67,
+          "p50": 75.784,
+          "p95": 115.187,
+          "max": 133.688
+        },
+        "sim_wall_ratio": {
+          "n": 67,
+          "p50": 0.997,
+          "p95": 1.271,
+          "max": 1.392
+        },
+        "live_mpc_iterations": {
+          "n": 95,
+          "p50": 400.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 95,
+          "p50": 1.591,
+          "p95": 11.878,
+          "max": 15.748
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 95,
+          "p50": 1.074,
+          "p95": 11.182,
+          "max": 15.243
+        },
+        "live_mpc_wall_ms": {
+          "n": 67,
+          "p50": 8.635,
+          "p95": 50.486,
+          "max": 62.115
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 67,
+          "p50": 7.559,
+          "p95": 46.236,
+          "max": 56.064
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 67,
+          "p50": 7.483,
+          "p95": 35.562,
+          "max": 40.805
+        },
+        "command_gap_wall_ms": {
+          "n": 67,
+          "p50": 74.666,
+          "p95": 113.188,
+          "max": 133.692
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 67,
+          "p50": 80.0,
+          "p95": 125.0,
+          "max": 175.0
+        },
+        "work_wall_ms": {
+          "n": 67,
+          "p50": 75.741,
+          "p95": 115.129,
+          "max": 133.642
+        },
+        "work_thread_cpu_ms": {
+          "n": 67,
+          "p50": 43.983,
+          "p95": 78.616,
+          "max": 87.121
+        },
+        "rate_wait_wall_ms": {
+          "n": 67,
+          "p50": 0.013,
+          "p95": 0.019,
+          "max": 6.543
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 67,
+          "p50": 59.397,
+          "p95": 99.064,
+          "max": 122.59
+        },
+        "non_thread_wall_ms": {
+          "n": 67,
+          "p50": 22.649,
+          "p95": 57.508,
+          "max": 78.54
+        }
+      }
+    }
+  },
+  {
+    "line": 1186,
+    "data": {
+      "window_wall_sec": 5.062,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 105.7,
+      "context": {
+        "wp": 67,
+        "lane": 0,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible inaccurate": 3,
+        "live_mpc_solver:maximum iterations reached": 1,
+        "live_mpc_calls": 73,
+        "live_mpc:OSQP failed with status 'maximum iterations reached'": 1,
+        "live_mpc_prediction_fallback": 4,
+        "live_mpc_exception": 0,
+        "command_publishes": 73,
+        "cycles": 73,
+        "work_over_period": 73,
+        "fallback_owned_cycles": 28,
+        "live_mpc_solver:solved inaccurate": 9,
+        "live_mpc:solved inaccurate": 9,
+        "live_mpc_solver:primal infeasible": 28,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 3,
+        "live_mpc_solver:solved": 60,
+        "live_mpc:solved": 60
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 73,
+          "p50": 60.545,
+          "p95": 127.046,
+          "max": 170.727
+        },
+        "sim_wall_ratio": {
+          "n": 73,
+          "p50": 1.006,
+          "p95": 1.421,
+          "max": 1.731
+        },
+        "live_mpc_iterations": {
+          "n": 101,
+          "p50": 525.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 101,
+          "p50": 1.673,
+          "p95": 11.636,
+          "max": 14.958
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 101,
+          "p50": 1.491,
+          "p95": 10.852,
+          "max": 14.044
+        },
+        "live_mpc_wall_ms": {
+          "n": 73,
+          "p50": 7.986,
+          "p95": 46.492,
+          "max": 57.362
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 73,
+          "p50": 7.053,
+          "p95": 41.123,
+          "max": 52.154
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 73,
+          "p50": 7.258,
+          "p95": 26.09,
+          "max": 30.867
+        },
+        "command_gap_wall_ms": {
+          "n": 73,
+          "p50": 60.543,
+          "p95": 123.158,
+          "max": 130.937
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 73,
+          "p50": 60.0,
+          "p95": 125.0,
+          "max": 140.0
+        },
+        "work_wall_ms": {
+          "n": 73,
+          "p50": 58.563,
+          "p95": 126.982,
+          "max": 170.646
+        },
+        "work_thread_cpu_ms": {
+          "n": 73,
+          "p50": 38.187,
+          "p95": 78.953,
+          "max": 127.073
+        },
+        "rate_wait_wall_ms": {
+          "n": 73,
+          "p50": 0.012,
+          "p95": 8.594,
+          "max": 12.335
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 73,
+          "p50": 46.981,
+          "p95": 106.367,
+          "max": 144.197
+        },
+        "non_thread_wall_ms": {
+          "n": 73,
+          "p50": 20.031,
+          "p95": 54.237,
+          "max": 69.605
+        }
+      }
+    }
+  },
+  {
+    "line": 1275,
+    "data": {
+      "window_wall_sec": 5.001,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.4,
+      "context": {
+        "wp": 88,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 81,
+        "live_mpc_calls": 82,
+        "live_mpc:solved": 81,
+        "live_mpc_prediction_fallback": 1,
+        "live_mpc_exception": 0,
+        "command_publishes": 82,
+        "cycles": 82,
+        "work_over_period": 82,
+        "fallback_owned_cycles": 2,
+        "live_mpc_solver:primal infeasible": 1,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 82,
+          "p50": 55.922,
+          "p95": 95.982,
+          "max": 107.613
+        },
+        "sim_wall_ratio": {
+          "n": 82,
+          "p50": 0.984,
+          "p95": 1.457,
+          "max": 1.5
+        },
+        "live_mpc_iterations": {
+          "n": 82,
+          "p50": 25.0,
+          "p95": 150.0,
+          "max": 750.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 82,
+          "p50": 0.238,
+          "p95": 1.121,
+          "max": 2.155
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 82,
+          "p50": 0.11,
+          "p95": 0.439,
+          "max": 2.063
+        },
+        "live_mpc_wall_ms": {
+          "n": 82,
+          "p50": 6.274,
+          "p95": 9.811,
+          "max": 10.679
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 82,
+          "p50": 5.749,
+          "p95": 8.656,
+          "max": 9.6
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 82,
+          "p50": 6.006,
+          "p95": 8.765,
+          "max": 9.984
+        },
+        "command_gap_wall_ms": {
+          "n": 82,
+          "p50": 55.029,
+          "p95": 98.256,
+          "max": 131.662
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 82,
+          "p50": 55.0,
+          "p95": 100.0,
+          "max": 125.0
+        },
+        "work_wall_ms": {
+          "n": 82,
+          "p50": 54.998,
+          "p95": 95.91,
+          "max": 107.571
+        },
+        "work_thread_cpu_ms": {
+          "n": 82,
+          "p50": 37.331,
+          "p95": 46.691,
+          "max": 78.71
+        },
+        "rate_wait_wall_ms": {
+          "n": 82,
+          "p50": 0.012,
+          "p95": 12.772,
+          "max": 17.262
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 82,
+          "p50": 47.757,
+          "p95": 86.701,
+          "max": 101.022
+        },
+        "non_thread_wall_ms": {
+          "n": 82,
+          "p50": 16.444,
+          "p95": 49.422,
+          "max": 61.649
+        }
+      }
+    }
+  },
+  {
+    "line": 1359,
+    "data": {
+      "window_wall_sec": 5.03,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.8,
+      "context": {
+        "wp": 108,
+        "lane": 2,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 70,
+        "live_mpc_calls": 81,
+        "live_mpc:solved": 70,
+        "live_mpc_prediction_fallback": 3,
+        "live_mpc_exception": 0,
+        "command_publishes": 81,
+        "cycles": 81,
+        "work_over_period": 81,
+        "fallback_owned_cycles": 21,
+        "live_mpc_solver:primal infeasible": 7,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 7,
+        "live_mpc_solver:solved inaccurate": 4,
+        "live_mpc:solved inaccurate": 4
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 81,
+          "p50": 60.042,
+          "p95": 94.902,
+          "max": 129.131
+        },
+        "sim_wall_ratio": {
+          "n": 81,
+          "p50": 0.977,
+          "p95": 1.381,
+          "max": 1.66
+        },
+        "live_mpc_iterations": {
+          "n": 81,
+          "p50": 75.0,
+          "p95": 3725.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 81,
+          "p50": 0.479,
+          "p95": 9.81,
+          "max": 13.881
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 81,
+          "p50": 0.257,
+          "p95": 9.812,
+          "max": 12.789
+        },
+        "live_mpc_wall_ms": {
+          "n": 81,
+          "p50": 6.541,
+          "p95": 17.865,
+          "max": 20.853
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 81,
+          "p50": 5.756,
+          "p95": 16.576,
+          "max": 19.344
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 81,
+          "p50": 6.102,
+          "p95": 9.735,
+          "max": 10.628
+        },
+        "command_gap_wall_ms": {
+          "n": 81,
+          "p50": 57.084,
+          "p95": 91.288,
+          "max": 143.857
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 81,
+          "p50": 55.0,
+          "p95": 90.0,
+          "max": 125.0
+        },
+        "work_wall_ms": {
+          "n": 81,
+          "p50": 56.573,
+          "p95": 94.859,
+          "max": 129.049
+        },
+        "work_thread_cpu_ms": {
+          "n": 81,
+          "p50": 36.871,
+          "p95": 52.215,
+          "max": 79.196
+        },
+        "rate_wait_wall_ms": {
+          "n": 81,
+          "p50": 0.012,
+          "p95": 7.393,
+          "max": 27.421
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 81,
+          "p50": 47.325,
+          "p95": 84.75,
+          "max": 124.059
+        },
+        "non_thread_wall_ms": {
+          "n": 81,
+          "p50": 18.482,
+          "p95": 49.853,
+          "max": 59.776
+        }
+      }
+    }
+  },
+  {
+    "line": 1447,
+    "data": {
+      "window_wall_sec": 5.017,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.7,
+      "context": {
+        "wp": 128,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 69,
+        "live_mpc_calls": 76,
+        "live_mpc:solved": 69,
+        "live_mpc_prediction_fallback": 5,
+        "live_mpc_exception": 0,
+        "command_publishes": 76,
+        "cycles": 76,
+        "work_over_period": 76,
+        "fallback_owned_cycles": 7,
+        "live_mpc_solver:primal infeasible": 5,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 5,
+        "live_mpc_solver:solved inaccurate": 2,
+        "live_mpc:solved inaccurate": 2
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 76,
+          "p50": 61.891,
+          "p95": 106.237,
+          "max": 124.768
+        },
+        "sim_wall_ratio": {
+          "n": 76,
+          "p50": 1.015,
+          "p95": 1.429,
+          "max": 1.54
+        },
+        "live_mpc_iterations": {
+          "n": 76,
+          "p50": 50.0,
+          "p95": 3475.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 76,
+          "p50": 0.351,
+          "p95": 11.08,
+          "max": 14.931
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 76,
+          "p50": 0.167,
+          "p95": 11.083,
+          "max": 14.537
+        },
+        "live_mpc_wall_ms": {
+          "n": 76,
+          "p50": 6.504,
+          "p95": 21.119,
+          "max": 23.604
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 76,
+          "p50": 5.847,
+          "p95": 19.181,
+          "max": 22.029
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 76,
+          "p50": 5.949,
+          "p95": 10.657,
+          "max": 16.041
+        },
+        "command_gap_wall_ms": {
+          "n": 76,
+          "p50": 61.894,
+          "p95": 109.624,
+          "max": 154.771
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 76,
+          "p50": 65.0,
+          "p95": 120.0,
+          "max": 140.0
+        },
+        "work_wall_ms": {
+          "n": 76,
+          "p50": 62.008,
+          "p95": 106.189,
+          "max": 124.713
+        },
+        "work_thread_cpu_ms": {
+          "n": 76,
+          "p50": 40.6,
+          "p95": 62.421,
+          "max": 84.316
+        },
+        "rate_wait_wall_ms": {
+          "n": 76,
+          "p50": 0.012,
+          "p95": 0.018,
+          "max": 12.536
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 76,
+          "p50": 55.948,
+          "p95": 97.147,
+          "max": 102.053
+        },
+        "non_thread_wall_ms": {
+          "n": 76,
+          "p50": 20.952,
+          "p95": 52.889,
+          "max": 62.77
+        }
+      }
+    }
+  },
+  {
+    "line": 1526,
+    "data": {
+      "window_wall_sec": 5.037,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.5,
+      "context": {
+        "wp": 136,
+        "lane": 2,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 14,
+        "live_mpc_calls": 77,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 14,
+        "live_mpc_prediction_fallback": 3,
+        "live_mpc_exception": 0,
+        "command_publishes": 77,
+        "cycles": 77,
+        "work_over_period": 76,
+        "fallback_owned_cycles": 24,
+        "live_mpc_solver:solved inaccurate": 3,
+        "live_mpc:solved inaccurate": 3,
+        "live_mpc_solver:solved": 60,
+        "live_mpc:solved": 60
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 77,
+          "p50": 62.962,
+          "p95": 110.424,
+          "max": 127.344
+        },
+        "sim_wall_ratio": {
+          "n": 77,
+          "p50": 1.022,
+          "p95": 1.403,
+          "max": 1.495
+        },
+        "live_mpc_iterations": {
+          "n": 77,
+          "p50": 100.0,
+          "p95": 2100.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 77,
+          "p50": 0.678,
+          "p95": 9.49,
+          "max": 11.774
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 77,
+          "p50": 0.416,
+          "p95": 7.615,
+          "max": 11.779
+        },
+        "live_mpc_wall_ms": {
+          "n": 77,
+          "p50": 6.341,
+          "p95": 15.942,
+          "max": 18.878
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 77,
+          "p50": 5.796,
+          "p95": 14.517,
+          "max": 18.866
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 77,
+          "p50": 5.464,
+          "p95": 10.577,
+          "max": 14.943
+        },
+        "command_gap_wall_ms": {
+          "n": 77,
+          "p50": 62.011,
+          "p95": 112.818,
+          "max": 127.314
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 77,
+          "p50": 65.0,
+          "p95": 125.0,
+          "max": 135.0
+        },
+        "work_wall_ms": {
+          "n": 77,
+          "p50": 61.95,
+          "p95": 110.369,
+          "max": 127.296
+        },
+        "work_thread_cpu_ms": {
+          "n": 77,
+          "p50": 41.299,
+          "p95": 58.088,
+          "max": 87.063
+        },
+        "rate_wait_wall_ms": {
+          "n": 77,
+          "p50": 0.013,
+          "p95": 4.988,
+          "max": 14.81
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 77,
+          "p50": 51.98,
+          "p95": 103.174,
+          "max": 118.41
+        },
+        "non_thread_wall_ms": {
+          "n": 77,
+          "p50": 19.814,
+          "p95": 56.055,
+          "max": 81.937
+        }
+      }
+    }
+  },
+  {
+    "line": 1577,
+    "data": {
+      "window_wall_sec": 5.04,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.9,
+      "context": {
+        "wp": 156,
+        "lane": 2,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 79,
+        "live_mpc_calls": 79,
+        "live_mpc:solved": 79,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 79,
+        "cycles": 79,
+        "work_over_period": 78,
+        "fallback_owned_cycles": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 79,
+          "p50": 59.777,
+          "p95": 104.046,
+          "max": 119.929
+        },
+        "sim_wall_ratio": {
+          "n": 79,
+          "p50": 1.008,
+          "p95": 1.437,
+          "max": 1.537
+        },
+        "live_mpc_iterations": {
+          "n": 79,
+          "p50": 50.0,
+          "p95": 250.0,
+          "max": 350.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 79,
+          "p50": 0.567,
+          "p95": 2.442,
+          "max": 6.76
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 79,
+          "p50": 0.243,
+          "p95": 0.832,
+          "max": 0.985
+        },
+        "live_mpc_wall_ms": {
+          "n": 79,
+          "p50": 7.233,
+          "p95": 17.173,
+          "max": 23.425
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 79,
+          "p50": 6.55,
+          "p95": 10.454,
+          "max": 12.791
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 79,
+          "p50": 6.651,
+          "p95": 15.826,
+          "max": 16.676
+        },
+        "command_gap_wall_ms": {
+          "n": 79,
+          "p50": 60.055,
+          "p95": 104.501,
+          "max": 117.204
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 79,
+          "p50": 60.0,
+          "p95": 120.0,
+          "max": 130.0
+        },
+        "work_wall_ms": {
+          "n": 79,
+          "p50": 58.782,
+          "p95": 103.979,
+          "max": 119.849
+        },
+        "work_thread_cpu_ms": {
+          "n": 79,
+          "p50": 40.493,
+          "p95": 58.764,
+          "max": 86.639
+        },
+        "rate_wait_wall_ms": {
+          "n": 79,
+          "p50": 0.014,
+          "p95": 2.396,
+          "max": 15.946
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 79,
+          "p50": 48.609,
+          "p95": 95.988,
+          "max": 113.474
+        },
+        "non_thread_wall_ms": {
+          "n": 79,
+          "p50": 17.58,
+          "p95": 50.546,
+          "max": 60.11
+        }
+      }
+    }
+  },
+  {
+    "line": 1624,
+    "data": {
+      "window_wall_sec": 5.085,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.3,
+      "context": {
+        "wp": 189,
+        "lane": 2,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 77,
+        "live_mpc_calls": 81,
+        "live_mpc:solved": 77,
+        "live_mpc_prediction_fallback": 4,
+        "live_mpc_exception": 0,
+        "command_publishes": 81,
+        "cycles": 81,
+        "work_over_period": 81,
+        "fallback_owned_cycles": 4,
+        "live_mpc_solver:primal infeasible": 14,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=200, width=0.0": 1,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 3
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 81,
+          "p50": 59.369,
+          "p95": 92.03,
+          "max": 148.787
+        },
+        "sim_wall_ratio": {
+          "n": 81,
+          "p50": 1.008,
+          "p95": 1.44,
+          "max": 1.519
+        },
+        "live_mpc_iterations": {
+          "n": 91,
+          "p50": 75.0,
+          "p95": 950.0,
+          "max": 975.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 91,
+          "p50": 0.652,
+          "p95": 3.087,
+          "max": 4.969
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 91,
+          "p50": 0.299,
+          "p95": 2.816,
+          "max": 3.93
+        },
+        "live_mpc_wall_ms": {
+          "n": 81,
+          "p50": 7.813,
+          "p95": 17.711,
+          "max": 46.725
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 81,
+          "p50": 6.887,
+          "p95": 13.391,
+          "max": 43.711
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 81,
+          "p50": 7.487,
+          "p95": 14.542,
+          "max": 37.015
+        },
+        "command_gap_wall_ms": {
+          "n": 81,
+          "p50": 61.451,
+          "p95": 94.544,
+          "max": 145.671
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 81,
+          "p50": 55.0,
+          "p95": 95.0,
+          "max": 140.0
+        },
+        "work_wall_ms": {
+          "n": 81,
+          "p50": 57.015,
+          "p95": 112.683,
+          "max": 148.703
+        },
+        "work_thread_cpu_ms": {
+          "n": 81,
+          "p50": 35.472,
+          "p95": 67.924,
+          "max": 100.156
+        },
+        "rate_wait_wall_ms": {
+          "n": 81,
+          "p50": 0.014,
+          "p95": 4.244,
+          "max": 15.188
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 81,
+          "p50": 47.124,
+          "p95": 79.046,
+          "max": 139.709
+        },
+        "non_thread_wall_ms": {
+          "n": 81,
+          "p50": 19.3,
+          "p95": 47.689,
+          "max": 51.24
+        }
+      }
+    }
+  },
+  {
+    "line": 1730,
+    "data": {
+      "window_wall_sec": 5.039,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 106.1,
+      "context": {
+        "wp": 209,
+        "lane": 2,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 40,
+        "live_mpc_calls": 54,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=202, width=0.0": 1,
+        "live_mpc_prediction_fallback": 12,
+        "live_mpc_exception": 0,
+        "command_publishes": 54,
+        "cycles": 54,
+        "work_over_period": 54,
+        "fallback_owned_cycles": 35,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 6,
+        "live_mpc_solver:solved": 38,
+        "live_mpc:solved": 38,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=200, width=0.0": 1,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=201, width=0.0": 1,
+        "live_mpc_solver:solved inaccurate": 4,
+        "live_mpc:solved inaccurate": 4,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 2,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=212, width=0.0": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 54,
+          "p50": 91.006,
+          "p95": 145.574,
+          "max": 164.985
+        },
+        "sim_wall_ratio": {
+          "n": 54,
+          "p50": 1.014,
+          "p95": 1.262,
+          "max": 1.336
+        },
+        "live_mpc_iterations": {
+          "n": 82,
+          "p50": 475.0,
+          "p95": 3800.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 82,
+          "p50": 1.969,
+          "p95": 11.767,
+          "max": 14.953
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 82,
+          "p50": 1.428,
+          "p95": 11.683,
+          "max": 14.783
+        },
+        "live_mpc_wall_ms": {
+          "n": 54,
+          "p50": 16.538,
+          "p95": 52.37,
+          "max": 53.592
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 54,
+          "p50": 14.728,
+          "p95": 44.484,
+          "max": 48.892
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 54,
+          "p50": 12.65,
+          "p95": 41.07,
+          "max": 42.345
+        },
+        "command_gap_wall_ms": {
+          "n": 54,
+          "p50": 91.958,
+          "p95": 145.578,
+          "max": 164.988
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 54,
+          "p50": 90.0,
+          "p95": 135.0,
+          "max": 190.0
+        },
+        "work_wall_ms": {
+          "n": 54,
+          "p50": 90.957,
+          "p95": 145.523,
+          "max": 164.937
+        },
+        "work_thread_cpu_ms": {
+          "n": 54,
+          "p50": 56.227,
+          "p95": 86.776,
+          "max": 111.575
+        },
+        "rate_wait_wall_ms": {
+          "n": 54,
+          "p50": 0.014,
+          "p95": 0.021,
+          "max": 0.023
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 54,
+          "p50": 68.794,
+          "p95": 114.951,
+          "max": 150.027
+        },
+        "non_thread_wall_ms": {
+          "n": 54,
+          "p50": 30.762,
+          "p95": 70.595,
+          "max": 97.121
+        }
+      }
+    }
+  },
+  {
+    "line": 1806,
+    "data": {
+      "window_wall_sec": 5.026,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 105.4,
+      "context": {
+        "wp": 230,
+        "lane": 2,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 44,
+        "live_mpc_calls": 60,
+        "live_mpc:solved": 44,
+        "live_mpc_prediction_fallback": 12,
+        "live_mpc_exception": 0,
+        "command_publishes": 60,
+        "cycles": 60,
+        "work_over_period": 60,
+        "fallback_owned_cycles": 25,
+        "live_mpc_solver:primal infeasible": 30,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 6,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=224, width=0.0": 1,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=225, width=0.0": 2,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=228, width=0.0": 1,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=227, width=0.0": 1,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=230, width=0.0": 1,
+        "live_mpc_solver:solved inaccurate": 4,
+        "live_mpc:solved inaccurate": 4,
+        "live_mpc_solver:primal infeasible inaccurate": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 60,
+          "p50": 79.527,
+          "p95": 131.925,
+          "max": 179.75
+        },
+        "sim_wall_ratio": {
+          "n": 60,
+          "p50": 1.02,
+          "p95": 1.305,
+          "max": 1.318
+        },
+        "live_mpc_iterations": {
+          "n": 79,
+          "p50": 400.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 79,
+          "p50": 1.737,
+          "p95": 12.633,
+          "max": 17.005
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 79,
+          "p50": 1.334,
+          "p95": 12.59,
+          "max": 16.702
+        },
+        "live_mpc_wall_ms": {
+          "n": 60,
+          "p50": 11.203,
+          "p95": 45.955,
+          "max": 55.189
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 60,
+          "p50": 10.004,
+          "p95": 39.415,
+          "max": 42.466
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 60,
+          "p50": 9.133,
+          "p95": 40.54,
+          "max": 47.287
+        },
+        "command_gap_wall_ms": {
+          "n": 60,
+          "p50": 79.305,
+          "p95": 134.159,
+          "max": 182.449
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 60,
+          "p50": 85.0,
+          "p95": 135.0,
+          "max": 175.0
+        },
+        "work_wall_ms": {
+          "n": 60,
+          "p50": 79.337,
+          "p95": 131.875,
+          "max": 179.673
+        },
+        "work_thread_cpu_ms": {
+          "n": 60,
+          "p50": 47.684,
+          "p95": 79.733,
+          "max": 89.351
+        },
+        "rate_wait_wall_ms": {
+          "n": 60,
+          "p50": 0.014,
+          "p95": 0.045,
+          "max": 12.003
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 60,
+          "p50": 60.884,
+          "p95": 119.149,
+          "max": 139.152
+        },
+        "non_thread_wall_ms": {
+          "n": 60,
+          "p50": 26.646,
+          "p95": 67.509,
+          "max": 98.041
+        }
+      }
+    }
+  },
+  {
+    "line": 1894,
+    "data": {
+      "window_wall_sec": 5.058,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 106.7,
+      "context": {
+        "wp": 250,
+        "lane": 1,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 18,
+        "live_mpc_calls": 47,
+        "live_mpc:solved": 18,
+        "live_mpc_prediction_fallback": 13,
+        "live_mpc_exception": 0,
+        "command_publishes": 47,
+        "cycles": 47,
+        "work_over_period": 47,
+        "fallback_owned_cycles": 31,
+        "live_mpc_solver:primal infeasible": 26,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 16,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=248, width=0.0": 1,
+        "live_mpc_solver:solved inaccurate": 9,
+        "live_mpc:solved inaccurate": 9,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 3,
+        "probe_mpc_solver:primal infeasible": 10,
+        "probe_mpc_calls": 3,
+        "probe_mpc:MPC retry time budget exceeded (30.0ms)": 3,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 47,
+          "p50": 102.912,
+          "p95": 168.961,
+          "max": 179.784
+        },
+        "sim_wall_ratio": {
+          "n": 47,
+          "p50": 1.005,
+          "p95": 1.201,
+          "max": 1.695
+        },
+        "live_mpc_iterations": {
+          "n": 53,
+          "p50": 1125.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 53,
+          "p50": 3.822,
+          "p95": 17.91,
+          "max": 18.142
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 53,
+          "p50": 3.643,
+          "p95": 16.985,
+          "max": 17.751
+        },
+        "live_mpc_wall_ms": {
+          "n": 47,
+          "p50": 17.822,
+          "p95": 44.327,
+          "max": 51.952
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 47,
+          "p50": 14.304,
+          "p95": 35.088,
+          "max": 49.906
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 47,
+          "p50": 10.823,
+          "p95": 28.734,
+          "max": 34.528
+        },
+        "command_gap_wall_ms": {
+          "n": 47,
+          "p50": 103.045,
+          "p95": 170.641,
+          "max": 179.773
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 47,
+          "p50": 100.0,
+          "p95": 175.0,
+          "max": 180.0
+        },
+        "work_wall_ms": {
+          "n": 47,
+          "p50": 103.007,
+          "p95": 170.584,
+          "max": 179.732
+        },
+        "work_thread_cpu_ms": {
+          "n": 47,
+          "p50": 59.523,
+          "p95": 121.543,
+          "max": 124.579
+        },
+        "rate_wait_wall_ms": {
+          "n": 47,
+          "p50": 0.015,
+          "p95": 0.02,
+          "max": 0.025
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 47,
+          "p50": 81.25,
+          "p95": 131.598,
+          "max": 149.194
+        },
+        "non_thread_wall_ms": {
+          "n": 47,
+          "p50": 40.433,
+          "p95": 78.775,
+          "max": 89.126
+        },
+        "probe_mpc_iterations": {
+          "n": 10,
+          "p50": 975.0,
+          "p95": 2850.0,
+          "max": 2850.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 10,
+          "p50": 5.384,
+          "p95": 9.441,
+          "max": 9.441
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 10,
+          "p50": 4.306,
+          "p95": 9.199,
+          "max": 9.199
+        },
+        "probe_mpc_wall_ms": {
+          "n": 3,
+          "p50": 48.815,
+          "p95": 49.331,
+          "max": 49.331
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 3,
+          "p50": 43.341,
+          "p95": 43.853,
+          "max": 43.853
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 3,
+          "p50": 29.008,
+          "p95": 32.627,
+          "max": 32.627
+        }
+      }
+    }
+  },
+  {
+    "line": 1984,
+    "data": {
+      "window_wall_sec": 5.012,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 107.8,
+      "context": {
+        "wp": 253,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 56,
+        "live_mpc_calls": 49,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 11,
+        "live_mpc_prediction_fallback": 9,
+        "live_mpc_exception": 0,
+        "probe_mpc_solver:primal infeasible": 15,
+        "probe_mpc_solver:solved inaccurate": 7,
+        "probe_mpc_calls": 11,
+        "probe_mpc:solved inaccurate": 7,
+        "probe_mpc_prediction_fallback": 4,
+        "probe_mpc_exception": 0,
+        "command_publishes": 49,
+        "cycles": 49,
+        "work_over_period": 49,
+        "fallback_owned_cycles": 40,
+        "probe_mpc:OSQP failed with status 'primal infeasible'": 4,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 16,
+        "live_mpc_solver:solved": 21,
+        "live_mpc:solved": 21,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=261, width=0.0": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 49,
+          "p50": 82.821,
+          "p95": 218.838,
+          "max": 273.042
+        },
+        "sim_wall_ratio": {
+          "n": 49,
+          "p50": 1.015,
+          "p95": 1.149,
+          "max": 1.277
+        },
+        "live_mpc_iterations": {
+          "n": 77,
+          "p50": 375.0,
+          "p95": 1900.0,
+          "max": 2100.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 77,
+          "p50": 2.106,
+          "p95": 8.653,
+          "max": 13.722
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 77,
+          "p50": 1.508,
+          "p95": 7.339,
+          "max": 11.248
+        },
+        "live_mpc_wall_ms": {
+          "n": 49,
+          "p50": 12.605,
+          "p95": 52.765,
+          "max": 66.035
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 49,
+          "p50": 11.003,
+          "p95": 42.495,
+          "max": 58.907
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 49,
+          "p50": 9.884,
+          "p95": 44.02,
+          "max": 45.237
+        },
+        "probe_mpc_iterations": {
+          "n": 22,
+          "p50": 2450.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 22,
+          "p50": 11.464,
+          "p95": 16.443,
+          "max": 17.033
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 22,
+          "p50": 9.981,
+          "p95": 15.729,
+          "max": 15.744
+        },
+        "probe_mpc_wall_ms": {
+          "n": 11,
+          "p50": 41.135,
+          "p95": 51.42,
+          "max": 51.42
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 11,
+          "p50": 34.721,
+          "p95": 42.477,
+          "max": 42.477
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 11,
+          "p50": 24.942,
+          "p95": 31.248,
+          "max": 31.248
+        },
+        "command_gap_wall_ms": {
+          "n": 49,
+          "p50": 81.854,
+          "p95": 202.744,
+          "max": 273.026
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 49,
+          "p50": 85.0,
+          "p95": 210.0,
+          "max": 300.0
+        },
+        "work_wall_ms": {
+          "n": 49,
+          "p50": 81.537,
+          "p95": 218.751,
+          "max": 272.974
+        },
+        "work_thread_cpu_ms": {
+          "n": 49,
+          "p50": 46.669,
+          "p95": 132.556,
+          "max": 180.166
+        },
+        "rate_wait_wall_ms": {
+          "n": 49,
+          "p50": 0.015,
+          "p95": 0.023,
+          "max": 0.036
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 49,
+          "p50": 62.566,
+          "p95": 115.71,
+          "max": 178.47
+        },
+        "non_thread_wall_ms": {
+          "n": 49,
+          "p50": 33.858,
+          "p95": 82.167,
+          "max": 105.523
+        }
+      }
+    }
+  },
+  {
+    "line": 2092,
+    "data": {
+      "window_wall_sec": 5.098,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 104.4,
+      "context": {
+        "wp": 262,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 49,
+        "live_mpc_calls": 49,
+        "live_mpc:solved": 49,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 49,
+        "cycles": 49,
+        "work_over_period": 49,
+        "fallback_owned_cycles": 0,
+        "live_mpc_solver:primal infeasible": 14,
+        "probe_mpc_solver:solved": 10,
+        "probe_mpc_calls": 10,
+        "probe_mpc:solved": 10,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 49,
+          "p50": 93.249,
+          "p95": 194.828,
+          "max": 197.954
+        },
+        "sim_wall_ratio": {
+          "n": 49,
+          "p50": 1.02,
+          "p95": 1.236,
+          "max": 1.4
+        },
+        "live_mpc_iterations": {
+          "n": 63,
+          "p50": 350.0,
+          "p95": 1800.0,
+          "max": 2350.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 63,
+          "p50": 2.14,
+          "p95": 7.734,
+          "max": 9.611
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 63,
+          "p50": 1.324,
+          "p95": 7.722,
+          "max": 9.228
+        },
+        "live_mpc_wall_ms": {
+          "n": 49,
+          "p50": 12.149,
+          "p95": 37.201,
+          "max": 40.876
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 49,
+          "p50": 10.012,
+          "p95": 28.346,
+          "max": 35.614
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 49,
+          "p50": 9.748,
+          "p95": 28.852,
+          "max": 30.506
+        },
+        "command_gap_wall_ms": {
+          "n": 49,
+          "p50": 93.246,
+          "p95": 193.188,
+          "max": 197.913
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 49,
+          "p50": 95.0,
+          "p95": 175.0,
+          "max": 215.0
+        },
+        "work_wall_ms": {
+          "n": 49,
+          "p50": 93.583,
+          "p95": 194.777,
+          "max": 197.885
+        },
+        "work_thread_cpu_ms": {
+          "n": 49,
+          "p50": 51.885,
+          "p95": 95.183,
+          "max": 123.426
+        },
+        "rate_wait_wall_ms": {
+          "n": 49,
+          "p50": 0.015,
+          "p95": 0.022,
+          "max": 0.137
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 49,
+          "p50": 78.571,
+          "p95": 158.62,
+          "max": 185.7
+        },
+        "non_thread_wall_ms": {
+          "n": 49,
+          "p50": 40.533,
+          "p95": 82.715,
+          "max": 113.695
+        },
+        "probe_mpc_iterations": {
+          "n": 10,
+          "p50": 300.0,
+          "p95": 875.0,
+          "max": 875.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 10,
+          "p50": 2.723,
+          "p95": 8.185,
+          "max": 8.185
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 10,
+          "p50": 1.485,
+          "p95": 4.851,
+          "max": 4.851
+        },
+        "probe_mpc_wall_ms": {
+          "n": 10,
+          "p50": 18.009,
+          "p95": 22.6,
+          "max": 22.6
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 10,
+          "p50": 12.133,
+          "p95": 15.643,
+          "max": 15.643
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 10,
+          "p50": 12.923,
+          "p95": 18.282,
+          "max": 18.282
+        }
+      }
+    }
+  },
+  {
+    "line": 2164,
+    "data": {
+      "window_wall_sec": 5.016,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.7,
+      "context": {
+        "wp": 275,
+        "lane": 0,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 50,
+        "live_mpc_calls": 50,
+        "live_mpc:solved": 50,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 50,
+        "cycles": 50,
+        "work_over_period": 50,
+        "fallback_owned_cycles": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 50,
+          "p50": 95.332,
+          "p95": 148.69,
+          "max": 176.221
+        },
+        "sim_wall_ratio": {
+          "n": 50,
+          "p50": 0.993,
+          "p95": 1.22,
+          "max": 1.334
+        },
+        "live_mpc_iterations": {
+          "n": 50,
+          "p50": 125.0,
+          "p95": 525.0,
+          "max": 2625.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 50,
+          "p50": 1.468,
+          "p95": 4.503,
+          "max": 12.978
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 50,
+          "p50": 0.597,
+          "p95": 2.03,
+          "max": 12.714
+        },
+        "live_mpc_wall_ms": {
+          "n": 50,
+          "p50": 10.679,
+          "p95": 21.059,
+          "max": 27.392
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 50,
+          "p50": 9.422,
+          "p95": 13.789,
+          "max": 22.634
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 50,
+          "p50": 9.107,
+          "p95": 19.495,
+          "max": 24.204
+        },
+        "command_gap_wall_ms": {
+          "n": 50,
+          "p50": 95.334,
+          "p95": 176.241,
+          "max": 192.484
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 50,
+          "p50": 95.0,
+          "p95": 150.0,
+          "max": 210.0
+        },
+        "work_wall_ms": {
+          "n": 50,
+          "p50": 95.284,
+          "p95": 172.471,
+          "max": 192.475
+        },
+        "work_thread_cpu_ms": {
+          "n": 50,
+          "p50": 54.947,
+          "p95": 72.46,
+          "max": 113.431
+        },
+        "rate_wait_wall_ms": {
+          "n": 50,
+          "p50": 0.016,
+          "p95": 0.021,
+          "max": 0.021
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 50,
+          "p50": 85.021,
+          "p95": 153.455,
+          "max": 178.915
+        },
+        "non_thread_wall_ms": {
+          "n": 50,
+          "p50": 43.316,
+          "p95": 87.945,
+          "max": 117.685
+        }
+      }
+    }
+  },
+  {
+    "line": 2241,
+    "data": {
+      "window_wall_sec": 5.002,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 104.5,
+      "context": {
+        "wp": 292,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 5,
+        "live_mpc_calls": 54,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 3,
+        "live_mpc_prediction_fallback": 4,
+        "live_mpc_exception": 0,
+        "command_publishes": 54,
+        "cycles": 54,
+        "work_over_period": 54,
+        "fallback_owned_cycles": 13,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=283, width=0.0": 1,
+        "live_mpc_solver:solved inaccurate": 2,
+        "live_mpc:solved inaccurate": 2,
+        "live_mpc_solver:solved": 48,
+        "live_mpc:solved": 48
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 54,
+          "p50": 91.125,
+          "p95": 158.97,
+          "max": 193.63
+        },
+        "sim_wall_ratio": {
+          "n": 54,
+          "p50": 0.996,
+          "p95": 1.293,
+          "max": 1.51
+        },
+        "live_mpc_iterations": {
+          "n": 55,
+          "p50": 175.0,
+          "p95": 2725.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 55,
+          "p50": 1.549,
+          "p95": 11.701,
+          "max": 16.729
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 55,
+          "p50": 0.815,
+          "p95": 11.596,
+          "max": 14.617
+        },
+        "live_mpc_wall_ms": {
+          "n": 54,
+          "p50": 11.829,
+          "p95": 52.274,
+          "max": 63.525
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 54,
+          "p50": 10.833,
+          "p95": 40.241,
+          "max": 48.635
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 54,
+          "p50": 10.516,
+          "p95": 45.673,
+          "max": 49.416
+        },
+        "command_gap_wall_ms": {
+          "n": 54,
+          "p50": 90.674,
+          "p95": 149.898,
+          "max": 160.112
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 54,
+          "p50": 95.0,
+          "p95": 150.0,
+          "max": 160.0
+        },
+        "work_wall_ms": {
+          "n": 54,
+          "p50": 90.223,
+          "p95": 153.519,
+          "max": 159.781
+        },
+        "work_thread_cpu_ms": {
+          "n": 54,
+          "p50": 51.729,
+          "p95": 92.08,
+          "max": 121.877
+        },
+        "rate_wait_wall_ms": {
+          "n": 54,
+          "p50": 0.016,
+          "p95": 0.03,
+          "max": 11.196
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 54,
+          "p50": 72.662,
+          "p95": 130.309,
+          "max": 142.098
+        },
+        "non_thread_wall_ms": {
+          "n": 54,
+          "p50": 36.739,
+          "p95": 78.649,
+          "max": 84.627
+        }
+      }
+    }
+  },
+  {
+    "line": 2320,
+    "data": {
+      "window_wall_sec": 5.085,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.7,
+      "context": {
+        "wp": 308,
+        "lane": 0,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 40,
+        "live_mpc_calls": 40,
+        "live_mpc:solved": 40,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 40,
+        "cycles": 40,
+        "work_over_period": 40,
+        "fallback_owned_cycles": 0,
+        "probe_mpc_solver:solved": 2,
+        "probe_mpc_calls": 2,
+        "probe_mpc:solved": 2,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 40,
+          "p50": 126.592,
+          "p95": 293.898,
+          "max": 311.788
+        },
+        "sim_wall_ratio": {
+          "n": 40,
+          "p50": 0.995,
+          "p95": 1.219,
+          "max": 1.329
+        },
+        "live_mpc_iterations": {
+          "n": 40,
+          "p50": 125.0,
+          "p95": 250.0,
+          "max": 325.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 40,
+          "p50": 0.996,
+          "p95": 3.096,
+          "max": 4.219
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 40,
+          "p50": 0.649,
+          "p95": 1.307,
+          "max": 1.507
+        },
+        "live_mpc_wall_ms": {
+          "n": 40,
+          "p50": 12.871,
+          "p95": 29.392,
+          "max": 31.986
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 40,
+          "p50": 10.206,
+          "p95": 17.46,
+          "max": 22.422
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 40,
+          "p50": 10.758,
+          "p95": 28.754,
+          "max": 29.621
+        },
+        "command_gap_wall_ms": {
+          "n": 40,
+          "p50": 127.929,
+          "p95": 293.946,
+          "max": 311.808
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 40,
+          "p50": 135.0,
+          "p95": 295.0,
+          "max": 315.0
+        },
+        "work_wall_ms": {
+          "n": 40,
+          "p50": 127.925,
+          "p95": 293.82,
+          "max": 311.71
+        },
+        "work_thread_cpu_ms": {
+          "n": 40,
+          "p50": 72.978,
+          "p95": 121.975,
+          "max": 125.749
+        },
+        "rate_wait_wall_ms": {
+          "n": 40,
+          "p50": 0.016,
+          "p95": 0.032,
+          "max": 8.711
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 40,
+          "p50": 103.356,
+          "p95": 280.07,
+          "max": 295.983
+        },
+        "non_thread_wall_ms": {
+          "n": 40,
+          "p50": 49.997,
+          "p95": 171.844,
+          "max": 195.818
+        },
+        "probe_mpc_iterations": {
+          "n": 2,
+          "p50": 1550.0,
+          "p95": 1550.0,
+          "max": 1550.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 2,
+          "p50": 5.663,
+          "p95": 5.663,
+          "max": 5.663
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 2,
+          "p50": 5.62,
+          "p95": 5.62,
+          "max": 5.62
+        },
+        "probe_mpc_wall_ms": {
+          "n": 2,
+          "p50": 14.952,
+          "p95": 14.952,
+          "max": 14.952
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 2,
+          "p50": 13.819,
+          "p95": 13.819,
+          "max": 13.819
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 2,
+          "p50": 9.902,
+          "p95": 9.902,
+          "max": 9.902
+        }
+      }
+    }
+  },
+  {
+    "line": 2421,
+    "data": {
+      "window_wall_sec": 5.083,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.8,
+      "context": {
+        "wp": 315,
+        "lane": 0,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 24,
+        "live_mpc_calls": 25,
+        "live_mpc:solved": 24,
+        "live_mpc_prediction_fallback": 1,
+        "live_mpc_exception": 0,
+        "command_publishes": 25,
+        "cycles": 25,
+        "work_over_period": 25,
+        "fallback_owned_cycles": 8,
+        "live_mpc_solver:primal infeasible": 13,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=316, width=0.0": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 25,
+          "p50": 201.255,
+          "p95": 248.625,
+          "max": 349.342
+        },
+        "sim_wall_ratio": {
+          "n": 25,
+          "p50": 1.001,
+          "p95": 1.135,
+          "max": 1.165
+        },
+        "live_mpc_iterations": {
+          "n": 37,
+          "p50": 150.0,
+          "p95": 1425.0,
+          "max": 1925.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 37,
+          "p50": 2.009,
+          "p95": 7.558,
+          "max": 9.976
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 37,
+          "p50": 0.802,
+          "p95": 5.407,
+          "max": 9.96
+        },
+        "live_mpc_wall_ms": {
+          "n": 25,
+          "p50": 32.268,
+          "p95": 50.163,
+          "max": 55.36
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 25,
+          "p50": 24.116,
+          "p95": 39.912,
+          "max": 39.934
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 25,
+          "p50": 28.018,
+          "p95": 41.177,
+          "max": 51.15
+        },
+        "command_gap_wall_ms": {
+          "n": 25,
+          "p50": 202.879,
+          "p95": 248.683,
+          "max": 311.956
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 25,
+          "p50": 185.0,
+          "p95": 235.0,
+          "max": 240.0
+        },
+        "work_wall_ms": {
+          "n": 25,
+          "p50": 201.167,
+          "p95": 248.551,
+          "max": 349.236
+        },
+        "work_thread_cpu_ms": {
+          "n": 25,
+          "p50": 102.578,
+          "p95": 118.314,
+          "max": 194.1
+        },
+        "rate_wait_wall_ms": {
+          "n": 25,
+          "p50": 0.018,
+          "p95": 0.023,
+          "max": 0.029
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 25,
+          "p50": 160.794,
+          "p95": 225.12,
+          "max": 320.608
+        },
+        "non_thread_wall_ms": {
+          "n": 25,
+          "p50": 87.234,
+          "p95": 138.575,
+          "max": 155.136
+        }
+      }
+    }
+  },
+  {
+    "line": 2539,
+    "data": {
+      "window_wall_sec": 5.155,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.5,
+      "context": {
+        "wp": 322,
+        "lane": 0,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 28,
+        "live_mpc_calls": 30,
+        "live_mpc:solved": 28,
+        "live_mpc_prediction_fallback": 2,
+        "live_mpc_exception": 0,
+        "command_publishes": 30,
+        "cycles": 30,
+        "work_over_period": 30,
+        "fallback_owned_cycles": 9,
+        "live_mpc:invalid/collapsed MPC constraint bounds: wp=323, width=0.0": 1,
+        "live_mpc_solver:primal infeasible": 9,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 30,
+          "p50": 168.982,
+          "p95": 248.316,
+          "max": 260.527
+        },
+        "sim_wall_ratio": {
+          "n": 30,
+          "p50": 1.006,
+          "p95": 1.127,
+          "max": 1.133
+        },
+        "live_mpc_iterations": {
+          "n": 37,
+          "p50": 300.0,
+          "p95": 700.0,
+          "max": 1775.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 37,
+          "p50": 2.343,
+          "p95": 4.69,
+          "max": 6.714
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 37,
+          "p50": 1.491,
+          "p95": 2.911,
+          "max": 6.669
+        },
+        "live_mpc_wall_ms": {
+          "n": 30,
+          "p50": 30.437,
+          "p95": 52.148,
+          "max": 55.519
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 30,
+          "p50": 22.453,
+          "p95": 36.936,
+          "max": 46.056
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 30,
+          "p50": 27.501,
+          "p95": 42.639,
+          "max": 53.329
+        },
+        "command_gap_wall_ms": {
+          "n": 30,
+          "p50": 165.703,
+          "p95": 260.636,
+          "max": 314.056
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 30,
+          "p50": 165.0,
+          "p95": 265.0,
+          "max": 270.0
+        },
+        "work_wall_ms": {
+          "n": 30,
+          "p50": 169.068,
+          "p95": 248.249,
+          "max": 260.466
+        },
+        "work_thread_cpu_ms": {
+          "n": 30,
+          "p50": 93.313,
+          "p95": 119.078,
+          "max": 159.5
+        },
+        "rate_wait_wall_ms": {
+          "n": 30,
+          "p50": 0.018,
+          "p95": 0.023,
+          "max": 0.034
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 30,
+          "p50": 137.11,
+          "p95": 205.635,
+          "max": 239.977
+        },
+        "non_thread_wall_ms": {
+          "n": 30,
+          "p50": 75.831,
+          "p95": 129.171,
+          "max": 158.907
+        }
+      }
+    }
+  },
+  {
+    "line": 2633,
+    "data": {
+      "window_wall_sec": 5.066,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.6,
+      "context": {
+        "wp": 332,
+        "lane": 0,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 7,
+        "live_mpc_solver:solved": 33,
+        "live_mpc_calls": 33,
+        "live_mpc:solved": 33,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 33,
+        "cycles": 33,
+        "work_over_period": 33,
+        "fallback_owned_cycles": 7
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 33,
+          "p50": 161.243,
+          "p95": 217.013,
+          "max": 242.168
+        },
+        "sim_wall_ratio": {
+          "n": 33,
+          "p50": 0.998,
+          "p95": 1.154,
+          "max": 1.297
+        },
+        "live_mpc_iterations": {
+          "n": 40,
+          "p50": 200.0,
+          "p95": 725.0,
+          "max": 1325.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 40,
+          "p50": 1.452,
+          "p95": 5.124,
+          "max": 5.485
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 40,
+          "p50": 0.827,
+          "p95": 3.638,
+          "max": 5.125
+        },
+        "live_mpc_wall_ms": {
+          "n": 33,
+          "p50": 13.87,
+          "p95": 35.131,
+          "max": 37.16
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 33,
+          "p50": 12.744,
+          "p95": 27.416,
+          "max": 28.449
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 33,
+          "p50": 11.783,
+          "p95": 31.998,
+          "max": 33.492
+        },
+        "command_gap_wall_ms": {
+          "n": 33,
+          "p50": 154.378,
+          "p95": 217.0,
+          "max": 236.667
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 33,
+          "p50": 150.0,
+          "p95": 220.0,
+          "max": 255.0
+        },
+        "work_wall_ms": {
+          "n": 33,
+          "p50": 154.319,
+          "p95": 216.915,
+          "max": 242.056
+        },
+        "work_thread_cpu_ms": {
+          "n": 33,
+          "p50": 79.944,
+          "p95": 102.405,
+          "max": 103.657
+        },
+        "rate_wait_wall_ms": {
+          "n": 33,
+          "p50": 0.017,
+          "p95": 0.024,
+          "max": 0.026
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 33,
+          "p50": 138.041,
+          "p95": 195.799,
+          "max": 222.88
+        },
+        "non_thread_wall_ms": {
+          "n": 33,
+          "p50": 75.102,
+          "p95": 120.134,
+          "max": 138.399
+        }
+      }
+    }
+  },
+  {
+    "line": 2707,
+    "data": {
+      "window_wall_sec": 5.112,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.3,
+      "context": {
+        "wp": 0,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 35,
+        "live_mpc_calls": 38,
+        "live_mpc:solved": 35,
+        "live_mpc_prediction_fallback": 3,
+        "live_mpc_exception": 0,
+        "command_publishes": 38,
+        "cycles": 38,
+        "work_over_period": 38,
+        "fallback_owned_cycles": 9,
+        "live_mpc_solver:primal infeasible": 3,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 3
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 38,
+          "p50": 136.731,
+          "p95": 197.31,
+          "max": 202.978
+        },
+        "sim_wall_ratio": {
+          "n": 38,
+          "p50": 1.014,
+          "p95": 1.14,
+          "max": 1.165
+        },
+        "live_mpc_iterations": {
+          "n": 38,
+          "p50": 75.0,
+          "p95": 225.0,
+          "max": 300.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 38,
+          "p50": 1.28,
+          "p95": 4.746,
+          "max": 11.289
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 38,
+          "p50": 0.386,
+          "p95": 1.149,
+          "max": 1.522
+        },
+        "live_mpc_wall_ms": {
+          "n": 38,
+          "p50": 14.063,
+          "p95": 31.422,
+          "max": 35.28
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 38,
+          "p50": 11.356,
+          "p95": 16.373,
+          "max": 17.521
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 38,
+          "p50": 13.065,
+          "p95": 29.691,
+          "max": 29.929
+        },
+        "command_gap_wall_ms": {
+          "n": 38,
+          "p50": 136.692,
+          "p95": 197.382,
+          "max": 202.887
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 38,
+          "p50": 135.0,
+          "p95": 200.0,
+          "max": 210.0
+        },
+        "work_wall_ms": {
+          "n": 38,
+          "p50": 138.337,
+          "p95": 197.236,
+          "max": 202.884
+        },
+        "work_thread_cpu_ms": {
+          "n": 38,
+          "p50": 71.398,
+          "p95": 86.988,
+          "max": 122.058
+        },
+        "rate_wait_wall_ms": {
+          "n": 38,
+          "p50": 0.019,
+          "p95": 0.028,
+          "max": 0.03
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 38,
+          "p50": 122.433,
+          "p95": 173.701,
+          "max": 182.419
+        },
+        "non_thread_wall_ms": {
+          "n": 38,
+          "p50": 61.555,
+          "p95": 118.147,
+          "max": 132.095
+        }
+      }
+    }
+  },
+  {
+    "line": 2803,
+    "data": {
+      "window_wall_sec": 5.003,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.1,
+      "context": {
+        "wp": 20,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 35,
+        "live_mpc_calls": 35,
+        "live_mpc:solved": 35,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 35,
+        "cycles": 35,
+        "work_over_period": 35,
+        "fallback_owned_cycles": 3
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 35,
+          "p50": 143.514,
+          "p95": 196.356,
+          "max": 198.867
+        },
+        "sim_wall_ratio": {
+          "n": 35,
+          "p50": 0.993,
+          "p95": 1.216,
+          "max": 1.221
+        },
+        "live_mpc_iterations": {
+          "n": 35,
+          "p50": 125.0,
+          "p95": 225.0,
+          "max": 225.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 35,
+          "p50": 1.929,
+          "p95": 4.228,
+          "max": 4.244
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 35,
+          "p50": 0.79,
+          "p95": 1.436,
+          "max": 1.543
+        },
+        "live_mpc_wall_ms": {
+          "n": 35,
+          "p50": 17.676,
+          "p95": 27.392,
+          "max": 31.403
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 35,
+          "p50": 13.339,
+          "p95": 19.877,
+          "max": 22.445
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 35,
+          "p50": 15.921,
+          "p95": 24.706,
+          "max": 29.422
+        },
+        "command_gap_wall_ms": {
+          "n": 35,
+          "p50": 141.063,
+          "p95": 198.917,
+          "max": 259.821
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 35,
+          "p50": 140.0,
+          "p95": 210.0,
+          "max": 225.0
+        },
+        "work_wall_ms": {
+          "n": 35,
+          "p50": 143.212,
+          "p95": 196.287,
+          "max": 198.789
+        },
+        "work_thread_cpu_ms": {
+          "n": 35,
+          "p50": 66.341,
+          "p95": 87.083,
+          "max": 127.808
+        },
+        "rate_wait_wall_ms": {
+          "n": 35,
+          "p50": 0.019,
+          "p95": 0.026,
+          "max": 0.029
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 35,
+          "p50": 122.222,
+          "p95": 178.611,
+          "max": 185.374
+        },
+        "non_thread_wall_ms": {
+          "n": 35,
+          "p50": 72.118,
+          "p95": 115.031,
+          "max": 133.361
+        }
+      }
+    }
+  },
+  {
+    "line": 2886,
+    "data": {
+      "window_wall_sec": 5.154,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.7,
+      "context": {
+        "wp": 40,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 21,
+        "live_mpc_calls": 28,
+        "live_mpc:solved": 21,
+        "live_mpc_prediction_fallback": 3,
+        "live_mpc_exception": 0,
+        "command_publishes": 28,
+        "cycles": 28,
+        "work_over_period": 28,
+        "fallback_owned_cycles": 7,
+        "live_mpc_solver:primal infeasible": 7,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 7
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 28,
+          "p50": 185.559,
+          "p95": 237.29,
+          "max": 333.762
+        },
+        "sim_wall_ratio": {
+          "n": 28,
+          "p50": 0.996,
+          "p95": 1.105,
+          "max": 1.179
+        },
+        "live_mpc_iterations": {
+          "n": 28,
+          "p50": 125.0,
+          "p95": 1400.0,
+          "max": 1725.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 28,
+          "p50": 1.575,
+          "p95": 11.981,
+          "max": 13.676
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 28,
+          "p50": 0.741,
+          "p95": 8.815,
+          "max": 11.947
+        },
+        "live_mpc_wall_ms": {
+          "n": 28,
+          "p50": 18.073,
+          "p95": 33.714,
+          "max": 38.994
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 28,
+          "p50": 13.369,
+          "p95": 22.417,
+          "max": 29.057
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 28,
+          "p50": 15.928,
+          "p95": 27.029,
+          "max": 30.999
+        },
+        "command_gap_wall_ms": {
+          "n": 28,
+          "p50": 186.028,
+          "p95": 234.958,
+          "max": 269.153
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 28,
+          "p50": 185.0,
+          "p95": 230.0,
+          "max": 245.0
+        },
+        "work_wall_ms": {
+          "n": 28,
+          "p50": 185.476,
+          "p95": 237.165,
+          "max": 333.633
+        },
+        "work_thread_cpu_ms": {
+          "n": 28,
+          "p50": 85.154,
+          "p95": 121.293,
+          "max": 188.437
+        },
+        "rate_wait_wall_ms": {
+          "n": 28,
+          "p50": 0.022,
+          "p95": 0.033,
+          "max": 0.047
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 28,
+          "p50": 165.715,
+          "p95": 218.996,
+          "max": 321.545
+        },
+        "non_thread_wall_ms": {
+          "n": 28,
+          "p50": 93.611,
+          "p95": 133.946,
+          "max": 145.196
+        }
+      }
+    }
+  },
+  {
+    "line": 2953,
+    "data": {
+      "window_wall_sec": 5.118,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 106.8,
+      "context": {
+        "wp": 43,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 2,
+        "live_mpc_calls": 23,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 2,
+        "live_mpc_prediction_fallback": 2,
+        "live_mpc_exception": 0,
+        "command_publishes": 23,
+        "cycles": 23,
+        "work_over_period": 23,
+        "fallback_owned_cycles": 10,
+        "live_mpc_solver:solved": 15,
+        "live_mpc:solved": 15,
+        "live_mpc_solver:solved inaccurate": 5,
+        "live_mpc:solved inaccurate": 5,
+        "probe_mpc_solver:primal infeasible": 6,
+        "probe_mpc_calls": 2,
+        "probe_mpc:MPC retry time budget exceeded (30.0ms)": 2,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0,
+        "live_mpc_solver:primal infeasible inaccurate": 1,
+        "live_mpc:OSQP failed with status 'primal infeasible inaccurate'": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 23,
+          "p50": 206.02,
+          "p95": 410.644,
+          "max": 471.537
+        },
+        "sim_wall_ratio": {
+          "n": 23,
+          "p50": 0.983,
+          "p95": 1.176,
+          "max": 1.368
+        },
+        "live_mpc_iterations": {
+          "n": 23,
+          "p50": 1850.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 23,
+          "p50": 18.385,
+          "p95": 27.175,
+          "max": 27.21
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 23,
+          "p50": 14.829,
+          "p95": 25.279,
+          "max": 26.526
+        },
+        "live_mpc_wall_ms": {
+          "n": 23,
+          "p50": 36.874,
+          "p95": 52.216,
+          "max": 54.747
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 23,
+          "p50": 28.399,
+          "p95": 37.489,
+          "max": 37.734
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 23,
+          "p50": 14.535,
+          "p95": 43.542,
+          "max": 49.727
+        },
+        "command_gap_wall_ms": {
+          "n": 23,
+          "p50": 216.623,
+          "p95": 410.717,
+          "max": 471.446
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 23,
+          "p50": 205.0,
+          "p95": 390.0,
+          "max": 430.0
+        },
+        "work_wall_ms": {
+          "n": 23,
+          "p50": 216.582,
+          "p95": 410.534,
+          "max": 471.415
+        },
+        "work_thread_cpu_ms": {
+          "n": 23,
+          "p50": 91.567,
+          "p95": 131.601,
+          "max": 154.571
+        },
+        "rate_wait_wall_ms": {
+          "n": 23,
+          "p50": 0.022,
+          "p95": 0.035,
+          "max": 0.04
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 23,
+          "p50": 181.551,
+          "p95": 370.763,
+          "max": 420.466
+        },
+        "non_thread_wall_ms": {
+          "n": 23,
+          "p50": 105.416,
+          "p95": 281.312,
+          "max": 339.814
+        },
+        "probe_mpc_iterations": {
+          "n": 6,
+          "p50": 125.0,
+          "p95": 250.0,
+          "max": 250.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 6,
+          "p50": 2.92,
+          "p95": 4.025,
+          "max": 4.025
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 6,
+          "p50": 0.901,
+          "p95": 1.817,
+          "max": 1.817
+        },
+        "probe_mpc_wall_ms": {
+          "n": 2,
+          "p50": 68.554,
+          "p95": 68.554,
+          "max": 68.554
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 2,
+          "p50": 46.457,
+          "p95": 46.457,
+          "max": 46.457
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 2,
+          "p50": 60.242,
+          "p95": 60.242,
+          "max": 60.242
+        }
+      }
+    }
+  },
+  {
+    "line": 3015,
+    "data": {
+      "window_wall_sec": 5.006,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 104.2,
+      "context": {
+        "wp": 46,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible inaccurate": 1,
+        "live_mpc_calls": 39,
+        "live_mpc:OSQP failed with status 'primal infeasible inaccurate'": 1,
+        "live_mpc_prediction_fallback": 1,
+        "live_mpc_exception": 0,
+        "probe_mpc_solver:primal infeasible": 15,
+        "probe_mpc_calls": 7,
+        "probe_mpc:OSQP failed with status 'primal infeasible'": 7,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0,
+        "command_publishes": 39,
+        "cycles": 39,
+        "work_over_period": 39,
+        "fallback_owned_cycles": 14,
+        "live_mpc_solver:primal infeasible": 16,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 6,
+        "live_mpc_solver:solved": 32,
+        "live_mpc:solved": 32
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 39,
+          "p50": 116.435,
+          "p95": 232.18,
+          "max": 392.253
+        },
+        "sim_wall_ratio": {
+          "n": 39,
+          "p50": 0.988,
+          "p95": 1.349,
+          "max": 1.523
+        },
+        "live_mpc_iterations": {
+          "n": 49,
+          "p50": 675.0,
+          "p95": 1400.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 49,
+          "p50": 5.812,
+          "p95": 13.125,
+          "max": 22.546
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 49,
+          "p50": 3.329,
+          "p95": 10.362,
+          "max": 19.653
+        },
+        "live_mpc_wall_ms": {
+          "n": 39,
+          "p50": 22.786,
+          "p95": 79.322,
+          "max": 108.036
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 39,
+          "p50": 18.631,
+          "p95": 49.568,
+          "max": 49.832
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 39,
+          "p50": 14.525,
+          "p95": 70.541,
+          "max": 96.434
+        },
+        "probe_mpc_iterations": {
+          "n": 15,
+          "p50": 175.0,
+          "p95": 550.0,
+          "max": 550.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 15,
+          "p50": 4.063,
+          "p95": 6.885,
+          "max": 6.885
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 15,
+          "p50": 1.548,
+          "p95": 4.24,
+          "max": 4.24
+        },
+        "probe_mpc_wall_ms": {
+          "n": 7,
+          "p50": 50.009,
+          "p95": 69.628,
+          "max": 69.628
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 7,
+          "p50": 34.506,
+          "p95": 41.054,
+          "max": 41.054
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 7,
+          "p50": 45.325,
+          "p95": 59.191,
+          "max": 59.191
+        },
+        "command_gap_wall_ms": {
+          "n": 39,
+          "p50": 108.228,
+          "p95": 232.399,
+          "max": 391.7
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 39,
+          "p50": 115.0,
+          "p95": 225.0,
+          "max": 390.0
+        },
+        "work_wall_ms": {
+          "n": 39,
+          "p50": 108.175,
+          "p95": 232.089,
+          "max": 392.153
+        },
+        "work_thread_cpu_ms": {
+          "n": 39,
+          "p50": 52.885,
+          "p95": 130.705,
+          "max": 151.903
+        },
+        "rate_wait_wall_ms": {
+          "n": 39,
+          "p50": 0.022,
+          "p95": 9.141,
+          "max": 11.792
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 39,
+          "p50": 73.58,
+          "p95": 159.117,
+          "max": 214.49
+        },
+        "non_thread_wall_ms": {
+          "n": 39,
+          "p50": 44.529,
+          "p95": 117.953,
+          "max": 240.25
+        }
+      }
+    }
+  },
+  {
+    "line": 3032,
+    "data": {
+      "window_wall_sec": 5.033,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 104.1,
+      "context": {
+        "wp": 59,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 86,
+        "live_mpc_calls": 86,
+        "live_mpc:solved": 86,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 86,
+        "cycles": 86,
+        "work_over_period": 84,
+        "fallback_owned_cycles": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 86,
+          "p50": 49.565,
+          "p95": 127.167,
+          "max": 180.579
+        },
+        "sim_wall_ratio": {
+          "n": 86,
+          "p50": 1.041,
+          "p95": 1.5,
+          "max": 1.948
+        },
+        "live_mpc_iterations": {
+          "n": 86,
+          "p50": 150.0,
+          "p95": 675.0,
+          "max": 1025.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 86,
+          "p50": 2.139,
+          "p95": 8.429,
+          "max": 10.278
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 86,
+          "p50": 0.818,
+          "p95": 4.268,
+          "max": 7.213
+        },
+        "live_mpc_wall_ms": {
+          "n": 86,
+          "p50": 16.508,
+          "p95": 30.369,
+          "max": 38.137
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 86,
+          "p50": 11.666,
+          "p95": 20.151,
+          "max": 24.987
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 86,
+          "p50": 13.595,
+          "p95": 24.663,
+          "max": 31.432
+        },
+        "command_gap_wall_ms": {
+          "n": 86,
+          "p50": 49.32,
+          "p95": 127.034,
+          "max": 180.84
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 86,
+          "p50": 50.0,
+          "p95": 110.0,
+          "max": 135.0
+        },
+        "work_wall_ms": {
+          "n": 86,
+          "p50": 49.44,
+          "p95": 127.051,
+          "max": 180.449
+        },
+        "work_thread_cpu_ms": {
+          "n": 86,
+          "p50": 29.211,
+          "p95": 47.774,
+          "max": 140.887
+        },
+        "rate_wait_wall_ms": {
+          "n": 86,
+          "p50": 0.021,
+          "p95": 9.118,
+          "max": 32.596
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 86,
+          "p50": 31.343,
+          "p95": 96.682,
+          "max": 153.901
+        },
+        "non_thread_wall_ms": {
+          "n": 86,
+          "p50": 19.562,
+          "p95": 64.639,
+          "max": 88.079
+        }
+      }
+    }
+  },
+  {
+    "line": 3063,
+    "data": {
+      "window_wall_sec": 5.173,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.5,
+      "context": {
+        "wp": 92,
+        "lane": 1,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 72,
+        "live_mpc_calls": 72,
+        "live_mpc:solved": 72,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 72,
+        "cycles": 72,
+        "work_over_period": 70,
+        "fallback_owned_cycles": 0,
+        "probe_mpc_solver:solved": 3,
+        "probe_mpc_calls": 3,
+        "probe_mpc:solved": 3,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0,
+        "probe_mpc_solver:primal infeasible": 2
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 72,
+          "p50": 67.448,
+          "p95": 115.877,
+          "max": 289.654
+        },
+        "sim_wall_ratio": {
+          "n": 72,
+          "p50": 1.029,
+          "p95": 1.532,
+          "max": 2.074
+        },
+        "live_mpc_iterations": {
+          "n": 72,
+          "p50": 75.0,
+          "p95": 125.0,
+          "max": 550.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 72,
+          "p50": 1.643,
+          "p95": 6.444,
+          "max": 11.357
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 72,
+          "p50": 0.4,
+          "p95": 1.035,
+          "max": 4.233
+        },
+        "live_mpc_wall_ms": {
+          "n": 72,
+          "p50": 21.368,
+          "p95": 43.205,
+          "max": 50.89
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 72,
+          "p50": 13.861,
+          "p95": 23.356,
+          "max": 27.545
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 72,
+          "p50": 18.6,
+          "p95": 41.791,
+          "max": 48.613
+        },
+        "command_gap_wall_ms": {
+          "n": 72,
+          "p50": 67.642,
+          "p95": 121.463,
+          "max": 305.536
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 72,
+          "p50": 65.0,
+          "p95": 120.0,
+          "max": 175.0
+        },
+        "work_wall_ms": {
+          "n": 72,
+          "p50": 67.342,
+          "p95": 121.159,
+          "max": 289.511
+        },
+        "work_thread_cpu_ms": {
+          "n": 72,
+          "p50": 39.129,
+          "p95": 77.396,
+          "max": 206.655
+        },
+        "rate_wait_wall_ms": {
+          "n": 72,
+          "p50": 0.024,
+          "p95": 5.388,
+          "max": 17.002
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 72,
+          "p50": 42.411,
+          "p95": 86.743,
+          "max": 264.259
+        },
+        "non_thread_wall_ms": {
+          "n": 72,
+          "p50": 29.408,
+          "p95": 58.707,
+          "max": 82.855
+        },
+        "probe_mpc_iterations": {
+          "n": 5,
+          "p50": 550.0,
+          "p95": 3550.0,
+          "max": 3550.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 5,
+          "p50": 4.412,
+          "p95": 19.909,
+          "max": 19.909
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 5,
+          "p50": 3.805,
+          "p95": 19.774,
+          "max": 19.774
+        },
+        "probe_mpc_wall_ms": {
+          "n": 3,
+          "p50": 57.143,
+          "p95": 58.791,
+          "max": 58.791
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 3,
+          "p50": 44.955,
+          "p95": 45.87,
+          "max": 45.87
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 3,
+          "p50": 36.099,
+          "p95": 47.449,
+          "max": 47.449
+        }
+      }
+    }
+  },
+  {
+    "line": 3153,
+    "data": {
+      "window_wall_sec": 5.016,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 108.1,
+      "context": {
+        "wp": 124,
+        "lane": 1,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 33,
+        "live_mpc_calls": 36,
+        "live_mpc:solved": 33,
+        "live_mpc_prediction_fallback": 3,
+        "live_mpc_exception": 0,
+        "probe_mpc_solver:primal infeasible": 25,
+        "probe_mpc_solver:solved": 34,
+        "probe_mpc_calls": 36,
+        "probe_mpc:solved": 34,
+        "probe_mpc_prediction_fallback": 1,
+        "probe_mpc_exception": 0,
+        "command_publishes": 36,
+        "cycles": 36,
+        "work_over_period": 36,
+        "fallback_owned_cycles": 16,
+        "live_mpc_solver:primal infeasible": 13,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 3,
+        "probe_mpc_solver:solved inaccurate": 2,
+        "probe_mpc:OSQP returned an implausible prediction": 1,
+        "live_mpc_solver:primal infeasible inaccurate": 1,
+        "probe_mpc:solved inaccurate": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 36,
+          "p50": 132.486,
+          "p95": 232.092,
+          "max": 236.711
+        },
+        "sim_wall_ratio": {
+          "n": 36,
+          "p50": 1.014,
+          "p95": 1.139,
+          "max": 1.278
+        },
+        "live_mpc_iterations": {
+          "n": 47,
+          "p50": 125.0,
+          "p95": 2600.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 47,
+          "p50": 1.66,
+          "p95": 17.09,
+          "max": 23.124
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 47,
+          "p50": 0.71,
+          "p95": 15.359,
+          "max": 20.44
+        },
+        "live_mpc_wall_ms": {
+          "n": 36,
+          "p50": 17.449,
+          "p95": 66.891,
+          "max": 89.089
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 36,
+          "p50": 13.048,
+          "p95": 49.985,
+          "max": 64.742
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 36,
+          "p50": 15.707,
+          "p95": 41.252,
+          "max": 60.168
+        },
+        "probe_mpc_iterations": {
+          "n": 61,
+          "p50": 375.0,
+          "p95": 2900.0,
+          "max": 4000.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 61,
+          "p50": 3.509,
+          "p95": 14.871,
+          "max": 24.3
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 61,
+          "p50": 1.897,
+          "p95": 14.202,
+          "max": 22.82
+        },
+        "probe_mpc_wall_ms": {
+          "n": 36,
+          "p50": 40.041,
+          "p95": 67.817,
+          "max": 78.195
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 36,
+          "p50": 30.654,
+          "p95": 45.452,
+          "max": 50.469
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 36,
+          "p50": 26.668,
+          "p95": 42.504,
+          "max": 63.336
+        },
+        "command_gap_wall_ms": {
+          "n": 36,
+          "p50": 139.046,
+          "p95": 232.092,
+          "max": 232.587
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 36,
+          "p50": 130.0,
+          "p95": 220.0,
+          "max": 225.0
+        },
+        "work_wall_ms": {
+          "n": 36,
+          "p50": 132.415,
+          "p95": 225.683,
+          "max": 232.026
+        },
+        "work_thread_cpu_ms": {
+          "n": 36,
+          "p50": 79.634,
+          "p95": 141.675,
+          "max": 144.457
+        },
+        "rate_wait_wall_ms": {
+          "n": 36,
+          "p50": 0.019,
+          "p95": 0.036,
+          "max": 0.049
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 36,
+          "p50": 72.324,
+          "p95": 134.531,
+          "max": 149.797
+        },
+        "non_thread_wall_ms": {
+          "n": 36,
+          "p50": 54.451,
+          "p95": 113.174,
+          "max": 126.992
+        }
+      }
+    }
+  },
+  {
+    "line": 3209,
+    "data": {
+      "window_wall_sec": 5.193,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.4,
+      "context": {
+        "wp": 142,
+        "lane": 2,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 32,
+        "live_mpc_calls": 32,
+        "live_mpc:solved": 32,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "probe_mpc_solver:solved": 2,
+        "probe_mpc_calls": 2,
+        "probe_mpc:solved": 2,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0,
+        "command_publishes": 32,
+        "cycles": 32,
+        "work_over_period": 32,
+        "fallback_owned_cycles": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 32,
+          "p50": 163.376,
+          "p95": 218.629,
+          "max": 218.665
+        },
+        "sim_wall_ratio": {
+          "n": 32,
+          "p50": 1.013,
+          "p95": 1.175,
+          "max": 1.251
+        },
+        "live_mpc_iterations": {
+          "n": 32,
+          "p50": 100.0,
+          "p95": 400.0,
+          "max": 550.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 32,
+          "p50": 1.872,
+          "p95": 7.221,
+          "max": 15.661
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 32,
+          "p50": 0.603,
+          "p95": 1.933,
+          "max": 2.749
+        },
+        "live_mpc_wall_ms": {
+          "n": 32,
+          "p50": 16.377,
+          "p95": 31.562,
+          "max": 32.104
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 32,
+          "p50": 12.733,
+          "p95": 16.606,
+          "max": 16.887
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 32,
+          "p50": 14.104,
+          "p95": 25.811,
+          "max": 30.176
+        },
+        "probe_mpc_iterations": {
+          "n": 2,
+          "p50": 225.0,
+          "p95": 225.0,
+          "max": 225.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 2,
+          "p50": 0.936,
+          "p95": 0.936,
+          "max": 0.936
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 2,
+          "p50": 0.938,
+          "p95": 0.938,
+          "max": 0.938
+        },
+        "probe_mpc_wall_ms": {
+          "n": 2,
+          "p50": 10.026,
+          "p95": 10.026,
+          "max": 10.026
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 2,
+          "p50": 9.275,
+          "p95": 9.275,
+          "max": 9.275
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 2,
+          "p50": 9.33,
+          "p95": 9.33,
+          "max": 9.33
+        },
+        "command_gap_wall_ms": {
+          "n": 32,
+          "p50": 165.055,
+          "p95": 218.673,
+          "max": 228.339
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 32,
+          "p50": 170.0,
+          "p95": 220.0,
+          "max": 220.0
+        },
+        "work_wall_ms": {
+          "n": 32,
+          "p50": 165.067,
+          "p95": 218.557,
+          "max": 218.584
+        },
+        "work_thread_cpu_ms": {
+          "n": 32,
+          "p50": 85.597,
+          "p95": 107.535,
+          "max": 124.566
+        },
+        "rate_wait_wall_ms": {
+          "n": 32,
+          "p50": 0.02,
+          "p95": 0.031,
+          "max": 0.039
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 32,
+          "p50": 145.026,
+          "p95": 203.06,
+          "max": 203.279
+        },
+        "non_thread_wall_ms": {
+          "n": 32,
+          "p50": 82.425,
+          "p95": 119.146,
+          "max": 125.08
+        }
+      }
+    }
+  },
+  {
+    "line": 3250,
+    "data": {
+      "window_wall_sec": 5.026,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.8,
+      "context": {
+        "wp": 147,
+        "lane": 1,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 65,
+        "live_mpc_calls": 65,
+        "live_mpc:solved": 65,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 65,
+        "cycles": 65,
+        "work_over_period": 65,
+        "fallback_owned_cycles": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 65,
+          "p50": 74.839,
+          "p95": 135.498,
+          "max": 219.062
+        },
+        "sim_wall_ratio": {
+          "n": 65,
+          "p50": 0.988,
+          "p95": 1.312,
+          "max": 1.49
+        },
+        "live_mpc_iterations": {
+          "n": 65,
+          "p50": 75.0,
+          "p95": 325.0,
+          "max": 425.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 65,
+          "p50": 1.108,
+          "p95": 3.716,
+          "max": 5.279
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 65,
+          "p50": 0.44,
+          "p95": 1.839,
+          "max": 2.441
+        },
+        "live_mpc_wall_ms": {
+          "n": 65,
+          "p50": 12.337,
+          "p95": 24.66,
+          "max": 30.06
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 65,
+          "p50": 10.357,
+          "p95": 16.698,
+          "max": 18.193
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 65,
+          "p50": 10.942,
+          "p95": 22.519,
+          "max": 28.122
+        },
+        "command_gap_wall_ms": {
+          "n": 65,
+          "p50": 71.45,
+          "p95": 135.482,
+          "max": 196.757
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 65,
+          "p50": 80.0,
+          "p95": 125.0,
+          "max": 140.0
+        },
+        "work_wall_ms": {
+          "n": 65,
+          "p50": 74.775,
+          "p95": 129.471,
+          "max": 203.32
+        },
+        "work_thread_cpu_ms": {
+          "n": 65,
+          "p50": 37.589,
+          "p95": 56.697,
+          "max": 132.999
+        },
+        "rate_wait_wall_ms": {
+          "n": 65,
+          "p50": 0.019,
+          "p95": 0.056,
+          "max": 17.812
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 65,
+          "p50": 59.297,
+          "p95": 109.2,
+          "max": 182.67
+        },
+        "non_thread_wall_ms": {
+          "n": 65,
+          "p50": 33.807,
+          "p95": 64.602,
+          "max": 80.676
+        }
+      }
+    }
+  },
+  {
+    "line": 3278,
+    "data": {
+      "window_wall_sec": 5.071,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.3,
+      "context": {
+        "wp": 165,
+        "lane": 1,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 76,
+        "live_mpc_calls": 76,
+        "live_mpc:solved": 76,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 76,
+        "cycles": 76,
+        "work_over_period": 76,
+        "fallback_owned_cycles": 0,
+        "live_mpc_solver:primal infeasible": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 76,
+          "p50": 63.307,
+          "p95": 118.449,
+          "max": 195.109
+        },
+        "sim_wall_ratio": {
+          "n": 76,
+          "p50": 0.998,
+          "p95": 1.343,
+          "max": 1.572
+        },
+        "live_mpc_iterations": {
+          "n": 77,
+          "p50": 75.0,
+          "p95": 500.0,
+          "max": 1025.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 77,
+          "p50": 1.291,
+          "p95": 5.123,
+          "max": 10.848
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 77,
+          "p50": 0.443,
+          "p95": 3.29,
+          "max": 6.456
+        },
+        "live_mpc_wall_ms": {
+          "n": 76,
+          "p50": 14.934,
+          "p95": 27.599,
+          "max": 39.152
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 76,
+          "p50": 11.725,
+          "p95": 20.932,
+          "max": 28.002
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 76,
+          "p50": 13.14,
+          "p95": 24.374,
+          "max": 35.563
+        },
+        "command_gap_wall_ms": {
+          "n": 76,
+          "p50": 63.363,
+          "p95": 118.481,
+          "max": 199.473
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 76,
+          "p50": 55.0,
+          "p95": 105.0,
+          "max": 145.0
+        },
+        "work_wall_ms": {
+          "n": 76,
+          "p50": 62.401,
+          "p95": 118.357,
+          "max": 194.983
+        },
+        "work_thread_cpu_ms": {
+          "n": 76,
+          "p50": 33.667,
+          "p95": 54.0,
+          "max": 141.311
+        },
+        "rate_wait_wall_ms": {
+          "n": 76,
+          "p50": 0.019,
+          "p95": 0.029,
+          "max": 9.848
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 76,
+          "p50": 45.828,
+          "p95": 85.411,
+          "max": 168.406
+        },
+        "non_thread_wall_ms": {
+          "n": 76,
+          "p50": 28.541,
+          "p95": 64.567,
+          "max": 88.642
+        }
+      }
+    }
+  },
+  {
+    "line": 3321,
+    "data": {
+      "window_wall_sec": 5.267,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.7,
+      "context": {
+        "wp": 196,
+        "lane": 1,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 47,
+        "live_mpc_calls": 49,
+        "live_mpc:solved": 47,
+        "live_mpc_prediction_fallback": 2,
+        "live_mpc_exception": 0,
+        "command_publishes": 49,
+        "cycles": 49,
+        "work_over_period": 49,
+        "fallback_owned_cycles": 2,
+        "live_mpc_solver:primal infeasible": 9,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 2,
+        "probe_mpc_solver:primal infeasible": 1,
+        "probe_mpc_solver:solved": 1,
+        "probe_mpc_calls": 1,
+        "probe_mpc:solved": 1,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 49,
+          "p50": 90.462,
+          "p95": 185.85,
+          "max": 304.228
+        },
+        "sim_wall_ratio": {
+          "n": 49,
+          "p50": 0.995,
+          "p95": 1.203,
+          "max": 1.421
+        },
+        "live_mpc_iterations": {
+          "n": 56,
+          "p50": 75.0,
+          "p95": 1000.0,
+          "max": 3300.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 56,
+          "p50": 2.491,
+          "p95": 7.719,
+          "max": 20.881
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 56,
+          "p50": 0.63,
+          "p95": 6.763,
+          "max": 19.26
+        },
+        "live_mpc_wall_ms": {
+          "n": 49,
+          "p50": 19.28,
+          "p95": 63.942,
+          "max": 77.555
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 49,
+          "p50": 14.292,
+          "p95": 48.484,
+          "max": 58.266
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 49,
+          "p50": 17.498,
+          "p95": 46.593,
+          "max": 66.851
+        },
+        "command_gap_wall_ms": {
+          "n": 49,
+          "p50": 88.977,
+          "p95": 192.183,
+          "max": 345.84
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 49,
+          "p50": 85.0,
+          "p95": 195.0,
+          "max": 380.0
+        },
+        "work_wall_ms": {
+          "n": 49,
+          "p50": 90.332,
+          "p95": 192.079,
+          "max": 345.474
+        },
+        "work_thread_cpu_ms": {
+          "n": 49,
+          "p50": 45.914,
+          "p95": 116.678,
+          "max": 153.544
+        },
+        "rate_wait_wall_ms": {
+          "n": 49,
+          "p50": 0.022,
+          "p95": 0.032,
+          "max": 0.048
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 49,
+          "p50": 66.606,
+          "p95": 156.058,
+          "max": 273.291
+        },
+        "non_thread_wall_ms": {
+          "n": 49,
+          "p50": 42.141,
+          "p95": 118.987,
+          "max": 222.139
+        },
+        "probe_mpc_iterations": {
+          "n": 2,
+          "p50": 1050.0,
+          "p95": 1050.0,
+          "max": 1050.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 2,
+          "p50": 10.566,
+          "p95": 10.566,
+          "max": 10.566
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 2,
+          "p50": 8.293,
+          "p95": 8.293,
+          "max": 8.293
+        },
+        "probe_mpc_wall_ms": {
+          "n": 1,
+          "p50": 77.204,
+          "p95": 77.204,
+          "max": 77.204
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 1,
+          "p50": 47.998,
+          "p95": 47.998,
+          "max": 47.998
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 1,
+          "p50": 61.955,
+          "p95": 61.955,
+          "max": 61.955
+        }
+      }
+    }
+  },
+  {
+    "line": 3401,
+    "data": {
+      "window_wall_sec": 5.187,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 106.3,
+      "context": {
+        "wp": 223,
+        "lane": 1,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 15,
+        "live_mpc_solver:solved": 23,
+        "live_mpc_calls": 28,
+        "live_mpc:solved": 23,
+        "live_mpc_prediction_fallback": 4,
+        "live_mpc_exception": 0,
+        "probe_mpc_solver:primal infeasible": 11,
+        "probe_mpc_solver:solved": 16,
+        "probe_mpc_calls": 19,
+        "probe_mpc:solved": 16,
+        "probe_mpc_prediction_fallback": 2,
+        "probe_mpc_exception": 0,
+        "command_publishes": 28,
+        "cycles": 28,
+        "work_over_period": 28,
+        "fallback_owned_cycles": 13,
+        "probe_mpc_solver:solved inaccurate": 1,
+        "probe_mpc:solved inaccurate": 1,
+        "live_mpc_solver:solved inaccurate": 1,
+        "live_mpc:solved inaccurate": 1,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 1,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 3,
+        "probe_mpc:MPC retry time budget exceeded (30.0ms)": 2
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 28,
+          "p50": 166.843,
+          "p95": 364.863,
+          "max": 417.471
+        },
+        "sim_wall_ratio": {
+          "n": 28,
+          "p50": 1.006,
+          "p95": 1.21,
+          "max": 1.248
+        },
+        "live_mpc_iterations": {
+          "n": 39,
+          "p50": 100.0,
+          "p95": 2825.0,
+          "max": 4000.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 39,
+          "p50": 2.621,
+          "p95": 18.27,
+          "max": 29.633
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 39,
+          "p50": 0.899,
+          "p95": 16.217,
+          "max": 25.335
+        },
+        "live_mpc_wall_ms": {
+          "n": 28,
+          "p50": 20.657,
+          "p95": 84.937,
+          "max": 137.36
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 28,
+          "p50": 14.438,
+          "p95": 47.175,
+          "max": 89.892
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 28,
+          "p50": 19.331,
+          "p95": 78.809,
+          "max": 86.586
+        },
+        "probe_mpc_iterations": {
+          "n": 28,
+          "p50": 450.0,
+          "p95": 3775.0,
+          "max": 4000.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 28,
+          "p50": 4.21,
+          "p95": 26.714,
+          "max": 29.551
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 28,
+          "p50": 2.759,
+          "p95": 20.789,
+          "max": 20.965
+        },
+        "probe_mpc_wall_ms": {
+          "n": 19,
+          "p50": 31.643,
+          "p95": 82.606,
+          "max": 82.606
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 19,
+          "p50": 21.641,
+          "p95": 66.24,
+          "max": 66.24
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 19,
+          "p50": 26.081,
+          "p95": 71.212,
+          "max": 71.212
+        },
+        "command_gap_wall_ms": {
+          "n": 28,
+          "p50": 166.845,
+          "p95": 341.75,
+          "max": 475.339
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 28,
+          "p50": 175.0,
+          "p95": 335.0,
+          "max": 380.0
+        },
+        "work_wall_ms": {
+          "n": 28,
+          "p50": 166.751,
+          "p95": 332.661,
+          "max": 417.346
+        },
+        "work_thread_cpu_ms": {
+          "n": 28,
+          "p50": 81.106,
+          "p95": 169.858,
+          "max": 259.77
+        },
+        "rate_wait_wall_ms": {
+          "n": 28,
+          "p50": 0.022,
+          "p95": 0.055,
+          "max": 0.208
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 28,
+          "p50": 110.603,
+          "p95": 221.529,
+          "max": 255.79
+        },
+        "non_thread_wall_ms": {
+          "n": 28,
+          "p50": 76.567,
+          "p95": 166.352,
+          "max": 201.003
+        }
+      }
+    }
+  },
+  {
+    "line": 3468,
+    "data": {
+      "window_wall_sec": 5.03,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.8,
+      "context": {
+        "wp": 227,
+        "lane": 2,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 24,
+        "live_mpc_calls": 24,
+        "live_mpc:solved": 24,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "probe_mpc_solver:solved": 6,
+        "probe_mpc_calls": 6,
+        "probe_mpc:solved": 6,
+        "probe_mpc_prediction_fallback": 0,
+        "probe_mpc_exception": 0,
+        "command_publishes": 24,
+        "cycles": 24,
+        "work_over_period": 24,
+        "fallback_owned_cycles": 5
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 24,
+          "p50": 213.326,
+          "p95": 291.576,
+          "max": 302.748
+        },
+        "sim_wall_ratio": {
+          "n": 24,
+          "p50": 1.023,
+          "p95": 1.114,
+          "max": 1.123
+        },
+        "live_mpc_iterations": {
+          "n": 24,
+          "p50": 200.0,
+          "p95": 475.0,
+          "max": 600.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 24,
+          "p50": 2.063,
+          "p95": 3.759,
+          "max": 5.43
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 24,
+          "p50": 1.06,
+          "p95": 2.73,
+          "max": 2.899
+        },
+        "live_mpc_wall_ms": {
+          "n": 24,
+          "p50": 16.377,
+          "p95": 29.648,
+          "max": 42.846
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 24,
+          "p50": 13.773,
+          "p95": 20.234,
+          "max": 27.778
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 24,
+          "p50": 14.606,
+          "p95": 27.473,
+          "max": 39.117
+        },
+        "probe_mpc_iterations": {
+          "n": 6,
+          "p50": 725.0,
+          "p95": 825.0,
+          "max": 825.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 6,
+          "p50": 4.733,
+          "p95": 8.278,
+          "max": 8.278
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 6,
+          "p50": 4.617,
+          "p95": 5.585,
+          "max": 5.585
+        },
+        "probe_mpc_wall_ms": {
+          "n": 6,
+          "p50": 22.831,
+          "p95": 32.477,
+          "max": 32.477
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 6,
+          "p50": 17.057,
+          "p95": 18.746,
+          "max": 18.746
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 6,
+          "p50": 14.573,
+          "p95": 27.759,
+          "max": 27.759
+        },
+        "command_gap_wall_ms": {
+          "n": 24,
+          "p50": 206.281,
+          "p95": 291.54,
+          "max": 303.034
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 24,
+          "p50": 210.0,
+          "p95": 305.0,
+          "max": 310.0
+        },
+        "work_wall_ms": {
+          "n": 24,
+          "p50": 206.057,
+          "p95": 291.473,
+          "max": 302.643
+        },
+        "work_thread_cpu_ms": {
+          "n": 24,
+          "p50": 105.728,
+          "p95": 124.409,
+          "max": 126.321
+        },
+        "rate_wait_wall_ms": {
+          "n": 24,
+          "p50": 0.022,
+          "p95": 0.034,
+          "max": 0.035
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 24,
+          "p50": 185.502,
+          "p95": 275.104,
+          "max": 286.733
+        },
+        "non_thread_wall_ms": {
+          "n": 24,
+          "p50": 112.109,
+          "p95": 170.571,
+          "max": 178.234
+        }
+      }
+    }
+  },
+  {
+    "line": 3543,
+    "data": {
+      "window_wall_sec": 5.032,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 104.8,
+      "context": {
+        "wp": 250,
+        "lane": 1,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:solved": 15,
+        "live_mpc_calls": 21,
+        "live_mpc:solved": 15,
+        "live_mpc_prediction_fallback": 6,
+        "live_mpc_exception": 0,
+        "command_publishes": 21,
+        "cycles": 21,
+        "work_over_period": 21,
+        "fallback_owned_cycles": 6,
+        "live_mpc_solver:primal infeasible": 13,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 1,
+        "probe_mpc_solver:primal infeasible": 8,
+        "probe_mpc_solver:solved": 2,
+        "probe_mpc_calls": 6,
+        "probe_mpc:solved": 2,
+        "probe_mpc_prediction_fallback": 3,
+        "probe_mpc_exception": 0,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 5,
+        "probe_mpc:OSQP failed with status 'primal infeasible'": 3,
+        "probe_mpc_solver:solved inaccurate": 1,
+        "probe_mpc:solved inaccurate": 1
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 21,
+          "p50": 237.764,
+          "p95": 349.875,
+          "max": 448.615
+        },
+        "sim_wall_ratio": {
+          "n": 21,
+          "p50": 1.004,
+          "p95": 1.073,
+          "max": 1.127
+        },
+        "live_mpc_iterations": {
+          "n": 28,
+          "p50": 175.0,
+          "p95": 1225.0,
+          "max": 1750.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 28,
+          "p50": 4.062,
+          "p95": 12.384,
+          "max": 13.558
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 28,
+          "p50": 1.332,
+          "p95": 9.57,
+          "max": 9.595
+        },
+        "live_mpc_wall_ms": {
+          "n": 21,
+          "p50": 28.24,
+          "p95": 61.59,
+          "max": 85.636
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 21,
+          "p50": 19.079,
+          "p95": 40.984,
+          "max": 63.285
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 21,
+          "p50": 24.157,
+          "p95": 48.083,
+          "max": 67.178
+        },
+        "command_gap_wall_ms": {
+          "n": 21,
+          "p50": 245.615,
+          "p95": 349.949,
+          "max": 434.726
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 21,
+          "p50": 240.0,
+          "p95": 340.0,
+          "max": 375.0
+        },
+        "work_wall_ms": {
+          "n": 21,
+          "p50": 238.522,
+          "p95": 349.794,
+          "max": 448.471
+        },
+        "work_thread_cpu_ms": {
+          "n": 21,
+          "p50": 110.037,
+          "p95": 191.848,
+          "max": 247.841
+        },
+        "rate_wait_wall_ms": {
+          "n": 21,
+          "p50": 0.023,
+          "p95": 0.034,
+          "max": 0.04
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 21,
+          "p50": 188.31,
+          "p95": 261.349,
+          "max": 416.868
+        },
+        "non_thread_wall_ms": {
+          "n": 21,
+          "p50": 111.589,
+          "p95": 190.342,
+          "max": 200.629
+        },
+        "probe_mpc_iterations": {
+          "n": 11,
+          "p50": 1475.0,
+          "p95": 4000.0,
+          "max": 4000.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 11,
+          "p50": 9.526,
+          "p95": 26.852,
+          "max": 26.852
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 11,
+          "p50": 9.166,
+          "p95": 23.813,
+          "max": 23.813
+        },
+        "probe_mpc_wall_ms": {
+          "n": 6,
+          "p50": 62.749,
+          "p95": 81.284,
+          "max": 81.284
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 6,
+          "p50": 51.832,
+          "p95": 61.923,
+          "max": 61.923
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 6,
+          "p50": 42.613,
+          "p95": 53.23,
+          "max": 53.23
+        }
+      }
+    }
+  },
+  {
+    "line": 3626,
+    "data": {
+      "window_wall_sec": 5.008,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 104.5,
+      "context": {
+        "wp": 252,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 40,
+        "live_mpc_calls": 36,
+        "live_mpc:MPC retry time budget exceeded (30.0ms)": 2,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "probe_mpc_solver:primal infeasible": 5,
+        "probe_mpc_calls": 2,
+        "probe_mpc:OSQP failed with status 'primal infeasible'": 1,
+        "probe_mpc_prediction_fallback": 2,
+        "probe_mpc_exception": 0,
+        "command_publishes": 36,
+        "cycles": 36,
+        "work_over_period": 36,
+        "fallback_owned_cycles": 36,
+        "probe_mpc:MPC retry time budget exceeded (30.0ms)": 1,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 34
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 36,
+          "p50": 126.27,
+          "p95": 252.146,
+          "max": 279.838
+        },
+        "sim_wall_ratio": {
+          "n": 36,
+          "p50": 0.983,
+          "p95": 1.224,
+          "max": 1.333
+        },
+        "live_mpc_iterations": {
+          "n": 40,
+          "p50": 200.0,
+          "p95": 350.0,
+          "max": 350.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 40,
+          "p50": 2.751,
+          "p95": 6.895,
+          "max": 6.937
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 40,
+          "p50": 1.448,
+          "p95": 2.221,
+          "max": 2.49
+        },
+        "live_mpc_wall_ms": {
+          "n": 36,
+          "p50": 21.792,
+          "p95": 48.991,
+          "max": 70.135
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 36,
+          "p50": 14.386,
+          "p95": 37.407,
+          "max": 46.254
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 36,
+          "p50": 16.871,
+          "p95": 42.977,
+          "max": 57.279
+        },
+        "probe_mpc_iterations": {
+          "n": 5,
+          "p50": 575.0,
+          "p95": 1125.0,
+          "max": 1125.0
+        },
+        "probe_mpc_solve_wall_ms": {
+          "n": 5,
+          "p50": 4.882,
+          "p95": 6.14,
+          "max": 6.14
+        },
+        "probe_mpc_solve_thread_cpu_ms": {
+          "n": 5,
+          "p50": 3.711,
+          "p95": 5.148,
+          "max": 5.148
+        },
+        "probe_mpc_wall_ms": {
+          "n": 2,
+          "p50": 73.497,
+          "p95": 73.497,
+          "max": 73.497
+        },
+        "probe_mpc_thread_cpu_ms": {
+          "n": 2,
+          "p50": 52.433,
+          "p95": 52.433,
+          "max": 52.433
+        },
+        "probe_mpc_non_solver_wall_ms": {
+          "n": 2,
+          "p50": 60.029,
+          "p95": 60.029,
+          "max": 60.029
+        },
+        "command_gap_wall_ms": {
+          "n": 36,
+          "p50": 127.166,
+          "p95": 231.869,
+          "max": 248.994
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 36,
+          "p50": 120.0,
+          "p95": 220.0,
+          "max": 240.0
+        },
+        "work_wall_ms": {
+          "n": 36,
+          "p50": 126.184,
+          "p95": 248.868,
+          "max": 279.701
+        },
+        "work_thread_cpu_ms": {
+          "n": 36,
+          "p50": 58.784,
+          "p95": 142.895,
+          "max": 152.938
+        },
+        "rate_wait_wall_ms": {
+          "n": 36,
+          "p50": 0.022,
+          "p95": 0.036,
+          "max": 0.042
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 36,
+          "p50": 103.517,
+          "p95": 194.356,
+          "max": 260.033
+        },
+        "non_thread_wall_ms": {
+          "n": 36,
+          "p50": 66.654,
+          "p95": 142.901,
+          "max": 147.747
+        }
+      }
+    }
+  },
+  {
+    "line": 3702,
+    "data": {
+      "window_wall_sec": 5.068,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 102.5,
+      "context": {
+        "wp": 252,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 32,
+        "live_mpc_calls": 32,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 32,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 32,
+        "cycles": 32,
+        "work_over_period": 32,
+        "fallback_owned_cycles": 32
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 32,
+          "p50": 158.036,
+          "p95": 237.529,
+          "max": 301.355
+        },
+        "sim_wall_ratio": {
+          "n": 32,
+          "p50": 1.008,
+          "p95": 1.152,
+          "max": 1.326
+        },
+        "live_mpc_iterations": {
+          "n": 32,
+          "p50": 200.0,
+          "p95": 200.0,
+          "max": 200.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 32,
+          "p50": 3.038,
+          "p95": 10.935,
+          "max": 11.164
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 32,
+          "p50": 1.411,
+          "p95": 2.144,
+          "max": 2.281
+        },
+        "live_mpc_wall_ms": {
+          "n": 32,
+          "p50": 23.566,
+          "p95": 31.689,
+          "max": 46.362
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 32,
+          "p50": 17.106,
+          "p95": 22.056,
+          "max": 22.335
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 32,
+          "p50": 19.405,
+          "p95": 28.297,
+          "max": 35.229
+        },
+        "command_gap_wall_ms": {
+          "n": 32,
+          "p50": 155.585,
+          "p95": 237.471,
+          "max": 301.3
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 32,
+          "p50": 150.0,
+          "p95": 285.0,
+          "max": 315.0
+        },
+        "work_wall_ms": {
+          "n": 32,
+          "p50": 154.517,
+          "p95": 237.413,
+          "max": 301.249
+        },
+        "work_thread_cpu_ms": {
+          "n": 32,
+          "p50": 64.378,
+          "p95": 80.68,
+          "max": 87.664
+        },
+        "rate_wait_wall_ms": {
+          "n": 32,
+          "p50": 0.025,
+          "p95": 0.04,
+          "max": 0.05
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 32,
+          "p50": 132.577,
+          "p95": 213.848,
+          "max": 281.306
+        },
+        "non_thread_wall_ms": {
+          "n": 32,
+          "p50": 89.464,
+          "p95": 156.881,
+          "max": 213.585
+        }
+      }
+    }
+  },
+  {
+    "line": 3779,
+    "data": {
+      "window_wall_sec": 5.0,
+      "pid": 342,
+      "period_ms": 25.0,
+      "process_cpu_pct": 103.7,
+      "context": {
+        "wp": 252,
+        "lane": null,
+        "path": "center",
+        "precomputed_l0": false
+      },
+      "counts": {
+        "live_mpc_solver:primal infeasible": 32,
+        "live_mpc_calls": 32,
+        "live_mpc:OSQP failed with status 'primal infeasible'": 32,
+        "live_mpc_prediction_fallback": 0,
+        "live_mpc_exception": 0,
+        "command_publishes": 32,
+        "cycles": 32,
+        "work_over_period": 32,
+        "fallback_owned_cycles": 32
+      },
+      "metrics": {
+        "cycle_wall_ms": {
+          "n": 32,
+          "p50": 160.3,
+          "p95": 264.767,
+          "max": 289.069
+        },
+        "sim_wall_ratio": {
+          "n": 32,
+          "p50": 0.995,
+          "p95": 1.12,
+          "max": 1.175
+        },
+        "live_mpc_iterations": {
+          "n": 32,
+          "p50": 200.0,
+          "p95": 200.0,
+          "max": 200.0
+        },
+        "live_mpc_solve_wall_ms": {
+          "n": 32,
+          "p50": 2.639,
+          "p95": 10.236,
+          "max": 11.685
+        },
+        "live_mpc_solve_thread_cpu_ms": {
+          "n": 32,
+          "p50": 1.332,
+          "p95": 2.219,
+          "max": 2.304
+        },
+        "live_mpc_wall_ms": {
+          "n": 32,
+          "p50": 20.964,
+          "p95": 35.967,
+          "max": 82.747
+        },
+        "live_mpc_thread_cpu_ms": {
+          "n": 32,
+          "p50": 14.27,
+          "p95": 21.332,
+          "max": 25.47
+        },
+        "live_mpc_non_solver_wall_ms": {
+          "n": 32,
+          "p50": 15.537,
+          "p95": 33.278,
+          "max": 71.087
+        },
+        "command_gap_wall_ms": {
+          "n": 32,
+          "p50": 160.362,
+          "p95": 264.44,
+          "max": 412.051
+        },
+        "command_stamp_age_sim_ms": {
+          "n": 32,
+          "p50": 160.0,
+          "p95": 260.0,
+          "max": 260.0
+        },
+        "work_wall_ms": {
+          "n": 32,
+          "p50": 169.912,
+          "p95": 264.586,
+          "max": 288.88
+        },
+        "work_thread_cpu_ms": {
+          "n": 32,
+          "p50": 65.114,
+          "p95": 79.48,
+          "max": 215.721
+        },
+        "rate_wait_wall_ms": {
+          "n": 32,
+          "p50": 0.023,
+          "p95": 0.049,
+          "max": 0.098
+        },
+        "non_mpc_work_wall_ms": {
+          "n": 32,
+          "p50": 149.716,
+          "p95": 214.932,
+          "max": 254.953
+        },
+        "non_thread_wall_ms": {
+          "n": 32,
+          "p50": 95.098,
+          "p95": 167.282,
+          "max": 185.106
+        }
+      }
+    }
+  }
+]

@@ -1,0 +1,886 @@
+{
+  "geometry": {
+    "max_curvature": 0.261020213631279,
+    "max_steering_deg": 17.25205037731716,
+    "max_steering_rate": 1.2910763348416798,
+    "design_speed_mps": 9.722222222222221,
+    "min_body_wall_clearance_m": 0.6672431489024016,
+    "min_body_grid_distance_m": 0.8,
+    "sweep_step_m": 0.05,
+    "body_width_m": 1.6,
+    "body_longitudinal_interval_m": [
+      -1.032,
+      1.554
+    ]
+  },
+  "load_ms": 2.760294999461621,
+  "reference_horizon_timing": {
+    "False": {
+      "median_ms": 0.039479,
+      "p95_ms": 0.042159
+    },
+    "True": {
+      "median_ms": 0.016909,
+      "p95_ms": 0.018555649999999996
+    }
+  },
+  "static_qp_checks": {
+    "False": [
+      {
+        "wp": 220,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.258471
+      },
+      {
+        "wp": 221,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.147977
+      },
+      {
+        "wp": 222,
+        "status": "solved",
+        "iterations": 225,
+        "solve_ms": 0.415568
+      },
+      {
+        "wp": 223,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.260513
+      },
+      {
+        "wp": 224,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.23227799999999998
+      },
+      {
+        "wp": 225,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.163796
+      },
+      {
+        "wp": 226,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.150446
+      },
+      {
+        "wp": 227,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.14336700000000002
+      },
+      {
+        "wp": 228,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.182282
+      },
+      {
+        "wp": 229,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.188862
+      },
+      {
+        "wp": 230,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.19009600000000001
+      },
+      {
+        "wp": 231,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.179224
+      },
+      {
+        "wp": 232,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.189354
+      },
+      {
+        "wp": 233,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.181165
+      },
+      {
+        "wp": 234,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.27693599999999996
+      },
+      {
+        "wp": 235,
+        "status": "solved",
+        "iterations": 250,
+        "solve_ms": 0.453342
+      },
+      {
+        "wp": 236,
+        "status": "solved",
+        "iterations": 325,
+        "solve_ms": 0.568507
+      },
+      {
+        "wp": 237,
+        "status": "solved",
+        "iterations": 250,
+        "solve_ms": 0.44964
+      },
+      {
+        "wp": 238,
+        "status": "solved",
+        "iterations": 175,
+        "solve_ms": 0.316525
+      },
+      {
+        "wp": 239,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.226586
+      },
+      {
+        "wp": 240,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.223461
+      },
+      {
+        "wp": 241,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.22415400000000002
+      },
+      {
+        "wp": 242,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.240676
+      },
+      {
+        "wp": 243,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.229726
+      },
+      {
+        "wp": 244,
+        "status": "solved",
+        "iterations": 200,
+        "solve_ms": 0.36286199999999996
+      },
+      {
+        "wp": 245,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.267682
+      },
+      {
+        "wp": 246,
+        "status": "solved inaccurate",
+        "iterations": 4000,
+        "solve_ms": 6.891986999999999
+      },
+      {
+        "wp": 247,
+        "status": "maximum iterations reached",
+        "iterations": 4000,
+        "solve_ms": 7.026408
+      },
+      {
+        "wp": 248,
+        "status": "maximum iterations reached",
+        "iterations": 4000,
+        "solve_ms": 7.2520880000000005
+      },
+      {
+        "wp": 249,
+        "status": "maximum iterations reached",
+        "iterations": 4000,
+        "solve_ms": 7.0466310000000005
+      },
+      {
+        "wp": 250,
+        "status": "maximum iterations reached",
+        "iterations": 4000,
+        "solve_ms": 7.010851000000001
+      },
+      {
+        "wp": 251,
+        "status": "maximum iterations reached",
+        "iterations": 4000,
+        "solve_ms": 7.222449
+      },
+      {
+        "wp": 252,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.206807
+      },
+      {
+        "wp": 253,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.143017
+      },
+      {
+        "wp": 254,
+        "status": "solved",
+        "iterations": 225,
+        "solve_ms": 0.40208099999999997
+      },
+      {
+        "wp": 255,
+        "status": "solved",
+        "iterations": 1475,
+        "solve_ms": 2.5021549999999997
+      },
+      {
+        "wp": 256,
+        "status": "solved",
+        "iterations": 1125,
+        "solve_ms": 1.90556
+      },
+      {
+        "wp": 257,
+        "status": "solved",
+        "iterations": 250,
+        "solve_ms": 0.439509
+      },
+      {
+        "wp": 258,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.17716800000000002
+      },
+      {
+        "wp": 259,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.17821800000000002
+      },
+      {
+        "wp": 260,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.195332
+      },
+      {
+        "wp": 261,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.18718900000000002
+      },
+      {
+        "wp": 262,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.185189
+      },
+      {
+        "wp": 263,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.181873
+      },
+      {
+        "wp": 264,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.179653
+      },
+      {
+        "wp": 265,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.179767
+      },
+      {
+        "wp": 266,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.190031
+      },
+      {
+        "wp": 267,
+        "status": "solved",
+        "iterations": 225,
+        "solve_ms": 0.39832799999999996
+      },
+      {
+        "wp": 268,
+        "status": "solved",
+        "iterations": 325,
+        "solve_ms": 0.562668
+      },
+      {
+        "wp": 269,
+        "status": "solved",
+        "iterations": 325,
+        "solve_ms": 0.571116
+      },
+      {
+        "wp": 270,
+        "status": "solved",
+        "iterations": 200,
+        "solve_ms": 0.38894
+      },
+      {
+        "wp": 271,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.225884
+      },
+      {
+        "wp": 272,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.18778499999999998
+      },
+      {
+        "wp": 273,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.176815
+      },
+      {
+        "wp": 274,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.182499
+      },
+      {
+        "wp": 275,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.140791
+      },
+      {
+        "wp": 276,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.13944900000000002
+      },
+      {
+        "wp": 277,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.252383
+      },
+      {
+        "wp": 278,
+        "status": "solved",
+        "iterations": 175,
+        "solve_ms": 0.321459
+      },
+      {
+        "wp": 279,
+        "status": "solved",
+        "iterations": 175,
+        "solve_ms": 0.313226
+      },
+      {
+        "wp": 280,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.20283099999999998
+      },
+      {
+        "wp": 281,
+        "status": "solved",
+        "iterations": 350,
+        "solve_ms": 0.653969
+      },
+      {
+        "wp": 282,
+        "status": "solved",
+        "iterations": 175,
+        "solve_ms": 0.322295
+      },
+      {
+        "wp": 283,
+        "status": "solved",
+        "iterations": 50,
+        "solve_ms": 0.09734300000000001
+      },
+      {
+        "wp": 284,
+        "status": "solved",
+        "iterations": 50,
+        "solve_ms": 0.110969
+      },
+      {
+        "wp": 285,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.14258200000000001
+      },
+      {
+        "wp": 286,
+        "status": "solved",
+        "iterations": 200,
+        "solve_ms": 0.370726
+      },
+      {
+        "wp": 287,
+        "status": "solved",
+        "iterations": 325,
+        "solve_ms": 0.57845
+      },
+      {
+        "wp": 288,
+        "status": "solved",
+        "iterations": 250,
+        "solve_ms": 0.438936
+      },
+      {
+        "wp": 289,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.177822
+      },
+      {
+        "wp": 290,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.137219
+      }
+    ],
+    "True": [
+      {
+        "wp": 220,
+        "status": "solved",
+        "iterations": 250,
+        "solve_ms": 0.458362
+      },
+      {
+        "wp": 221,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.144797
+      },
+      {
+        "wp": 222,
+        "status": "solved",
+        "iterations": 350,
+        "solve_ms": 0.611971
+      },
+      {
+        "wp": 223,
+        "status": "solved",
+        "iterations": 350,
+        "solve_ms": 0.5931960000000001
+      },
+      {
+        "wp": 224,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.191636
+      },
+      {
+        "wp": 225,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.139233
+      },
+      {
+        "wp": 226,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.141531
+      },
+      {
+        "wp": 227,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.14304899999999998
+      },
+      {
+        "wp": 228,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.138518
+      },
+      {
+        "wp": 229,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.143338
+      },
+      {
+        "wp": 230,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.140037
+      },
+      {
+        "wp": 231,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.146045
+      },
+      {
+        "wp": 232,
+        "status": "solved",
+        "iterations": 25,
+        "solve_ms": 0.052448999999999996
+      },
+      {
+        "wp": 233,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.156314
+      },
+      {
+        "wp": 234,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.221132
+      },
+      {
+        "wp": 235,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.222952
+      },
+      {
+        "wp": 236,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.26624899999999996
+      },
+      {
+        "wp": 237,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.26783599999999996
+      },
+      {
+        "wp": 238,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.224195
+      },
+      {
+        "wp": 239,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.227872
+      },
+      {
+        "wp": 240,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.240378
+      },
+      {
+        "wp": 241,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.225896
+      },
+      {
+        "wp": 242,
+        "status": "solved",
+        "iterations": 175,
+        "solve_ms": 0.31543800000000005
+      },
+      {
+        "wp": 243,
+        "status": "solved",
+        "iterations": 750,
+        "solve_ms": 1.289108
+      },
+      {
+        "wp": 244,
+        "status": "solved",
+        "iterations": 2000,
+        "solve_ms": 3.466866
+      },
+      {
+        "wp": 245,
+        "status": "solved inaccurate",
+        "iterations": 4000,
+        "solve_ms": 7.087144
+      },
+      {
+        "wp": 246,
+        "status": "solved inaccurate",
+        "iterations": 4000,
+        "solve_ms": 7.209456
+      },
+      {
+        "wp": 247,
+        "status": "maximum iterations reached",
+        "iterations": 4000,
+        "solve_ms": 7.309199
+      },
+      {
+        "wp": 248,
+        "status": "maximum iterations reached",
+        "iterations": 4000,
+        "solve_ms": 7.4091640000000005
+      },
+      {
+        "wp": 249,
+        "status": "primal infeasible",
+        "iterations": 700,
+        "solve_ms": 1.2869540000000002
+      },
+      {
+        "wp": 250,
+        "status": "primal infeasible",
+        "iterations": 1900,
+        "solve_ms": 3.616911
+      },
+      {
+        "wp": 251,
+        "status": "maximum iterations reached",
+        "iterations": 4000,
+        "solve_ms": 7.445005999999999
+      },
+      {
+        "wp": 252,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.146147
+      },
+      {
+        "wp": 253,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.141226
+      },
+      {
+        "wp": 254,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.27802000000000004
+      },
+      {
+        "wp": 255,
+        "status": "solved",
+        "iterations": 750,
+        "solve_ms": 1.283195
+      },
+      {
+        "wp": 256,
+        "status": "solved",
+        "iterations": 375,
+        "solve_ms": 0.662624
+      },
+      {
+        "wp": 257,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.230086
+      },
+      {
+        "wp": 258,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.144911
+      },
+      {
+        "wp": 259,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.147744
+      },
+      {
+        "wp": 260,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.231021
+      },
+      {
+        "wp": 261,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.14660399999999998
+      },
+      {
+        "wp": 262,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.22242599999999998
+      },
+      {
+        "wp": 263,
+        "status": "solved",
+        "iterations": 25,
+        "solve_ms": 0.05067
+      },
+      {
+        "wp": 264,
+        "status": "solved",
+        "iterations": 25,
+        "solve_ms": 0.05087800000000001
+      },
+      {
+        "wp": 265,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.137425
+      },
+      {
+        "wp": 266,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.183004
+      },
+      {
+        "wp": 267,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.183194
+      },
+      {
+        "wp": 268,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.287249
+      },
+      {
+        "wp": 269,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.276549
+      },
+      {
+        "wp": 270,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.231969
+      },
+      {
+        "wp": 271,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.225649
+      },
+      {
+        "wp": 272,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.23172700000000002
+      },
+      {
+        "wp": 273,
+        "status": "solved",
+        "iterations": 50,
+        "solve_ms": 0.09692999999999999
+      },
+      {
+        "wp": 274,
+        "status": "solved",
+        "iterations": 50,
+        "solve_ms": 0.097241
+      },
+      {
+        "wp": 275,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.155865
+      },
+      {
+        "wp": 276,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.19448
+      },
+      {
+        "wp": 277,
+        "status": "solved",
+        "iterations": 75,
+        "solve_ms": 0.139101
+      },
+      {
+        "wp": 278,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.185389
+      },
+      {
+        "wp": 279,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.22350899999999999
+      },
+      {
+        "wp": 280,
+        "status": "solved",
+        "iterations": 200,
+        "solve_ms": 0.36837600000000004
+      },
+      {
+        "wp": 281,
+        "status": "solved",
+        "iterations": 175,
+        "solve_ms": 0.311693
+      },
+      {
+        "wp": 282,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.188743
+      },
+      {
+        "wp": 283,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.18246
+      },
+      {
+        "wp": 284,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.18658999999999998
+      },
+      {
+        "wp": 285,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.180296
+      },
+      {
+        "wp": 286,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.18340599999999999
+      },
+      {
+        "wp": 287,
+        "status": "solved",
+        "iterations": 175,
+        "solve_ms": 0.310304
+      },
+      {
+        "wp": 288,
+        "status": "solved",
+        "iterations": 150,
+        "solve_ms": 0.301749
+      },
+      {
+        "wp": 289,
+        "status": "solved",
+        "iterations": 100,
+        "solve_ms": 0.185314
+      },
+      {
+        "wp": 290,
+        "status": "solved",
+        "iterations": 125,
+        "solve_ms": 0.231835
+      }
+    ]
+  },
+  "scope": "Static poses on candidate, original MPC bounds/settings, no traffic, no AWSIM or closed-loop validation"
+}

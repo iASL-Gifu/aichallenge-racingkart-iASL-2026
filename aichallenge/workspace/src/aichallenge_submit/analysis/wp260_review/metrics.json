@@ -1,0 +1,59 @@
+{
+  "margin": 0.7,
+  "kappa_limit": 0.2989141639677151,
+  "stats": {
+    "Center": {
+      "max_abs_curvature": 0.20271821604540882,
+      "wp": 261,
+      "required_steer_deg": 12.42680172834699,
+      "max_steer_rate_at_7_5_mps": 0.2591086143057204,
+      "exceeding_18deg_wps": []
+    },
+    "L0": {
+      "max_abs_curvature": 0.4908001117969857,
+      "wp": 257,
+      "required_steer_deg": 28.079908574395777,
+      "max_steer_rate_at_7_5_mps": 4.497360388175197,
+      "exceeding_18deg_wps": [
+        251,
+        256,
+        257,
+        260,
+        263,
+        266
+      ]
+    },
+    "L1": {
+      "max_abs_curvature": 0.5481652259650477,
+      "wp": 251,
+      "required_steer_deg": 30.788836813368995,
+      "max_steer_rate_at_7_5_mps": 4.101119957211924,
+      "exceeding_18deg_wps": [
+        230,
+        251,
+        253,
+        256,
+        265,
+        277
+      ]
+    },
+    "L2": {
+      "max_abs_curvature": 0.5984117786662385,
+      "wp": 251,
+      "required_steer_deg": 33.04293933398073,
+      "max_steer_rate_at_7_5_mps": 4.052931706766201,
+      "exceeding_18deg_wps": [
+        230,
+        232,
+        247,
+        249,
+        250,
+        251,
+        253,
+        256,
+        265,
+        277
+      ]
+    }
+  }
+}

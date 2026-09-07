@@ -1,0 +1,8 @@
+{
+  "points": 354,
+  "queries": 354,
+  "max_absolute_error": 0.0,
+  "scalar_us_per_projection": 74.3863728823302,
+  "prepared_no_cache_us_per_projection": 10.318480230444296,
+  "exact_cache_hit_us_per_projection": 0.9359378542943126
+}

@@ -2,6 +2,7 @@
 
 import yaml
 import math
+import time
 from typing import List, Tuple, Optional, NamedTuple
 import dataclasses
 from scipy import sparse
@@ -613,6 +614,23 @@ class MPCController(Node):
             custom_csv_path=center_csv,
             bounds_csv_path=center_bounds_csv
         )
+        profile_csv = getattr(cfg_ref_path, 'l0_precomputed_reference_csv', '')
+        if profile_csv:
+            from multi_purpose_mpc_ros.core.precomputed_lane_reference import (
+                PrecomputedLaneReference, design_parameters,
+            )
+            try:
+                self._reference_pathN_center.precomputed_lane_reference = (
+                    PrecomputedLaneReference.load(
+                        self.in_pkg_share(profile_csv), self._reference_pathN_center,
+                        self.in_pkg_share(''), design_parameters(self._cfg),
+                        heading_gain=float(getattr(
+                            cfg_ref_path, 'l0_precomputed_heading_gain', 0.25))))
+                self.get_logger().info(
+                    f'[PrecomputedL0] loaded objective-only reference: {profile_csv}')
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                self.get_logger().error(
+                    f'[PrecomputedL0] disabled; using original lane reference: {error}')
         unsafe_static_fallback = bool(getattr(
             cfg_ref_path, "unsafe_static_fallback_on_narrow", False))
         self._reference_pathN_race.unsafe_static_fallback_on_narrow = (
@@ -650,6 +668,13 @@ class MPCController(Node):
             self._center_arc_cumulative,
             self._center_arc_total_length,
         ) = build_closed_path_arc_lengths(center_arc_points)
+        # Projection geometry is immutable; lane/boundary updates do not alter it.
+        from .core.closed_path_projector import ClosedPathProjector
+        self._center_arc_points = tuple(self._center_arc_points)
+        self._center_arc_cumulative = tuple(self._center_arc_cumulative)
+        self._center_projector = ClosedPathProjector(
+            self._center_arc_points, self._center_arc_cumulative,
+            self._center_arc_total_length)
         self._center_arc_mean_wp_spacing = (
             self._center_arc_total_length / max(len(center_arc_points), 1)
         )
@@ -1792,6 +1817,11 @@ class MPCController(Node):
         cmd.lateral.steering_tire_angle *= (
             self._mpc_cfg.steering_tire_angle_gain_var)
         self._command_pub.publish(cmd)
+        diagnostics = getattr(self, '_runtime_diagnostics', None)
+        if diagnostics is not None:
+            diagnostics.published()
+            diagnostics.samples['command_stamp_age_sim_ms'].append(
+                (self.get_clock().now().nanoseconds-stamp.nanoseconds)/1e6)
 
     def _predict_pose_after_steering_delay(
         self, pose: Pose2D, speed: float, now_sec: float,
@@ -2045,6 +2075,14 @@ class MPCController(Node):
 
     def _relative_lane_vehicle_samples(self, pose, ego_speed: float):
         """Return current and predicted lane/longitudinal samples for V2X cars."""
+        work = getattr(self, '_traffic_work', None)
+        key = None
+        if work is not None:
+            from multi_purpose_mpc_ros.core.traffic_work import relative_samples_key
+            key = relative_samples_key(self, pose, ego_speed)
+            if key in work.relative_samples:
+                work.relative_hits += 1
+                return list(work.relative_samples[key])
         samples = []
         prediction_sec = self._prepass_lane_fallback_prediction_sec
         ego_future_x = pose.x + ego_speed * math.cos(pose.theta) * prediction_sec
@@ -2072,6 +2110,8 @@ class MPCController(Node):
             if future_longitudinal is None:
                 continue
             samples.append((vehicle_id, future_lane_idx, future_longitudinal))
+        if work is not None:
+            work.relative_samples[key] = tuple(samples)
         return samples
 
     def _committed_lane_traffic_evidence(self, pose, ego_speed, lane_idx, conflicts, target_id, *, remember=True):
@@ -3745,6 +3785,15 @@ class MPCController(Node):
         target_buf = self._v2x_tracker._samples.get(target_id)
         if not target_buf:
             return {}, None
+        work = getattr(self, '_traffic_work', None)
+        key = None
+        if work is not None:
+            from multi_purpose_mpc_ros.core.traffic_work import passage_key
+            key = passage_key(self, target_id, pose)
+            if key in work.passages:
+                work.hits += 1
+                lanes, distance = work.passages[key]
+                return dict(lanes), distance
         _, target_x, target_y = target_buf[-1]
         min_space = (
             0.5 * float(self._cfg.bicycle_model.width)
@@ -3852,7 +3901,10 @@ class MPCController(Node):
             else:
                 self.get_logger().info(
                     diagnostic_message, throttle_duration_sec=1.0)
-        return passage, math.hypot(target_x - pose.x, target_y - pose.y)
+        distance = math.hypot(target_x - pose.x, target_y - pose.y)
+        if work is not None:
+            work.passages[key] = (dict(passage), distance)
+        return passage, distance
 
     def _latched_target_passage(self, pose):
         """Return passable outer lanes and distance for the latched target only."""
@@ -3865,6 +3917,27 @@ class MPCController(Node):
         if active in (0, 2) and lane_evaluation.propose_lane(
                 preferred, passage, conflicts, active_lane=active) == active:
             return active
+        # Only future ranking is held. Primary passage/conflicts above and
+        # below are current; the caller still applies restrictions and Shadow.
+        work = getattr(self, '_traffic_work', None)
+        proposal_key = None
+        now = None
+        if work is not None:
+            now = float(self.get_clock().now().nanoseconds) / 1e9
+            proposal_key = (
+                target_id, preferred, active,
+                tuple((lane, bool(passage.get(lane, False)), lane in conflicts,
+                       tuple((kind, tuple(conflicts.get(lane, {}).get(kind, ())))
+                             for kind in ('front', 'side', 'rear')))
+                      for lane in (0, 2)),
+                tuple((vid, self._v2x_tracker.has_velocity_estimate(vid))
+                      for vid in self._v2x_tracker.active_vehicle_ids()),
+                id(self._reference_pathN_center),
+                self._overtake_latch_max_distance,
+            )
+            held, proposal = work.held_proposal(proposal_key, now)
+            if held:
+                return proposal
         rows = []
         unknown = []
         for vid in self._v2x_tracker.active_vehicle_ids():
@@ -3888,6 +3961,8 @@ class MPCController(Node):
                 vid, distance, tuple(lane for lane in (0, 2)
                                      if not other_passage.get(lane, False))))
         proposed = lane_evaluation.propose_lane(preferred, passage, conflicts, rows)
+        if work is not None:
+            work.remember_proposal(proposal_key, now, proposed)
         self.get_logger().info(
             f"[TrafficLaneProposal] target={target_id}, proposed={proposed}, "
             f"future_obstructions={rows}, unknown={unknown}; ranking_only=True",
@@ -4060,6 +4135,9 @@ class MPCController(Node):
 
     def _reset_overtake_commit_probe(self):
         """Discard a pending L0/L2 pre-commit feasibility check."""
+        work = getattr(self, '_traffic_work', None)
+        if work is not None:
+            work.reset_probe('overtake')
         self._overtake.probe.vehicle_id = None
         self._overtake.probe.lane_idx = None
         self._overtake.probe.success_cycles = 0
@@ -4080,6 +4158,9 @@ class MPCController(Node):
             self._overtake.probe.vehicle_id != vehicle_id
             or self._overtake.probe.lane_idx != int(lane_idx)
         ):
+            work = getattr(self, '_traffic_work', None)
+            if work is not None:
+                work.reset_probe('overtake')
             self._overtake.probe.vehicle_id = vehicle_id
             self._overtake.probe.lane_idx = int(lane_idx)
             self._overtake.probe.success_cycles = 0
@@ -4159,6 +4240,27 @@ class MPCController(Node):
             self._overtake.probe.confirmed_at = None
             return
 
+        work = getattr(self, '_traffic_work', None)
+        if work is not None:
+            if (self._overtake.committed
+                    and self._overtake.target_id == vehicle_id
+                    and self._overtake.requested_lane == lane_idx
+                    and self._overtake.verification.vehicle_id == vehicle_id
+                    and self._overtake.verification.lane_idx == lane_idx):
+                work.probe_skips += 1
+                return
+            probe_now = float(self.get_clock().now().nanoseconds) / 1e9
+            # Confirmation already has a bounded lifetime. Refresh at most
+            # every 100 ms inside that lifetime; never move its timestamp on
+            # a skipped solve. Unconfirmed consecutive successes stay fast.
+            if (self._overtake.probe.confirmed
+                    and self._overtake.probe.confirmed_at is not None
+                    and 0 <= probe_now - self._overtake.probe.confirmed_at
+                        < min(.1, self._overtake_commit_probe_freshness_sec * .5)):
+                work.probe_skips += 1
+                return
+            if not work.probe_due(('overtake', vehicle_id, lane_idx), probe_now):
+                return
         probe = self._mpcN_overtake_commit_probe
         collapse_detail = None
         width_failure = None
@@ -4196,6 +4298,8 @@ class MPCController(Node):
                 forward_width_valid=width_valid,
             )
 
+        if work is not None:
+            work.record_probe(('overtake', vehicle_id, lane_idx), probe_now, success)
         was_confirmed = self._overtake.probe.confirmed
         self._overtake.probe.success_cycles = (
             min(
@@ -4496,6 +4600,10 @@ class MPCController(Node):
                 return candidate_wp.x, candidate_wp.y
             upper, lower = lanes[lane_idx]
             lateral_offset = 0.5 * (upper + lower)
+            profile = getattr(self._reference_path, 'precomputed_lane_reference', None)
+            sample = None if profile is None else profile.sample(candidate_wp_id, lane_idx)
+            if sample is not None:
+                lateral_offset = float(sample[0])
             normal_angle = candidate_wp.psi + math.pi / 2.0
             return (
                 candidate_wp.x + lateral_offset * math.cos(normal_angle),
@@ -4679,6 +4787,9 @@ class MPCController(Node):
             self._reset_race_rejoin_handoff()
             self._race_rejoin_retry_not_before = now_sec + self._race_rejoin_retry_backoff_sec
             return
+        work = getattr(self, '_traffic_work', None)
+        if work is not None and not work.probe_due(('race_rejoin',), now_sec):
+            return
         with self._probe_corridor(self._carN_race, None):
             self._carN_race.update_states(
                 predicted_pose.x, predicted_pose.y, predicted_pose.theta)
@@ -4695,6 +4806,8 @@ class MPCController(Node):
             and not self._mpcN_race.time_budget_exceeded
             and bool(getattr(
                 self._mpcN_race, "last_solution_accurate", False)))
+        if work is not None:
+            work.record_probe(('race_rejoin',), now_sec, success)
         self._race_rejoin_probe_success_cycles = (
             self._race_rejoin_probe_success_cycles + 1 if success else 0)
         if self._race_rejoin_probe_success_cycles >= self._race_rejoin_probe_required_success_cycles:
@@ -7149,6 +7262,9 @@ class MPCController(Node):
 
     def _center_frenet(self, x: float, y: float):
         """Return Center arc position and signed lateral offset."""
+        projector = getattr(self, "_center_projector", None)
+        if projector is not None:
+            return projector.project(x, y)
         return project_to_closed_path_frenet(
             x,
             y,
@@ -7698,7 +7814,43 @@ class MPCController(Node):
         )
 
 
+    def _runtime_checkpoint(self, name):
+        diagnostics = getattr(self, '_runtime_diagnostics', None)
+        if diagnostics is not None:
+            diagnostics.checkpoint(name)
+
+    def _run_control_with_diagnostics(self):
+        diagnostics = getattr(self, '_runtime_diagnostics', None)
+        if diagnostics is None:
+            return self._control()
+        diagnostics.begin(self.get_clock().now().nanoseconds / 1e9)
+        try:
+            return self._control()
+        finally:
+            diagnostics.finish(getattr(self, '_steering_fallback_armed', False))
+            lane = getattr(self._car.reference_path, 'target_lane_idx', None)
+            projector = getattr(self, '_center_projector', None)
+            message = diagnostics.report({
+                'wp': int(self._car.wp_id),
+                'lane': None if lane is None else int(lane),
+                'path': 'center' if self._mpc is self._mpcN_center else 'race',
+                'traffic_relative_hits_total': getattr(getattr(self, '_traffic_work', None), 'relative_hits', 0),
+                'traffic_passage_hits_total': getattr(getattr(self, '_traffic_work', None), 'hits', 0),
+                'traffic_proposal_hits_total': getattr(getattr(self, '_traffic_work', None), 'proposal_hits', 0),
+                'traffic_probe_skips_total': getattr(getattr(self, '_traffic_work', None), 'probe_skips', 0),
+                'center_projection_hits_total': getattr(projector, 'hits', 0),
+                'center_projection_misses_total': getattr(projector, 'misses', 0),
+                'precomputed_l0': getattr(
+                    self._reference_pathN_center, 'precomputed_lane_reference', None) is not None,
+            })
+            if message:
+                self.get_logger().info(message)
+
     def _control(self):
+        from multi_purpose_mpc_ros.core.traffic_work import TrafficWork
+        if not hasattr(self, '_traffic_work'):
+            self._traffic_work = TrafficWork()
+        self._traffic_work.begin_cycle()
         # No pre-solve/early-return path may reuse last cycle's release proof.
         self._live_prediction_context = None
         now = self.get_clock().now()
@@ -7713,7 +7865,12 @@ class MPCController(Node):
             self._stats.record()
 
         # 制御周期を維持
+        wait_started = time.perf_counter()
         self._control_rate.sleep()
+        diagnostics = getattr(self, '_runtime_diagnostics', None)
+        if diagnostics is not None:
+            diagnostics.wait_ms += (time.perf_counter()-wait_started)*1000
+            diagnostics.start_stages()
 
         self._collision_evidence_hold = False
 
@@ -7734,6 +7891,8 @@ class MPCController(Node):
                 self._reference_path.reset_dynamic_constraints()
                 self._v2x_applied_generation = self._v2x_tracker.generation
                 self._obstacles_updated = False
+
+        self._runtime_checkpoint('v2x_map')
 
         if self._loop % 100 == 0:
             # update reference path
@@ -7771,6 +7930,7 @@ class MPCController(Node):
                 self._collision_ego_alignment = (dx*c+dy*s,-dx*s+dy*c,measured.yaw-pose.theta,measured.stamp)
         if self.USE_OBSTACLE_AVOIDANCE:
             self._publish_collision_bodies(pose)
+        self._runtime_checkpoint('pose_body_visualization')
         v = self._odom.twist.twist.linear.x
 
         # Capture the L0 grid layout before any opponent-driven trajectory
@@ -8686,6 +8846,7 @@ class MPCController(Node):
         self._car.update_states(
             predicted_pose.x, predicted_pose.y, predicted_pose.theta)
         wp = self._car.wp_id  # update_states 内で get_closest_waypoint が実行済み
+        self._runtime_checkpoint('pre_lane_state')
 
         # Initial race-start boost. Grounded/Ready only arms it. Turbo and the
         # duration timer start once measured forward motion begins. A later
@@ -11641,9 +11802,11 @@ class MPCController(Node):
             self._reference_path.set_v_ref(
                 [self._follow_escape_creep_speed]*len(self._reference_path.waypoints))
 
+        self._runtime_checkpoint('lane_decision')
         # MPCの実行
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
+        self._runtime_checkpoint('live_mpc')
         self._live_prediction_context = (
             self._mpc, self._mpc.current_prediction,
             self._reference_path.target_lane_idx, self._reference_path,
@@ -13869,12 +14032,14 @@ class MPCController(Node):
         self._last_u[0] = u[0]
         self._last_u[1] = u[1]
 
+        self._runtime_checkpoint('safety_fallback')
         # update car state (use v for feedback actual speed)
         self._car.drive([v, u[1]])
 
         # Publish control command.  Keep this active during stuck recovery because
         # the known-working teleop path drives AWSIM through control_cmd directly.
         self._publish_control_command(now, u, acc, bug_acc_enabled)
+        self._runtime_checkpoint('command_publish')
 
         # Log states
         self._sim_logger.log(self._car, u, t)
@@ -13923,12 +14088,56 @@ class MPCController(Node):
         self._t_start = self.get_clock().now()
         self._last_t = self._t_start
 
+        from multi_purpose_mpc_ros.core.runtime_diagnostics import (
+            RuntimeDiagnostics, runtime_identity,
+        )
+        import inspect
+        self.get_logger().info(runtime_identity({
+            'controller': __file__, 'mpc': inspect.getfile(MPC),
+            'diagnostics': inspect.getfile(RuntimeDiagnostics),
+            'config': self._config_path,
+        }))
+        self._runtime_diagnostics = None
+        if bool(getattr(self._cfg.mpc, 'runtime_diagnostics_enabled', True)):
+            self._runtime_diagnostics = RuntimeDiagnostics(
+                1.0/self._mpc_cfg.control_rate,
+                getattr(self._cfg.mpc, 'runtime_diagnostics_interval_sec', 5.0))
+            for method in (
+                '_vehicle_passage',
+                '_relative_lane_vehicle_samples',
+                '_propose_traffic_lane',
+                '_committed_lane_traffic_evidence',
+                '_committed_target_body_overlap',
+                '_prediction_collision_with_vehicle',
+                '_center_path_collision_prediction',
+                '_slow_pass_spacing_release_ids',
+                '_current_center_envelopes_are_separated',
+                '_follow_escape_lane_traffic_is_clear',
+                '_pure_pursuit_feedback_is_safe',
+                '_active_path_pure_pursuit_feedback',
+                '_update_overtake_transition_soft_reference',
+                '_publish_collision_bodies',
+            ):
+                self._runtime_diagnostics.instrument(self, method, "controller." + method)
+            for name, candidate in vars(self).copy().items():
+                if isinstance(candidate, MPC):
+                    candidate._runtime_diagnostics = self._runtime_diagnostics
+                    candidate._runtime_role = (
+                        lambda candidate=candidate: 'live_mpc'
+                        if (self._mpc is candidate and candidate.model.reference_path
+                            is self._reference_path) else 'probe_mpc')
+                    for method in ('_init_problem', 'update_prediction'):
+                        self._runtime_diagnostics.instrument(
+                            candidate, method,
+                            lambda candidate=candidate, method=method:
+                                candidate._runtime_role() + '.' + method)
+
         self.get_logger().info("----------------------")
         self.get_logger().info("START!")
         self.get_logger().info("----------------------")
 
         while rclpy.ok() and (not self._sim_logger.stop_requested()):
-            self._control()
+            self._run_control_with_diagnostics()
 
     def stop(self):
         # Wait for stopping
@@ -13938,7 +14147,7 @@ class MPCController(Node):
         timeout_time = self.get_clock().now() + rclpy.time.Duration(seconds=5)
         while self._odom.twist.twist.linear.x > 0.1 and self.get_clock().now() < timeout_time:
             self._enable_control = False
-            self._control()
+            self._run_control_with_diagnostics()
 
         # Publish zero command to stop the car completely
         zero_cmd = self._create_ackerman_control_command(self.get_clock().now(), [0.0, 0.0], 0.0, False)

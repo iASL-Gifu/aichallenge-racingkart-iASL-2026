@@ -20,6 +20,10 @@ obstacles:
   radius: 1.25
 
 reference_path:
+  # 起動時に一度ロード。空文字で従来のL0中点参照へ戻す。
+  l0_precomputed_reference_csv: "env/centerline/l0_reference_wp220_290.csv"
+  # 既存Center向き目標に25%を反映。禁止区間のMPC可解性を保証する設定ではない。
+  l0_precomputed_heading_gain: 0.25
   # 比較実験用。trueでは車幅未満の動的空間を静的境界へ戻すため衝突リスクがある。
   unsafe_static_fallback_on_narrow: true
   update_by_topic: false # When true, 'circle' must be false
@@ -205,6 +209,8 @@ bicycle_model:
   width: 1.6   # +safety margin
 
 mpc:
+  runtime_diagnostics_enabled: true
+  runtime_diagnostics_interval_sec: 5.0 # 壁時計。全周期・失敗・Shadowを集計
   N: 15
   # Q: [e_y(横ずれ), e_psi(ヨー角ずれ), t]
   # R: [v, delta]

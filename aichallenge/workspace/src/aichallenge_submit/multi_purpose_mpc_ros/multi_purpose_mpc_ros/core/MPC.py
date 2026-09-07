@@ -17,6 +17,7 @@ from multi_purpose_mpc_ros.core.reference_path import (
     collapsed_constraint_snapshot,
     retain_first_collapsed_constraint,
 )
+from multi_purpose_mpc_ros.core.precomputed_lane_reference import apply_precomputed_heading
 
 # Colors
 PREDICTION = '#BA4A00'
@@ -567,6 +568,10 @@ class MPC:
             values if values is not None and values.size else None)
 
     def _compute_lane_center(self, wp_id: int, target_lane: int) -> float:
+        profile = getattr(self.model.reference_path, 'precomputed_lane_reference', None)
+        sample = None if profile is None else profile.sample(wp_id, target_lane)
+        if sample is not None:
+            return float(sample[0])
         lanes = self.model.reference_path.get_lane_bounds(wp_id)
         if not lanes or target_lane >= len(lanes):
             return 0.0
@@ -584,7 +589,10 @@ class MPC:
         Initialize optimization problem for current time step with steering rate constraints.
         """
 
+        detail_diag = getattr(self, '_runtime_diagnostics', None)
+        detail_enabled = detail_diag is not None and detail_diag.recording_detail()
         t_start = time.perf_counter()
+        cpu_start = time.thread_time() if detail_enabled else 0.
         self._current_constraint_bounds_invalid = False
         
         # 既存の制約設定
@@ -661,6 +669,7 @@ class MPC:
 
         # Iterate over horizon
         t_pref = time.perf_counter()
+        cpu_pref = time.thread_time() if detail_enabled else 0.
 
         for n in range(N):
             # Get waypoint information
@@ -731,6 +740,7 @@ class MPC:
             xr[N * self.nx] = self._compute_lane_center(self.model.wp_id + N, target_lane)
 
         t_linearize = time.perf_counter()
+        cpu_linearize = time.thread_time() if detail_enabled else 0.
 
         # Update path constraints
         self._constraint_wp_ids = np.array([
@@ -915,7 +925,17 @@ class MPC:
             xr[N * self.nx] = midpoint + np.clip(
                 l1_center - midpoint, -limit, limit)
 
+        # Apply only after hard/soft/Hybrid priority resolved the lateral target.
+        # The Center coordinate basis, affine dynamics and hard bounds remain
+        # unchanged; the offline curve is an objective, not a new corridor.
+        apply_precomputed_heading(
+            self.model.reference_path, self.model.wp_id,
+            xr[0::self.nx], xr[1::self.nx], target_lane,
+            self.soft_target_lane_idx, self.soft_lateral_targets is not None,
+            self.lane_transition_weights)
+
         t_constraints = time.perf_counter()
+        cpu_constraints = time.thread_time() if detail_enabled else 0.
 
         # Get equality matrix
         A_sparse = sparse.csc_matrix(
@@ -933,6 +953,7 @@ class MPC:
         A_full = sparse.vstack([Aeq, A_inequality], format='csc')
 
         t_matrix = time.perf_counter()
+        cpu_matrix = time.thread_time() if detail_enabled else 0.
 
         # 境界制約の構築
         x0 = np.array(self.model.spatial_state[:])
@@ -949,6 +970,7 @@ class MPC:
         uineq_rate = max_delta_change * np.ones(self.n_rate_constraints)
 
         t_constraints2 = time.perf_counter()
+        cpu_constraints2 = time.thread_time() if detail_enabled else 0.
 
         # 全ての境界を結合
         l = np.hstack([leq, lineq_basic, lineq_rate])
@@ -964,6 +986,7 @@ class MPC:
         ])
 
         t_vector = time.perf_counter()
+        cpu_vector = time.thread_time() if detail_enabled else 0.
 
         # オプティマイザの設定
         if not self.osqp_initialized:
@@ -989,6 +1012,22 @@ class MPC:
             self.optimizer.update(q=q, l=l, u=u, Ax=A_full.data)
 
         t_update = time.perf_counter()
+        cpu_update = time.thread_time() if detail_enabled else 0.
+        if detail_enabled:
+            role = self._runtime_role()
+            phases = (
+                ('reference', t_start, t_pref, cpu_start, cpu_pref),
+                ('linearize', t_pref, t_linearize, cpu_pref, cpu_linearize),
+                ('boundaries', t_linearize, t_constraints, cpu_linearize, cpu_constraints),
+                ('matrix', t_constraints, t_matrix, cpu_constraints, cpu_matrix),
+                ('constraint_vectors', t_matrix, t_constraints2, cpu_matrix, cpu_constraints2),
+                ('cost_vectors', t_constraints2, t_vector, cpu_constraints2, cpu_vector),
+                ('optimizer_setup_update', t_vector, t_update, cpu_vector, cpu_update),
+            )
+            for name, start, end, cpu0, cpu1 in phases:
+                detail_diag.record_detail(role + '.prepare.' + name,
+                                          (end-start)*1000, (cpu1-cpu0)*1000)
+
         self.startup +=(t_pref-t_start)
         self.linearize +=(t_linearize-t_pref)
         self.path_constraints +=(t_constraints-t_linearize)
@@ -1020,7 +1059,45 @@ class MPC:
             self.vector = 0
             self.update = 0
                         
+    def _solve_with_runtime_timing(self):
+        diagnostics = getattr(self, '_runtime_diagnostics', None)
+        if diagnostics is None or not diagnostics.active:
+            return self.optimizer.solve()
+        started, cpu_started = time.perf_counter(), time.thread_time()
+        try:
+            result = self.optimizer.solve()
+            diagnostics.samples[self._runtime_role()+'_iterations'].append(result.info.iter)
+            diagnostics.counts[self._runtime_role()+'_solver:'+str(result.info.status)] += 1
+            return result
+        finally:
+            elapsed = (time.perf_counter()-started)*1000
+            self._runtime_solver_ms += elapsed
+            role = self._runtime_role()
+            diagnostics.samples[role+'_solve_wall_ms'].append(elapsed)
+            diagnostics.samples[role+'_solve_thread_cpu_ms'].append(
+                (time.thread_time()-cpu_started)*1000)
+
     def get_control(self) -> Tuple[np.ndarray, float]:
+        diagnostics = getattr(self, '_runtime_diagnostics', None)
+        if diagnostics is None or not diagnostics.active:
+            return self._get_control_impl()
+        started, cpu_started = time.perf_counter(), time.thread_time()
+        self._runtime_solver_ms = 0.0
+        error = True
+        try:
+            result = self._get_control_impl()
+            error = False
+            return result
+        finally:
+            diagnostics.record_mpc(
+                self._runtime_role(), (time.perf_counter()-started)*1000,
+                (time.thread_time()-cpu_started)*1000,
+                getattr(self, 'failure_reason', None) or getattr(self, 'last_solution_status', None),
+                getattr(self, 'used_prediction_fallback', False), error)
+            diagnostics.samples[self._runtime_role()+'_non_solver_wall_ms'].append(
+                max(0., (time.perf_counter()-started)*1000-self._runtime_solver_ms))
+
+    def _get_control_impl(self) -> Tuple[np.ndarray, float]:
         """
         Get control signal given the current position of the car.
         """
@@ -1061,7 +1138,7 @@ class MPC:
 
             dec = None
             if not self._current_constraint_bounds_invalid:
-                dec = self.optimizer.solve()
+                dec = self._solve_with_runtime_timing()
             if self.debug_counter % 20 == 0:
                 print(
                     "invalid constraint bounds"
@@ -1124,7 +1201,7 @@ class MPC:
                     if self._current_constraint_bounds_invalid:
                         dec = None
                         continue
-                    dec = self.optimizer.solve()
+                    dec = self._solve_with_runtime_timing()
                     t2 = time.perf_counter()
 
                     if is_valid_osqp_solution(dec):
