@@ -569,6 +569,8 @@ class MPCController(Node):
                 cfg_mpc, "lane_constraint_connection_points", 10)), 1)
 
 
+            from multi_purpose_mpc_ros.core.wall_constraints import longitudinal_extent
+            mpc.wall_body_half_length = longitudinal_extent(self._cfg)
             return mpc_cfg, mpc
 
         def compute_speed_profile(car: BicycleModel, mpc_config: MPCConfig) -> None:
@@ -1258,10 +1260,14 @@ class MPCController(Node):
             restart_cfg, "lead_moving_speed", 0.5))
         self._follow_restart_ego_stopped_speed = float(getattr(
             restart_cfg, "ego_stopped_speed", 0.3))
-        self._follow_restart_min_gap = float(getattr(
-            restart_cfg, "min_gap", 6.0))
-        self._follow_restart_start_min_gap = float(getattr(
-            restart_cfg, "start_min_gap", 4.0))
+        self._follow_minimum_body_gap = max(float(getattr(
+            restart_cfg, "minimum_body_gap", 1.0)), 0.0)
+        self._follow_restart_min_gap = max(float(getattr(
+            restart_cfg, "min_body_gap", 3.0)), self._follow_minimum_body_gap)
+        self._follow_restart_start_min_gap = max(float(getattr(
+            restart_cfg, "start_min_body_gap", 1.0)), self._follow_minimum_body_gap)
+        self._follow_observation_max_age = max(float(getattr(
+            restart_cfg, "observation_max_age", 0.5)), 0.0)
         self._follow_restart_speed_margin = float(getattr(
             restart_cfg, "speed_margin", 1.5))
         self._follow_restart_max_speed = float(getattr(
@@ -1271,6 +1277,7 @@ class MPCController(Node):
         self._follow_restart_duration = float(getattr(
             restart_cfg, "duration", 1.0))
         self._follow_stopped_vehicle_id = None
+        self._follow_restart_vehicle_id = None
         self._follow_restart_until = 0.0
         self._intentional_follow_stop_active = False
 
@@ -1359,6 +1366,8 @@ class MPCController(Node):
             self._collision_v2x_origin = str(getattr(body_cfg,'v2x_position_origin','unconfirmed'))
             self._collision_center_offset = float(getattr(body_cfg,'rear_axle_to_center',0.522))
             self._collision_origin_lateral_margin = max(float(getattr(body_cfg,'origin_lateral_margin',0.272)),0.0)
+            self._collision_v2x_unknown_yaw_origin_margin = float(getattr(
+                body_cfg, 'v2x_unknown_yaw_origin_margin', 0.0))
             self._collision_max_age = float(getattr(body_cfg,'max_observation_age',0.5))
             self._collision_body_publisher = self.create_publisher(MarkerArray,'/mpc/collision_bodies',1)
             self._collision_pose_subscriptions = [self.create_subscription(
@@ -1943,7 +1952,7 @@ class MPCController(Node):
         wheelbase = max(float(self._cfg.bicycle_model.length), 1e-6)
         for index in range(steps + 1):
             wp_id, e_y, lower, upper = self._physical_corridor_state(
-                predicted.x, predicted.y)
+                predicted.x, predicted.y, predicted.theta)
             if not lower <= e_y <= upper:
                 return False, (
                     f"wall_at_step={index},wp={wp_id},e_y={e_y:.3f},"
@@ -3217,6 +3226,42 @@ class MPCController(Node):
             'ego_body':ego,'target_body':target}
 
 
+    def _moving_following_state(self, pose, vehicle_id, ego_speed, now_sec):
+        """One fresh body-gap/longitudinal-speed observation for all follow stages."""
+        from multi_purpose_mpc_ros.core.following import following_state
+        tracker = self._v2x_tracker
+        samples = tracker._samples.get(vehicle_id)
+        if not samples or not tracker.has_velocity_estimate(vehicle_id):
+            return None
+        stamp, x, y = samples[-1]
+        age = now_sec - stamp
+        if not math.isfinite(age) or not 0.0 <= age <= self._follow_observation_max_age:
+            return None
+        _, envelope = self._current_center_envelopes_are_separated(pose, vehicle_id)
+        if envelope is None or envelope['rectangles_overlap'] is not False:
+            return None
+        wp = self._carN_center.get_closest_waypoint(x, y)
+        heading = float(self._reference_pathN_center.get_waypoint(wp).psi)
+        vx, vy = tracker.velocity(vehicle_id)
+        lead_speed = vx * math.cos(heading) + vy * math.sin(heading)
+        lateral_speed = -vx * math.sin(heading) + vy * math.cos(heading)
+        if not math.isfinite(lead_speed) or lead_speed < self._stopped_lead_speed_threshold:
+            return None
+        # A crossing/cutting-in vehicle needs the existing collision prediction,
+        # not a longitudinal same-direction following approximation.
+        if not math.isfinite(lateral_speed) or abs(lateral_speed) > max(0.2, .25 * lead_speed):
+            return None
+        return following_state(
+            body_gap=envelope['arc_gap'], lead_speed=lead_speed,
+            ego_speed=abs(float(ego_speed)), minimum_gap=self._follow_minimum_body_gap,
+            desired_gap=max(self._moving_emergency_desired_distance,
+                            self._follow_minimum_body_gap),
+            reaction_sec=self._moving_emergency_reaction_sec,
+            deceleration=min(self._moving_emergency_available_deceleration,
+                             max(0.0, -float(self._mpc_cfg.a_min))),
+            maximum_acceleration=max(0.0, float(self._mpc_cfg.a_max)),
+            spacing_kp=self._moving_emergency_spacing_kp)
+
     def _stationary_lane_group(self, pose, ego_speed, lane):
         """Current stopped blockers sharing one physical passage; never motion proof."""
         if lane not in (0, 2) or not self._lane_horizon_has_vehicle_width(lane):
@@ -3785,125 +3830,142 @@ class MPCController(Node):
         target_buf = self._v2x_tracker._samples.get(target_id)
         if not target_buf:
             return {}, None
+        from contextlib import nullcontext
+        diagnostics = getattr(self, '_runtime_diagnostics', None)
+        detail_enabled = diagnostics is not None and diagnostics.recording_detail()
+        measure = diagnostics.measure_detail if detail_enabled else lambda name: nullcontext()
         work = getattr(self, '_traffic_work', None)
         key = None
         if work is not None:
             from multi_purpose_mpc_ros.core.traffic_work import passage_key
-            key = passage_key(self, target_id, pose)
-            if key in work.passages:
-                work.hits += 1
-                lanes, distance = work.passages[key]
-                return dict(lanes), distance
-        _, target_x, target_y = target_buf[-1]
-        min_space = (
-            0.5 * float(self._cfg.bicycle_model.width)
-            + float(self._v2x_vehicle_radius)
-            + self._passage_clearance
-        )
-        target_vx, target_vy = self._v2x_tracker.velocity(target_id)
-        prediction_limit = self._prepass_lane_fallback_prediction_sec
-        prediction_times = [0.0]
-        prediction_times.extend(
-            float(t) for t in self._v2x_t_samples
-            if 0.0 < float(t) <= prediction_limit
-        )
-        passage = {0: True, 2: True}
-        clearance_min = {0: math.inf, 2: math.inf}
-        clearance_failure = {0: None, 2: None}
-        for prediction_time in prediction_times:
-            predicted_x = target_x + target_vx * prediction_time
-            predicted_y = target_y + target_vy * prediction_time
-            target_wp_id = self._carN_center.get_closest_waypoint(
-                predicted_x, predicted_y)
-            target_wp = self._reference_pathN_center.get_waypoint(target_wp_id)
-            normal_angle = target_wp.psi + math.pi / 2.0
-            target_offset = (
-                (predicted_x - target_wp.x) * math.cos(normal_angle)
-                + (predicted_y - target_wp.y) * math.sin(normal_angle)
+            with measure("vehicle_passage.cache_key"):
+                key = passage_key(self, target_id, pose)
+            with measure("vehicle_passage.cache_lookup"):
+                if key in work.passages:
+                    if detail_enabled:
+                        diagnostics.counts["vehicle_passage_cache_hits"] += 1
+                    work.hits += 1
+                    lanes, distance = work.passages[key]
+                    return dict(lanes), distance
+        if detail_enabled:
+            diagnostics.counts["vehicle_passage_recomputes"] += 1
+        with measure("vehicle_passage.target_clearance"):
+            _, target_x, target_y = target_buf[-1]
+            min_space = (
+                0.5 * float(self._cfg.bicycle_model.width)
+                + float(self._v2x_vehicle_radius)
+                + self._passage_clearance
             )
-            clearances = {
-                0: float(target_offset - target_wp.lb),
-                2: float(target_wp.ub - target_offset),
-            }
-            for lane_idx in (0, 2):
-                clearance_min[lane_idx] = min(
-                    clearance_min[lane_idx], clearances[lane_idx])
-                if clearances[lane_idx] < min_space:
-                    passage[lane_idx] = False
-                    if clearance_failure[lane_idx] is None:
-                        clearance_failure[lane_idx] = (
-                            prediction_time, target_wp_id,
-                            clearances[lane_idx])
+            target_vx, target_vy = self._v2x_tracker.velocity(target_id)
+            prediction_limit = self._prepass_lane_fallback_prediction_sec
+            prediction_times = [0.0]
+            prediction_times.extend(
+                float(t) for t in self._v2x_t_samples
+                if 0.0 < float(t) <= prediction_limit
+            )
+            passage = {0: True, 2: True}
+            clearance_min = {0: math.inf, 2: math.inf}
+            clearance_failure = {0: None, 2: None}
+            for prediction_time in prediction_times:
+                predicted_x = target_x + target_vx * prediction_time
+                predicted_y = target_y + target_vy * prediction_time
+                target_wp_id = self._carN_center.get_closest_waypoint(
+                    predicted_x, predicted_y)
+                target_wp = self._reference_pathN_center.get_waypoint(target_wp_id)
+                normal_angle = target_wp.psi + math.pi / 2.0
+                target_offset = (
+                    (predicted_x - target_wp.x) * math.cos(normal_angle)
+                    + (predicted_y - target_wp.y) * math.sin(normal_angle)
+                )
+                clearances = {
+                    0: float(target_offset - target_wp.lb),
+                    2: float(target_wp.ub - target_offset),
+                }
+                for lane_idx in (0, 2):
+                    clearance_min[lane_idx] = min(
+                        clearance_min[lane_idx], clearances[lane_idx])
+                    if clearances[lane_idx] < min_space:
+                        passage[lane_idx] = False
+                        if clearance_failure[lane_idx] is None:
+                            clearance_failure[lane_idx] = (
+                                prediction_time, target_wp_id,
+                                clearances[lane_idx])
 
         # Reject a nominal lane which becomes narrower than the vehicle in
         # the ego prediction horizon. This catches a taper/track-width change
         # which the old single target-waypoint test could not see.
-        horizon_path = self._reference_pathN_center
-        horizon_wp = self._carN_center.wp_id
-        required_width = float(self._cfg.bicycle_model.width)
-        lane_widths = {0: [], 2: []}
-        lane_width_wps = {0: [], 2: []}
-        for offset in range(self._mpcN_center.N + 1):
-            lanes = horizon_path.get_lane_bounds(horizon_wp + offset)
-            for lane_idx in (0, 2):
-                if lane_idx >= len(lanes):
-                    lane_widths[lane_idx].append(0.0)
+        with measure("vehicle_passage.horizon_widths"):
+            horizon_path = self._reference_pathN_center
+            horizon_wp = self._carN_center.wp_id
+            required_width = float(self._cfg.bicycle_model.width)
+            lane_widths = {0: [], 2: []}
+            lane_width_wps = {0: [], 2: []}
+            for offset in range(self._mpcN_center.N + 1):
+                lanes = horizon_path.get_lane_bounds(horizon_wp + offset)
+                for lane_idx in (0, 2):
+                    if lane_idx >= len(lanes):
+                        lane_widths[lane_idx].append(0.0)
+                        lane_width_wps[lane_idx].append(horizon_wp + offset)
+                        continue
+                    lane_ub, lane_lb = lanes[lane_idx]
+                    lane_widths[lane_idx].append(
+                        float(lane_ub) - float(lane_lb))
                     lane_width_wps[lane_idx].append(horizon_wp + offset)
-                    continue
-                lane_ub, lane_lb = lanes[lane_idx]
-                lane_widths[lane_idx].append(
-                    float(lane_ub) - float(lane_lb))
-                lane_width_wps[lane_idx].append(horizon_wp + offset)
+
+        log_passage = False
+        mpc_cfg = getattr(getattr(self, '_cfg', None), 'mpc', None)
+        if bool(getattr(mpc_cfg, 'passage_diagnostics_enabled', False)):
+            from multi_purpose_mpc_ros.core.log_throttle import periodic_log_due
+            interval = float(getattr(mpc_cfg, 'passage_diagnostics_interval_sec', 5.0))
+            interval = max(1.0, interval) if math.isfinite(interval) else 5.0
+            log_passage = periodic_log_due(self, ('passage', target_id), interval)
 
         for lane_idx in (0, 2):
-            width_result = evaluate_lane_width_samples(
-                lane_widths[lane_idx],
-                required_width=required_width,
-                tolerance=self._passage_lane_width_tolerance,
-                max_consecutive_tolerated=(
-                    self._passage_lane_width_tolerance_points),
-            )
-            if not width_result["passable"]:
-                passage[lane_idx] = False
-            failure = clearance_failure[lane_idx]
-            failed_width_index = width_result["first_failed_index"]
-            failed_width_wp = (
-                lane_width_wps[lane_idx][failed_width_index]
-                if failed_width_index is not None else None
-            )
-            reasons = []
-            if failure is not None:
-                reasons.append("target_boundary_clearance")
-            if width_result["failure_reason"] is not None:
-                reasons.append(width_result["failure_reason"])
-            diagnostic_message = (
-                "[PhysicalPassageDiagnostic] "
-                f"vehicle_id={target_id}, lane=L{lane_idx}, "
-                f"passable={passage[lane_idx]}, "
-                f"target_clearance_min={clearance_min[lane_idx]:.3f}m/"
-                f"{min_space:.3f}m, passage_clearance="
-                f"{self._passage_clearance:.3f}m, "
-                f"lane_width_min={width_result['minimum_width']:.3f}m/"
-                f"{required_width:.3f}m, tolerance="
-                f"{self._passage_lane_width_tolerance:.3f}m, "
-                f"minor_run={width_result['longest_minor_run']}/"
-                f"{self._passage_lane_width_tolerance_points}, "
-                f"clearance_failure={failure}, "
-                f"width_failure_wp={failed_width_wp}, "
-                f"reasons={reasons if reasons else ['none']}"
-            )
-            # Keep distinct call sites so rclpy's caller-based throttle emits
-            # diagnostics for both L0 and L2 rather than suppressing the
-            # second lane in this loop.
-            if lane_idx == 0:
-                self.get_logger().info(
-                    diagnostic_message, throttle_duration_sec=1.0)
-            else:
-                self.get_logger().info(
-                    diagnostic_message, throttle_duration_sec=1.0)
-        distance = math.hypot(target_x - pose.x, target_y - pose.y)
-        if work is not None:
-            work.passages[key] = (dict(passage), distance)
+            with measure("vehicle_passage.width_decision"):
+                width_result = evaluate_lane_width_samples(
+                    lane_widths[lane_idx],
+                    required_width=required_width,
+                    tolerance=self._passage_lane_width_tolerance,
+                    max_consecutive_tolerated=(
+                        self._passage_lane_width_tolerance_points),
+                )
+                if not width_result["passable"]:
+                    passage[lane_idx] = False
+            if log_passage:
+                with measure("vehicle_passage.diagnostic_format"):
+                    failure = clearance_failure[lane_idx]
+                    failed_width_index = width_result["first_failed_index"]
+                    failed_width_wp = (
+                        lane_width_wps[lane_idx][failed_width_index]
+                        if failed_width_index is not None else None
+                    )
+                    reasons = []
+                    if failure is not None:
+                        reasons.append("target_boundary_clearance")
+                    if width_result["failure_reason"] is not None:
+                        reasons.append(width_result["failure_reason"])
+                    diagnostic_message = (
+                        "[PhysicalPassageDiagnostic] "
+                        f"vehicle_id={target_id}, lane=L{lane_idx}, "
+                        f"passable={passage[lane_idx]}, "
+                        f"target_clearance_min={clearance_min[lane_idx]:.3f}m/"
+                        f"{min_space:.3f}m, passage_clearance="
+                        f"{self._passage_clearance:.3f}m, "
+                        f"lane_width_min={width_result['minimum_width']:.3f}m/"
+                        f"{required_width:.3f}m, tolerance="
+                        f"{self._passage_lane_width_tolerance:.3f}m, "
+                        f"minor_run={width_result['longest_minor_run']}/"
+                        f"{self._passage_lane_width_tolerance_points}, "
+                        f"clearance_failure={failure}, "
+                        f"width_failure_wp={failed_width_wp}, "
+                        f"reasons={reasons if reasons else ['none']}"
+                    )
+                with measure("vehicle_passage.diagnostic_log"):
+                    self.get_logger().info(diagnostic_message)
+        with measure("vehicle_passage.cache_store"):
+            distance = math.hypot(target_x - pose.x, target_y - pose.y)
+            if work is not None:
+                work.passages[key] = (dict(passage), distance)
         return passage, distance
 
     def _latched_target_passage(self, pose):
@@ -3963,10 +4025,11 @@ class MPCController(Node):
         proposed = lane_evaluation.propose_lane(preferred, passage, conflicts, rows)
         if work is not None:
             work.remember_proposal(proposal_key, now, proposed)
-        self.get_logger().info(
-            f"[TrafficLaneProposal] target={target_id}, proposed={proposed}, "
-            f"future_obstructions={rows}, unknown={unknown}; ranking_only=True",
-            throttle_duration_sec=1.0)
+        from multi_purpose_mpc_ros.core.log_throttle import periodic_log_due
+        if periodic_log_due(self, 'traffic_lane_proposal', 1.0):
+            self.get_logger().info(
+                f"[TrafficLaneProposal] target={target_id}, proposed={proposed}, "
+                f"future_obstructions={rows}, unknown={unknown}; ranking_only=True")
         return proposed
 
     def _same_lane_target_handoff_available(self, successor, pose, ego_speed):
@@ -6274,7 +6337,7 @@ class MPCController(Node):
             )
         return detail is not None, detail
 
-    def _physical_corridor_state(self, x: float, y: float):
+    def _physical_corridor_state(self, x: float, y: float, yaw=None):
         """Return the same guarded center corridor used by PP wall checks."""
         wp_id = self._car.get_closest_waypoint(x, y)
         wp = self._reference_path.get_waypoint(wp_id)
@@ -6286,8 +6349,13 @@ class MPCController(Node):
         half_width = 0.5 * float(self._cfg.bicycle_model.width)
         guard = float(getattr(
             self._cfg.mpc, "prediction_outer_boundary_guard", 0.10))
-        lower = float(wp.lb) + half_width + guard
-        upper = float(wp.ub) - half_width - guard
+        from multi_purpose_mpc_ros.core.reference_path import OUTER_COURSE_MARGIN
+        from multi_purpose_mpc_ros.core.wall_constraints import wall_center_bounds, longitudinal_extent
+        error = 0. if yaw is None else math.atan2(math.sin(yaw-wp.psi), math.cos(yaw-wp.psi))
+        lower, upper = wall_center_bounds(
+            float(wp.lb), float(wp.ub), course_margin=OUTER_COURSE_MARGIN,
+            half_width=half_width, guard=guard, heading_error=error,
+            half_length=longitudinal_extent(self._cfg))
         return wp_id, offset, lower, upper
 
     def _full_corridor_violation(self, x: float, y: float) -> float:
@@ -7321,6 +7389,15 @@ class MPCController(Node):
             msg.header.stamp.sec+msg.header.stamp.nanosec/1e9,msg.header.frame_id)
 
     def _publish_collision_bodies(self, pose):
+        if not bool(getattr(self._cfg.mpc, 'collision_body_visualization_enabled', False)):
+            return
+        now = float(self.get_clock().now().nanoseconds) / 1e9
+        rate = float(getattr(self._cfg.mpc, 'collision_body_visualization_rate_hz', 5.0))
+        rate = min(10.0, max(5.0, rate)) if math.isfinite(rate) else 5.0
+        previous = getattr(self, '_collision_visualization_last_sec', None)
+        if previous is not None and 0 <= now - previous < 1.0 / rate:
+            return
+        self._collision_visualization_last_sec = now
         markers = MarkerArray()
         clear = Marker(); clear.action = Marker.DELETEALL
         markers.markers.append(clear)
@@ -7853,6 +7930,7 @@ class MPCController(Node):
         self._traffic_work.begin_cycle()
         # No pre-solve/early-return path may reuse last cycle's release proof.
         self._live_prediction_context = None
+        wall_fallback_stop = False
         now = self.get_clock().now()
         t = (now - self._t_start).nanoseconds / 1e9
         dt = (now - self._last_t).nanoseconds / 1e9
@@ -11857,7 +11935,7 @@ class MPCController(Node):
                     if fallback_delta is not None:
                         pp_safe, validation_reason = (
                             self._pure_pursuit_feedback_is_safe(
-                                predicted_pose, v, fallback_delta))
+                                predicted_pose, max(abs(v), self._steering_fallback_speed), fallback_delta))
                         if not pp_safe:
                             fallback_delta = None
                             reason = validation_reason
@@ -11866,6 +11944,12 @@ class MPCController(Node):
                         controller = "legacy_feedback"
                         u[0] = min(
                             float(u[0]), self._steering_fallback_speed)
+                        legacy_safe, legacy_reason = self._pure_pursuit_feedback_is_safe(
+                            predicted_pose, max(abs(v), abs(float(u[0]))), fallback_delta)
+                        if not legacy_safe:
+                            wall_fallback_stop = True
+                            u[0] = 0.0
+                            reason = legacy_reason
                     else:
                         # Safety and emergency-brake processing later in this
                         # cycle may still reduce or stop this request.
@@ -12396,10 +12480,12 @@ class MPCController(Node):
             )
 
         emergency_brake_active = False
+        final_emergency_speed_limit = None
         emergency_brake_vehicle_id = None
         emergency_brake_vehicle_distance = math.inf
         follow_restart_active = False
         follow_restart_target = 0.0
+        shared_follow_state = None
         follow_target_expired = False
         follow_control_active = False
         intentional_follow_stop_active = False
@@ -12481,6 +12567,11 @@ class MPCController(Node):
                     self._release_lost_follow_target()
                 elif acc_distance < self._follow_engage_distance:
                     follow_control_active = True
+                    follow_reference_ceiling = ref_vel_kmph
+                    if not (latched_follow_state is not None
+                            and latched_follow_state.get("stale", False)):
+                        shared_follow_state = self._moving_following_state(
+                            pose, acc_vehicle_id, v, current_time_sec)
                     v_ref_acc = (
                         acc_lead_speed
                         + self._follow_spacing_kp * (
@@ -12488,6 +12579,9 @@ class MPCController(Node):
                         )
                     )
                     v_ref_acc = max(0.0, v_ref_acc)  # 後退は禁止のため下限は0
+                    if shared_follow_state is not None:
+                        acc_lead_speed = shared_follow_state.lead_speed
+                        v_ref_acc = shared_follow_state.target_speed
 
                     if (
                         latched_follow_state is not None
@@ -12534,6 +12628,7 @@ class MPCController(Node):
                         )
                     if ego_is_stopped and lead_is_stopped_for_follow:
                         self._follow_stopped_vehicle_id = acc_vehicle_id
+                        self._follow_restart_vehicle_id = None
                         self._follow_restart_until = 0.0
                     elif (
                         ego_is_stopped
@@ -12546,16 +12641,19 @@ class MPCController(Node):
                         and acc_velocity_valid
                         and acc_lead_speed
                             >= self._follow_restart_lead_moving_speed
-                        and acc_distance >= restart_min_gap
+                        and shared_follow_state is not None
+                        and shared_follow_state.body_gap >= restart_min_gap
+                        and shared_follow_state.target_speed > abs(v)
                     ):
                         self._follow_restart_until = (
                             current_time_sec + self._follow_restart_duration)
                         self._follow_stopped_vehicle_id = None
+                        self._follow_restart_vehicle_id = acc_vehicle_id
                         self.get_logger().info(
                             "[FollowRestart] lead started moving: "
                             f"vehicle_id={acc_vehicle_id}, "
                             f"lead_speed={acc_lead_speed:.2f}m/s, "
-                            f"gap={acc_distance:.2f}m/"
+                            f"body_gap={shared_follow_state.body_gap:.2f}m/"
                             f"{restart_min_gap:.2f}m, "
                             f"startup={startup_restart_waiting}",
                             throttle_duration_sec=1.0,
@@ -12563,17 +12661,21 @@ class MPCController(Node):
 
                     follow_restart_active = (
                         current_time_sec < self._follow_restart_until
+                        and acc_vehicle_id == self._follow_restart_vehicle_id
                         and not (
                             latched_follow_state is not None
                             and latched_follow_state.get("stale", False)
                         )
-                        and acc_distance >= restart_min_gap
+                        and shared_follow_state is not None
+                        and shared_follow_state.body_gap >= self._follow_minimum_body_gap
                     )
                     if follow_restart_active:
                         follow_restart_target = min(
                             self._follow_restart_max_speed,
                             acc_lead_speed
                                 + self._follow_restart_speed_margin,
+                            shared_follow_state.target_speed,
+                            follow_reference_ceiling,
                         )
                         ref_vel_kmph = max(
                             ref_vel_kmph, follow_restart_target)
@@ -12662,6 +12764,8 @@ class MPCController(Node):
                         preview_vx, preview_vy = self._v2x_tracker.velocity(
                             vehicle_id)
                         preview_speed = math.hypot(preview_vx, preview_vy)
+                        if shared_follow_state is not None and vehicle_id == acc_vehicle_id:
+                            preview_speed = shared_follow_state.lead_speed
                         closing_speed = max(abs(float(v)) - preview_speed, 0.0)
                         required_gap = (
                             self._moving_emergency_desired_distance
@@ -12670,12 +12774,18 @@ class MPCController(Node):
                             / (2.0
                                * self._moving_emergency_available_deceleration)
                         )
+                        preview_body_gap = (
+                            preview_envelope['arc_gap']
+                            if preview_envelope is not None else math.inf)
+                        if shared_follow_state is not None and vehicle_id == acc_vehicle_id:
+                            required_gap = shared_follow_state.required_gap
+                            preview_body_gap = shared_follow_state.body_gap
                         dynamic_gap_hazard = bool(
                             preview_envelope is not None
                             and center_lateral_clearance is not None
                             and center_lateral_clearance
                                 <= self._parallel_warning_clearance
-                            and preview_envelope["arc_gap"] <= required_gap
+                            and preview_body_gap <= required_gap
                         )
                         if dynamic_gap_hazard:
                             self._center_path_collision_hazard_until[
@@ -12688,7 +12798,7 @@ class MPCController(Node):
                                 "the braking-distance requirement; holding one "
                                 "continuous speed limit: "
                                 f"vehicle_id={vehicle_id}, gap="
-                                f"{preview_envelope['arc_gap']:.2f}m/"
+                                f"{preview_body_gap:.2f}m/"
                                 f"{required_gap:.2f}m, closing="
                                 f"{closing_speed:.2f}m/s",
                                 throttle_duration_sec=0.5,
@@ -12931,6 +13041,15 @@ class MPCController(Node):
                                         self._parallel_vehicle_half_length,
                                     )
                                 )
+                                shared_follow_limit = (
+                                    shared_follow_state
+                                    if vid == acc_vehicle_id
+                                    and current_envelope_state is not None
+                                    and current_envelope_state['rectangles_overlap'] is False
+                                    else None)
+                                if shared_follow_limit is not None:
+                                    arc_vehicle_gap = shared_follow_limit.body_gap
+                                    opp_spd = shared_follow_limit.lead_speed
                                 committed_shadow_lane = (
                                     int(self._overtake.verification.lane_idx)
                                     if self._overtake.verification.lane_idx in (0, 2)
@@ -13030,7 +13149,13 @@ class MPCController(Node):
                                         > self._moving_emergency_critical_distance
                                     )
                                 )
-                                if moving_speed_match:
+                                if shared_follow_limit is not None:
+                                    # Use the exact same body gap, signed lead velocity
+                                    # and stopping prediction as ACC/restart. A Center
+                                    # hazard must not select a conflicting spacing law.
+                                    v_ref_emg = shared_follow_limit.target_speed
+                                    emergency_mode = "shared_body_gap_follow"
+                                elif moving_speed_match:
                                     # A moving lead should normally be matched,
                                     # not treated like a stopped wall. The old
                                     # 5.5 m / Kp=1.5 rule could command several
@@ -13097,7 +13222,8 @@ class MPCController(Node):
                                     emergency_stopped_blocker_id = vid
                                     emergency_stopped_blocker_dist = arc_vehicle_gap
                                 min_emergency_speed = (
-                                    0.0 if stopped_vehicle_too_close else 0.5)
+                                    0.0 if stopped_vehicle_too_close
+                                    or shared_follow_limit is not None else 0.5)
                                 v_ref_emg = max(min_emergency_speed, v_ref_emg)
                                 committed_lane_idx = (
                                     int(self._overtake.requested_lane)
@@ -13183,6 +13309,10 @@ class MPCController(Node):
                                 # vehicle's stop or ACC cap must survive iteration order.
                                 ref_vel_kmph = min(ref_vel_kmph, v_ref_emg)
                                 emergency_brake_active = True
+                                selected_limit = max(0.0, float(v_ref_emg))
+                                final_emergency_speed_limit = (
+                                    selected_limit if final_emergency_speed_limit is None
+                                    else min(final_emergency_speed_limit, selected_limit))
                                 if dist < emergency_brake_vehicle_distance:
                                     emergency_brake_vehicle_distance = dist
                                     emergency_brake_vehicle_id = vid
@@ -13648,7 +13778,10 @@ class MPCController(Node):
                 # closing margin toward the configured near-distance gate.
                 ref_vel_kmph = min(
                     ref_vel_kmph,
-                    opponent_v_lead + slow_lead_active_speed_margin,
+                    shared_follow_state.target_speed
+                    if shared_follow_state is not None
+                    and opponent_vehicle_id == acc_vehicle_id
+                    else opponent_v_lead + slow_lead_active_speed_margin,
                 )
                 self.get_logger().info(
                     "[SlowLeadOvertakePrepare] matching speed before outer "
@@ -13730,7 +13863,10 @@ class MPCController(Node):
             # limiters may still command a lower speed or a complete stop.
             ref_vel_kmph = min(
                 ref_vel_kmph,
-                opponent_v_lead + slow_lead_active_speed_margin,
+                shared_follow_state.target_speed
+                if shared_follow_state is not None
+                and opponent_vehicle_id == acc_vehicle_id
+                else opponent_v_lead + slow_lead_active_speed_margin,
             )
         self._mpc.update_v_max(ref_vel_kmph)
         v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
@@ -14027,6 +14163,57 @@ class MPCController(Node):
             ):
                 acc = self._last_acc + (acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
             u[1] = self._last_u[1] + (u[1] - self._last_u[1]) * self._mpc_cfg.steer_low_pass_gain
+
+        # The shared follow envelope also applies outside the emergency scan
+        # distance and after fallback/recovery writers. Never raise a command.
+        if shared_follow_state is not None and not recovering_from_stuck and self._enable_control:
+            from multi_purpose_mpc_ros.core.final_emergency_limit import enforce_emergency_limit
+            u[0], acc, bug_acc_enabled = enforce_emergency_limit(
+                float(u[0]), float(acc), bool(bug_acc_enabled),
+                limit=min(ref_vel_kmph, shared_follow_state.target_speed), measured_speed=v,
+                kp=self.KP, a_min=self._mpc_cfg.a_min, a_max=self._mpc_cfg.a_max,
+                active=True)
+            if (float(u[0]) >= 0.0
+                    and shared_follow_state.body_gap <= shared_follow_state.required_gap):
+                # A proportional speed correction alone can take longer to
+                # stop than the braking model assumed. Request its deceleration
+                # immediately; retain any stronger existing brake command.
+                acc = min(float(acc), float(self._mpc_cfg.a_min))
+            self.get_logger().info(
+                f"[BodyGapFollow] vehicle_id={acc_vehicle_id}, "
+                f"body_gap={shared_follow_state.body_gap:.2f}m, "
+                f"required_gap={shared_follow_state.required_gap:.2f}m, "
+                f"lead_speed={shared_follow_state.lead_speed:.2f}m/s, "
+                f"safe_limit={shared_follow_state.speed_limit:.2f}m/s, "
+                f"target={shared_follow_state.target_speed:.2f}m/s, "
+                f"command={float(u[0]):.2f}m/s, restart={follow_restart_active}",
+                throttle_duration_sec=0.5)
+
+        # Preserve the exact emergency decision after forward command writers.
+        # Gear/reverse recovery remains owned by its existing state machine.
+        if emergency_brake_active and not recovering_from_stuck and self._enable_control:
+            from multi_purpose_mpc_ros.core.final_emergency_limit import enforce_emergency_limit
+            before = (float(u[0]), float(acc), bool(bug_acc_enabled))
+            limited = enforce_emergency_limit(
+                *before, limit=final_emergency_speed_limit, measured_speed=v,
+                kp=self.KP, a_min=self._mpc_cfg.a_min, a_max=self._mpc_cfg.a_max,
+                active=True)
+            u[0], acc, bug_acc_enabled = limited
+            if limited != before:
+                from multi_purpose_mpc_ros.core.log_throttle import periodic_log_due
+                if periodic_log_due(self, 'final_emergency_limit', 1.0):
+                    self.get_logger().warn(
+                        f"[FinalEmergencyLimit] measured={abs(v):.2f}m/s, "
+                        f"limit={final_emergency_speed_limit:.2f}m/s, "
+                        f"speed={before[0]:.2f}->{u[0]:.2f}m/s, "
+                        f"acc={before[1]:.2f}->{acc:.2f}m/s2, boost={bug_acc_enabled}")
+
+        if wall_fallback_stop and not recovering_from_stuck and self._enable_control:
+            # Forward overrides must not undo a failed wall rollout. Explicit
+            # reverse/straight recovery keeps its own independent checks.
+            u[0] = 0.0
+            acc = float(self._mpc_cfg.a_min)
+            bug_acc_enabled = False
 
         self._last_acc = acc
         self._last_u[0] = u[0]

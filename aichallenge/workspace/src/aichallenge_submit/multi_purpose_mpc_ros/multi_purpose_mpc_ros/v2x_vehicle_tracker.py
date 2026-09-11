@@ -533,7 +533,7 @@ class V2XVehicleTracker:
             self._body_headings[vehicle_id] = (yaw,'measured',True,stamp)
             self._generation += 1
 
-    def collision_body(self, vehicle_id, now, *, origin='unconfirmed', offset=0.522, max_age=0.5, origin_lateral_margin=None):
+    def collision_body(self, vehicle_id, now, *, origin='unconfirmed', offset=0.522, max_age=0.5, origin_lateral_margin=None, unknown_yaw_origin_margin=None):
         with self._lock:
             if vehicle_id not in self._active or not self._samples.get(vehicle_id):
                 return None
@@ -548,7 +548,8 @@ class V2XVehicleTracker:
                 source=(heading[1]+'_held' if heading else 'unknown'),
                 direction_valid=bool(heading and heading[2]),origin=origin,offset=offset,
                 uncertainty=self._body_position_uncertainty.get(vehicle_id,0.),
-                origin_lateral_margin=origin_lateral_margin)
+                origin_lateral_margin=origin_lateral_margin,
+                unknown_yaw_origin_margin=unknown_yaw_origin_margin)
             if heading:
                 body = replace(body,yaw_stamp=heading[3])
             if not fresh:

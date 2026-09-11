@@ -196,3 +196,40 @@ def test_real_mpc_prepare_details_leave_qp_unchanged():
     phases = [k for k in diag.details if k.startswith('live_mpc.prepare.')]
     assert len(phases) == 7
     assert all(diag.details[k]['calls'] == 1 for k in phases)
+
+
+def test_passage_phases_distinguish_hit_from_recompute_and_keep_result():
+    from .test_traffic_work import passage_controller
+    from .test_overtake_session import controller_method
+    from multi_purpose_mpc_ros.v2x_vehicle_tracker import evaluate_lane_width_samples
+    c = passage_controller()
+    c._cfg.mpc = SimpleNamespace(passage_diagnostics_enabled=True)
+    diag = module.RuntimeDiagnostics(.025)
+    c._runtime_diagnostics = diag
+    call = controller_method('_vehicle_passage')
+    call.__globals__['evaluate_lane_width_samples'] = evaluate_lane_width_samples
+    pose = SimpleNamespace(x=0., y=0.)
+    baseline = call(c, 'd2', pose)  # disabled outside a control cycle
+    assert not diag.details
+    c._traffic_work.begin_cycle()
+    c._periodic_log_stamps.clear()
+    diag.begin(0.)
+    assert call(c, 'd2', pose) == baseline
+    assert call(c, 'd2', pose) == baseline
+    assert diag.counts['vehicle_passage_cache_hits'] == 1
+    assert diag.counts['vehicle_passage_recomputes'] == 1
+    for name, calls in {'cache_key':2, 'cache_lookup':2, 'target_clearance':1,
+                        'horizon_widths':1, 'width_decision':2, 'diagnostic_format':2,
+                        'diagnostic_log':2, 'cache_store':1}.items():
+        assert diag.details['vehicle_passage.'+name]['calls'] == calls
+    diag.finish()
+
+
+def test_detail_phase_records_exception_without_masking_it():
+    diag = module.RuntimeDiagnostics(.025)
+    diag.begin(0.)
+    with pytest.raises(ValueError, match='original'):
+        with diag.measure_detail('phase'):
+            raise ValueError('original')
+    assert diag.details['phase']['calls'] == 1
+    assert diag.details['phase']['exceptions'] == 1

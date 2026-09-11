@@ -178,7 +178,8 @@ def test_collision_marker_polygons_match_the_shared_sat_geometry():
             self.color=NS(r=0.,g=0.,b=0.,a=0.)
             self.points=[]
     c=controller()
-    c.get_clock=lambda:NS(now=lambda:NS(to_msg=lambda:NS(sec=0,nanosec=100000000)))
+    c._cfg=NS(mpc=NS(collision_body_visualization_enabled=True))
+    c.get_clock=lambda:NS(now=lambda:NS(nanoseconds=100000000,to_msg=lambda:NS(sec=0,nanosec=100000000)))
     c.get_logger=lambda:NS(info=Mock())
     c._collision_body_publisher=Mock()
     fn=controller_method('_publish_collision_bodies')

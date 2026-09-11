@@ -4,6 +4,7 @@ import numpy as np
 import numpy.ma as ma
 import math
 import copy
+from functools import lru_cache
 from multi_purpose_mpc_ros.core.map import Map, Obstacle
 from skimage.draw import line_aa
 import matplotlib.pyplot as plt
@@ -13,6 +14,19 @@ import osqp
 import os
 import itertools
 from ament_index_python.packages import get_package_share_directory
+
+@lru_cache(maxsize=4096)
+def _signed_boundary_distance(x, y, psi, bx, by):
+    angle = np.mod(np.arctan2(by-y, bx-x) - psi + math.pi, 2*math.pi) - math.pi
+    return np.sign(angle) * np.sqrt((bx-x)**2 + (by-y)**2)
+
+
+@lru_cache(maxsize=1024)
+def _boundary_directions(psi):
+    upper = np.mod(math.pi/2 + psi + math.pi, 2*math.pi) - math.pi
+    lower = np.mod(-math.pi/2 + psi + math.pi, 2*math.pi) - math.pi
+    return np.cos(upper), np.sin(upper), np.cos(lower), np.sin(lower)
+
 
 # Colors
 DRIVABLE_AREA = '#BDC3C7'
@@ -24,7 +38,7 @@ OBSTACLE = '#2E4053'
 # Since ub is the left course edge and lb is the right course edge, this
 # becomes the outside margin of L2 and L0 respectively.  It must not be
 # applied to the lane boundaries adjoining L1.
-OUTER_COURSE_MARGIN = 0.7
+OUTER_COURSE_MARGIN = 0.8
 CURVATURE_SAVGOL_WINDOW = 7
 CURVATURE_SAVGOL_POLYORDER = 3
 
@@ -1311,7 +1325,7 @@ class ReferencePath:
         transition_weights = (None if lane_transition_weights is None else
             np.clip(np.asarray(lane_transition_weights, dtype=float).reshape(-1), 0.0, 1.0))
 
-        def lane_bounds_for(index, wp):
+        def compute_lane_bounds_for(index, wp):
             if target_lane not in (0, 1, 2):
                 return float(wp.lb), float(wp.ub)
             lanes = self.get_lane_bounds(wp_id + index)
@@ -1335,22 +1349,21 @@ class ReferencePath:
                 target_lane, lane_lb, lane_ub, retry_profile[index],
                 toward_center_only)
 
+        lane_bounds_cache = {}
+
+        def lane_bounds_for(index, wp):
+            key = (index, wp.lb, wp.ub, wp.x, wp.y, wp.psi)
+            if key not in lane_bounds_cache:
+                lane_bounds_cache[key] = compute_lane_bounds_for(index, wp)
+            return lane_bounds_cache[key]
+
         for n in range(N):
             wp = self.get_waypoint(wp_id + n)
             wp.ub_sm = wp.ub
             wp.lb_sm = wp.lb
 
         def compute_bound(wp, ls):
-            # Check sign of bound
-            angle = np.mod(np.arctan2(ls[1] - wp.y, ls[0] - wp.x)
-                                  - wp.psi + math.pi, 2 * math.pi) - math.pi
-            sign = np.sign(angle)
-
-            # Compute bound
-            bound = sign * np.sqrt(
-                    (ls[0] - wp.x) ** 2 + (ls[1] - wp.y) ** 2)
-
-            return bound
+            return _signed_boundary_distance(wp.x, wp.y, wp.psi, ls[0], ls[1])
 
         def add_constraint(wp, ub_ls, lb_ls, horizon_index):
             '''
@@ -1419,23 +1432,16 @@ class ReferencePath:
             lane_lb_hor.append(lane_lb)
 
             # 上限（ub_sm）および下限（lb_sm）のセルから絶対角度を計算する
-            angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
-                                  2 * math.pi) - math.pi
-            angle_lb = np.mod(-math.pi / 2 + wp.psi + math.pi,
-                                  2 * math.pi) - math.pi
+            cos_ub, sin_ub, cos_lb, sin_lb = _boundary_directions(wp.psi)
             # 算出された距離の上限（ub_sm）および下限（lb_sm）に基づき、セルを計算する。
-            ub_sm_ls = wp.x + ub_sm * np.cos(angle_ub), wp.y + ub_sm * np.sin(
-                    angle_ub)
-            lb_sm_ls = wp.x - lb_sm * np.cos(angle_lb), wp.y - lb_sm * np.sin(
-                    angle_lb)
+            ub_sm_ls = wp.x + ub_sm * cos_ub, wp.y + ub_sm * sin_ub
+            lb_sm_ls = wp.x - lb_sm * cos_lb, wp.y - lb_sm * sin_lb
             bound_cells_sm = (ub_sm_ls, lb_sm_ls)
             self.select_free_segs.append([ub_sm_ls, lb_sm_ls])
 
             # 算出された距離の上限（ub）および下限（lb）に基づき、セルを計算する。
-            ub_ls = wp.x + ub * np.cos(angle_ub), wp.y + ub * np.sin(
-                angle_ub)
-            lb_ls = wp.x - lb * np.cos(angle_lb), wp.y - lb * np.sin(
-                angle_lb)
+            ub_ls = wp.x + ub * cos_ub, wp.y + ub * sin_ub
+            lb_ls = wp.x - lb * cos_lb, wp.y - lb * sin_lb
             bound_cells = (ub_ls, lb_ls)
 
             # 結果を格納

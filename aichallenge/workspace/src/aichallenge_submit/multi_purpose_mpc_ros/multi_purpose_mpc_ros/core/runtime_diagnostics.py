@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import time
 import threading
+from contextlib import contextmanager
 from functools import wraps
 
 
@@ -77,6 +78,22 @@ class RuntimeDiagnostics:
         row['wall_max_ms'] = max(row['wall_max_ms'], wall_ms)
         row['cpu_max_ms'] = max(row['cpu_max_ms'], cpu_ms)
         row['exceptions'] += bool(error)
+
+    @contextmanager
+    def measure_detail(self, name):
+        if not self.recording_detail():
+            yield
+            return
+        start, cpu = time.perf_counter(), time.thread_time()
+        error = False
+        try:
+            yield
+        except BaseException:
+            error = True
+            raise
+        finally:
+            self.record_detail(name, (time.perf_counter()-start)*1000,
+                               (time.thread_time()-cpu)*1000, error)
 
     def instrument(self, instance, name, label):
         original = getattr(instance, name)

@@ -28,3 +28,31 @@ controllerの親関数も内部で計測した子関数を含むため、全項�
 関数名は固定集合で、集計データは報告時にクリアする。
 走行条件・速度・境界・解の受理条件は変更していない。
 次回は通常どおり起動し、ControlTimingのdetail_functionsを含むログを取得する。
+
+## 通過幅評価の内訳
+
+`detail_functions` の `vehicle_passage.*` を追加:
+
+- `cache_key`: 境界全体等を含むキー生成
+- `cache_lookup`: 辞書検索・ヒット時の戻り値コピー（キーのhash/比較を含む）
+- `target_clearance`: 他車予測点と境界の通過余裕計算
+- `horizon_widths`: 自車ホライズンの車線幅収集
+- `width_decision`: L0/L2の幅判定
+- `diagnostic_format`: 失敗理由・診断文字列の生成
+- `diagnostic_log`: logger.info呼び出し。throttleによる抑制時も計数
+- `cache_store`: 距離計算・結果保存（キーのhashを含む）
+
+`counts.vehicle_passage_cache_hits` / `vehicle_passage_recomputes` は同じ報告期間内の回数。
+width_decision/diagnostic_*は再計算1回につき原則2回（L0/L2）。
+対象なし・観測なしは内訳計測前にreturnし、親の呼び出し回数だけに含まれる。
+親の`controller._vehicle_passage`はこの内訳を含む。計測処理自体の時間もあるため、
+内訳合計と親の時間は完全には一致しない。判定条件・ログのthrottle間隔は変更なし。
+
+## 診断ログ削減
+
+`mpc.passage_diagnostics_enabled: false`を既定とする。True時は
+`passage_diagnostics_interval_sec: 5.0`（最小1秒）の事前ゲートを通った
+対象車のみ、左右の詳細を出力。抑制中も幅判定・結果保存は行う。
+Off/抑制中はdiagnostic_format/diagnostic_logの項目が現れない。
+TrafficLaneProposalも1秒の事前ゲートを適用。旧MPCの累積計測printは削除し、
+ControlTimingへ集約。安全警告・状態変更・復旧ログは維持。

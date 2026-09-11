@@ -1,6 +1,7 @@
 """Shared map-frame body geometry, including explicitly unknown headings/origins."""
 from dataclasses import dataclass, replace
 import math
+from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,7 @@ class BodyGeometry:
 
 
 def body_pose(x, y, yaw, stamp, *, frame='map', source='unknown',
-              direction_valid=False, origin='center', offset=0.522, uncertainty=0.0, origin_lateral_margin=None):
+              direction_valid=False, origin='center', offset=0.522, uncertainty=0.0, origin_lateral_margin=None, unknown_yaw_origin_margin=None):
     valid = frame == 'map' and all(math.isfinite(v) for v in (x, y, stamp, uncertainty))
     known = yaw is not None and math.isfinite(yaw)
     shift = 0.0
@@ -50,7 +51,12 @@ def body_pose(x, y, yaw, stamp, *, frame='map', source='unknown',
         y += shift * math.sin(yaw)
     elif origin != 'center':
         # No guessed forward/reverse direction or unconfirmed antenna offset.
-        uncertainty += abs(offset)
+        origin_padding = abs(offset)
+        if not known and unknown_yaw_origin_margin is not None:
+            value = float(unknown_yaw_origin_margin)
+            if math.isfinite(value):
+                origin_padding = min(abs(offset), max(value, 0.0))
+        uncertainty += origin_padding
         # Keep longitudinal origin ambiguity; tune only the known body lateral axis.
         lateral_uncertainty += (abs(offset) if origin_lateral_margin is None
                                 else min(abs(offset), max(float(origin_lateral_margin), 0.0)))
@@ -62,10 +68,18 @@ def extents(body, geometry, heading):
     if not body.yaw_valid:
         r = geometry.radius + body.uncertainty
         return r, r
-    angle = body.yaw - heading
+    return _oriented_extents(body.yaw, body.uncertainty, body.lateral_padding,
+                             geometry, heading)
+
+
+@lru_cache(maxsize=4096)
+def _oriented_extents(yaw, uncertainty, lateral_padding, geometry, heading):
+    # Position/time do not affect projected shape. Exact values only; no
+    # collision verdict is cached and changed uncertainty changes the key.
+    angle = yaw - heading
     c, s = abs(math.cos(angle)), abs(math.sin(angle))
-    return ((geometry.length / 2+body.uncertainty)*c + (geometry.width / 2+body.lateral_padding)*s,
-            (geometry.length / 2+body.uncertainty)*s + (geometry.width / 2+body.lateral_padding)*c)
+    return ((geometry.length / 2+uncertainty)*c + (geometry.width / 2+lateral_padding)*s,
+            (geometry.length / 2+uncertainty)*s + (geometry.width / 2+lateral_padding)*c)
 
 
 def overlaps(first, second, geometry, margin=0.0):
@@ -115,7 +129,8 @@ def target_body(controller, vehicle_id):
         origin=getattr(controller,'_collision_v2x_origin','unconfirmed'),
         offset=getattr(controller,'_collision_center_offset',0.522),
         max_age=getattr(controller,'_collision_max_age',0.5),
-        origin_lateral_margin=getattr(controller,'_collision_origin_lateral_margin',None))
+        origin_lateral_margin=getattr(controller,'_collision_origin_lateral_margin',None),
+        unknown_yaw_origin_margin=getattr(controller,'_collision_v2x_unknown_yaw_origin_margin',None))
 
 
 def ego_body(controller, pose):
@@ -152,6 +167,17 @@ def predicted_ego(controller, xs, ys, index):
     return ego_body(controller,SimpleNamespace(x=xs[index],y=ys[index],theta=yaw))
 
 
+@lru_cache(maxsize=128)
+def _sweep_ego_samples(a, b, steps, angle, padding):
+    """Share the exact interpolated ego bodies across opponents, not verdicts."""
+    return tuple(replace(a,
+        x=a.x+(b.x-a.x)*((j+.5)/steps),
+        y=a.y+(b.y-a.y)*((j+.5)/steps), yaw=a.yaw+angle*((j+.5)/steps),
+        uncertainty=max(a.uncertainty,b.uncertainty)+padding,
+        lateral_uncertainty=max(a.lateral_padding,b.lateral_padding)+padding)
+        for j in range(steps))
+
+
 def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
     """Conservative continuous-segment check, including translation and yaw sweep.
 
@@ -178,13 +204,10 @@ def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
                                                     a.lateral_padding, b.lateral_padding)
         padding = distance/(2*steps) + radius*abs(angle)/(2*steps)
         target_padding = math.hypot(vx,vy)*(t1-t0)/(2*steps)
-        for j in range(steps):
+        ego_samples = _sweep_ego_samples(a, b, steps, angle, padding)
+        for j, ego in enumerate(ego_samples):
             ratio = (j+.5)/steps
             time = t0+(t1-t0)*ratio
-            ego = replace(a, x=a.x+(b.x-a.x)*ratio, y=a.y+(b.y-a.y)*ratio,
-                          yaw=a.yaw+angle*ratio,
-                          uncertainty=max(a.uncertainty,b.uncertainty)+padding,
-                          lateral_uncertainty=max(a.lateral_padding,b.lateral_padding)+padding)
             other = replace(target, x=target.x+vx*time, y=target.y+vy*time,
                             uncertainty=target.uncertainty+target_padding,
                             lateral_uncertainty=target.lateral_padding+target_padding)

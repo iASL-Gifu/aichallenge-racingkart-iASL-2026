@@ -14,10 +14,12 @@ from multi_purpose_mpc_ros.core.spatial_bicycle_models import (
     understeer_curvature_gain,
 )
 from multi_purpose_mpc_ros.core.reference_path import (
+    OUTER_COURSE_MARGIN,
     collapsed_constraint_snapshot,
     retain_first_collapsed_constraint,
 )
 from multi_purpose_mpc_ros.core.precomputed_lane_reference import apply_precomputed_heading
+from multi_purpose_mpc_ros.core.wall_constraints import wall_center_bounds
 
 # Colors
 PREDICTION = '#BA4A00'
@@ -435,6 +437,7 @@ class MPC:
         self.solve_time_budget_ms = 20.0
         self.max_prediction_fallback_cycles = 3
         self.prediction_outer_boundary_guard = 0.0
+        self.wall_body_half_length = 1.554
         self.prediction_lateral_tolerance = 0.02
         self.lane_constraint_retry_relaxation_m = (
             0.0, 0.10, 0.20, 0.35, 0.50, 0.70, 0.90, 1.20)
@@ -950,7 +953,27 @@ class MPC:
         A_inequality = self.A_inequality     
 
         # 完全な制約行列
-        A_full = sparse.vstack([Aeq, A_inequality], format='csc')
+        # Keep physical walls separate from artificial lane bounds. Neither
+        # lane relaxation nor dynamic-obstacle fallback may loosen these rows.
+        # Both signs enforce lower <= e_y +/- half_length*e_psi <= upper,
+        # protecting the front/rear corners as well as the tracked position.
+        wall_rows, wall_cols, wall_values = [], [], []
+        wall_lower, wall_upper = [], []
+        for n in range(1, N + 1):
+            wp = self.model.reference_path.get_waypoint(self.model.wp_id + n)
+            wl, wu = wall_center_bounds(
+                float(wp.lb), float(wp.ub), course_margin=OUTER_COURSE_MARGIN,
+                half_width=.5 * self.model.width, guard=self.prediction_outer_boundary_guard)
+            for sign in (-1., 1.):
+                row = len(wall_lower)
+                wall_rows.extend((row, row))
+                wall_cols.extend((n * self.nx, n * self.nx + 1))
+                wall_values.extend((1., sign * self.wall_body_half_length))
+                wall_lower.append(wl)
+                wall_upper.append(wu)
+        A_wall = sparse.csc_matrix((wall_values, (wall_rows, wall_cols)),
+                                  shape=(2 * N, nx_N + nu_N))
+        A_full = sparse.vstack([Aeq, A_inequality, A_wall], format='csc')
 
         t_matrix = time.perf_counter()
         cpu_matrix = time.thread_time() if detail_enabled else 0.
@@ -973,8 +996,8 @@ class MPC:
         cpu_constraints2 = time.thread_time() if detail_enabled else 0.
 
         # 全ての境界を結合
-        l = np.hstack([leq, lineq_basic, lineq_rate])
-        u = np.hstack([ueq, uineq_basic, uineq_rate])
+        l = np.hstack([leq, lineq_basic, lineq_rate, wall_lower])
+        u = np.hstack([ueq, uineq_basic, uineq_rate, wall_upper])
 
         # コスト行列
         P = self.P_base
@@ -1037,19 +1060,7 @@ class MPC:
         self.update +=(t_update-t_vector)
         if self.debug_counter % 80 == 0:
             
-            print(
-                f"startup={self.startup*1000:.2f} "
-                f"linearize={self.linearize*1000:.2f} "
-                f"path_constraints={self.path_constraints*1000:.2f} "
-                f"sparse={self.sparse*1000:.2f} "
-                f"constraints2={self.constraints2*1000:.2f} "
-                f"vector={self.vector*1000:.2f} "
-                f"update={self.update*1000:.2f}",
-                flush=True
-            )
-            
-
-
+            # Detailed timings are emitted in the aggregated ControlTiming log.
             # リセット
             self.startup = 0
             self.linearize = 0
@@ -1239,6 +1250,15 @@ class MPC:
             # ステア角の計算と保存
             control_signals[1::2] = np.arctan(control_signals[1::2] * self.model.length)
             x = np.reshape(dec.x[:(N+1)*nx], (N+1, nx))
+            for n in range(1, N + 1):
+                wp = self.model.reference_path.get_waypoint(self.model.wp_id + n)
+                wl, wu = wall_center_bounds(
+                    float(wp.lb), float(wp.ub), course_margin=OUTER_COURSE_MARGIN,
+                    half_width=.5 * self.model.width,
+                    guard=self.prediction_outer_boundary_guard,
+                    heading_error=float(x[n, 1]), half_length=self.wall_body_half_length)
+                if not wl - .01 <= float(x[n, 0]) <= wu + .01:
+                    raise ValueError(f"MPC body-wall constraint violated at wp={self.model.wp_id+n}")
             candidate_prediction = self.update_prediction(x, N)
             if not is_plausible_mpc_prediction(
                 x,
