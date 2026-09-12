@@ -77,7 +77,7 @@ def test_rotated_body_checks_corners_and_out_of_map():
 
 
 def recovery_controller():
-    c = NS(_reentry_mpc_path_is_valid=Mock(return_value=False), _steering_fallback_armed=False, _request_awsim_control_mode_for_recovery=Mock(),
+    c = NS(_reentry_mpc_path_is_valid=Mock(return_value=True), _steering_fallback_armed=False, _request_awsim_control_mode_for_recovery=Mock(),
            _last_u=[0.,0.], _reentry_violation=lambda *a: .3,
            _straight_reentry_active=True, _straight_reentry_returning_drive=False,
            _straight_reentry_success_cycles=0, _straight_reentry_success_cycles_required=3,
@@ -218,6 +218,7 @@ def test_stopped_steering_change_waits_before_motion():
 
 def test_solved_mpc_without_motion_keeps_recovery_active():
     c=recovery_controller()
+    c._reentry_mpc_path_is_valid.return_value=False
     c._mpc=NS(infeasibility_counter=0,current_prediction=object(),
               used_prediction_fallback=False,recovery_requested=False,
               time_budget_exceeded=False,max_steering_rate=1.)
@@ -343,7 +344,7 @@ def test_normal_forward_handoff_preserves_command_without_one_cycle_brake():
         u=[2.,.12]
         owns=check(c,NS(nanoseconds=t*1_000_000_000),NS(x=0.,y=0.,theta=0.),u)
         if t < 3:
-            assert owns and u[0] == 1.
+            assert owns and u[0] == 0.
         else:
             assert not owns and u == [2.,.12]
             assert not c._straight_reentry_active
@@ -492,7 +493,9 @@ def test_mpc_recovery_checks_actual_curved_prediction_and_yaw(safe):
          _prediction_has_forward_progress=lambda *a:True,
          _reentry_path_is_clear=Mock(return_value=(safe,'vehicle_collision=car')),
          get_logger=Mock(return_value=Mock()))
-    assert controller_method('_reentry_mpc_path_is_valid')(c,NS(x=0.,y=0.,theta=0.),(1.,.1)) is safe
+    c._mpc.infeasibility_counter=0; c._mpc.current_prediction=object()
+    c._mpc.used_prediction_fallback=False; c._mpc.recovery_requested=False; c._mpc.time_budget_exceeded=False
+    assert controller_method('_mpc_prediction_path_is_clear')(c,NS(x=0.,y=0.,theta=0.),(1.,.1)) is safe
     path=c._reentry_path_is_clear.call_args.args[0]
     assert path[-1] == pytest.approx((1.,.4,.5))
     assert any(p == pytest.approx((.5,.1,.2)) for p in path)
@@ -506,6 +509,9 @@ def test_mpc_recovery_rejects_missing_invalid_or_inaccurate_prediction(accurate,
     c=NS(_mpc=NS(last_solution_accurate=accurate,current_recovery_prediction=prediction),
          _prediction_has_forward_progress=lambda *a:True,
          _reentry_path_is_clear=Mock())
+    c._mpc.infeasibility_counter=0; c._mpc.current_prediction=object()
+    c._mpc.used_prediction_fallback=False; c._mpc.recovery_requested=False; c._mpc.time_budget_exceeded=False
+    c._mpc_prediction_path_is_clear=MethodType(controller_method('_mpc_prediction_path_is_clear'),c)
     assert not controller_method('_reentry_mpc_path_is_valid')(c,NS(x=0.,y=0.,theta=0.),(1.,0.))
     c._reentry_path_is_clear.assert_not_called()
 
@@ -522,3 +528,56 @@ def test_safe_mpc_confirmation_does_not_execute_reverse_candidate():
         c._publish_gear_command.assert_not_called()
     assert tick(c,3.) == [5.,.1]
     assert all(call.args[1] == 2 for call in c._publish_gear_command.call_args_list)
+
+
+
+def test_moving_fixed_forward_candidate_cannot_bypass_rejected_mpc_path():
+    c=recovery_controller()
+    c._reentry_mpc_path_is_valid.return_value=False
+    c._velocity_report.longitudinal_velocity=.4
+    c._mpc=NS(infeasibility_counter=0,current_prediction=object(),used_prediction_fallback=False,
+              recovery_requested=False,time_budget_exceeded=False,max_steering_rate=1.)
+    c._straight_reentry_direction=1
+    c._reentry_steering=.3
+    for t in (1.,2.,3.,4.):
+        tick(c,t)
+    assert c._straight_reentry_active
+    assert c._straight_reentry_success_cycles == 0
+
+
+@pytest.mark.parametrize('depths,maxima,expected', [
+    ([1.,1.2,.7],[.2,.22,.18],True),
+    ([1.,1.2,.7],[.2,.24,.18],False),
+    ([1.,1.2,1.1],[.2,.22,.18],False),
+    ([1.,1.2,.7],[.2,.22,.21],False),
+    ([1.,1.1,1.2,.7],[.2,.22,.24,.18],False),
+])
+def test_reverse_allows_bounded_temporary_overlap_but_requires_terminal_improvement(depths,maxima,expected):
+    m=static_map()
+    def details():
+        return [{'reason':'occupied_cell','occupied_cells':{(1,1)},
+                 'overlap_depth':d,'max_overlap_depth':v} for d,v in zip(depths,maxima)]
+    bodies=[BodyPose(i*.05,0.,0.,0.) for i in range(len(depths))]
+    m.static_body_collision_detail=Mock(side_effect=details())
+    assert m.static_recovery_path_is_clear(bodies,BodyGeometry(),temporary_depth_increase=.03)[0] is expected
+    m.static_body_collision_detail=Mock(side_effect=details())
+    assert not m.static_recovery_path_is_clear(bodies,BodyGeometry())[0]
+
+
+def test_reverse_allowance_cannot_hide_new_wall_patch():
+    m=static_map()
+    m.static_body_collision_detail=Mock(side_effect=[
+        {'reason':'occupied_cell','occupied_cells':{(1,1)},'overlap_depth':1.,'max_overlap_depth':.2},
+        {'reason':'occupied_cell','occupied_cells':{(9,9)},'overlap_depth':.5,'max_overlap_depth':.1}])
+    safe,reason=m.static_recovery_path_is_clear(
+        [BodyPose(0.,0.,0.,0.),BodyPose(-.05,0.,0.,0.)],BodyGeometry(),temporary_depth_increase=.03)
+    assert not safe and reason.startswith('new_wall_contact')
+
+
+def test_reverse_checker_is_separate_from_three_forward_checks():
+    forward=Mock(return_value=(False,'wall_overlap_increases_at_step=1'))
+    reverse=Mock(return_value=(True,'wall_escape'))
+    motion,_=choose(clear=forward,reverse_clear=reverse)
+    assert motion.direction == -1
+    assert forward.call_count == 3 and reverse.call_count == 1
+    assert reverse.call_args.args[0][-1][0] < 0.

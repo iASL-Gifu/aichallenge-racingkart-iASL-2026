@@ -197,8 +197,10 @@ class Map:
                         first_pixel=[px, py], first_world=list(self.m2w(px, py)))
         return None
 
-    def static_recovery_path_is_clear(self, bodies, geometry):
+    def static_recovery_path_is_clear(self, bodies, geometry, *, temporary_depth_increase=0.):
         """Allow shrinking continuous wall contact, rejecting new contact patches."""
+        if not math.isfinite(temporary_depth_increase) or temporary_depth_increase < 0.:
+            return False, 'invalid_overlap_allowance'
         if not bodies:
             return False, 'empty_path'
         # Use identical swept padding at every sample, including the start.
@@ -208,7 +210,7 @@ class Map:
                 return False, 'invalid_ego_body'
             angle = abs(math.atan2(math.sin(b.yaw-a.yaw), math.cos(b.yaw-a.yaw)))
             padding = max(padding, .05 + math.hypot(b.x-a.x, b.y-a.y) + geometry.radius*angle)
-        initial_depth = previous_depth = 0.
+        initial_max_depth = initial_depth = previous_depth = 0.
         previous_cells = set()
         previous_max_depth = 0.
         for i, body in enumerate(bodies):
@@ -220,6 +222,7 @@ class Map:
             max_depth = detail['max_overlap_depth'] if detail else 0.
             if i == 0:
                 initial_depth = depth
+                initial_max_depth = max_depth
             else:
                 # A 5 cm motion can change the contacted 10 cm map cells even
                 # while retreating. New contact must adjoin the previous patch;
@@ -232,14 +235,20 @@ class Map:
                 if disconnected:
                     summary = {key: value for key, value in detail.items() if key != 'occupied_cells'}
                     return False, f'new_wall_contact_at_step={i}, padding={padding:.3f}, detail={summary}'
-                if depth > previous_depth + 1e-8 or max_depth > previous_max_depth + 1e-8:
+                if temporary_depth_increase > 0. and initial_depth > 0.:
+                    if max_depth > initial_max_depth + temporary_depth_increase + 1e-8:
+                        return False, (f'wall_overlap_limit_at_step={i}, '
+                                       f'initial_max={initial_max_depth:.6f}, '
+                                       f'max_depth={max_depth:.6f}, allowance={temporary_depth_increase:.3f}')
+                elif depth > previous_depth + 1e-8 or max_depth > previous_max_depth + 1e-8:
                     return False, (f'wall_overlap_increases_at_step={i}, '
                                    f'depth={previous_depth:.6f}->{depth:.6f}, '
                                    f'max_depth={previous_max_depth:.6f}->{max_depth:.6f}')
             previous_cells, previous_depth = cells, depth
             previous_max_depth = max_depth
         if initial_depth > 0.:
-            if previous_depth >= initial_depth - 1e-6:
+            if (previous_depth >= initial_depth - 1e-6
+                    or previous_max_depth > initial_max_depth + 1e-8):
                 return False, 'wall_overlap_not_reduced'
             return True, 'wall_escape'
         return True, 'clear'

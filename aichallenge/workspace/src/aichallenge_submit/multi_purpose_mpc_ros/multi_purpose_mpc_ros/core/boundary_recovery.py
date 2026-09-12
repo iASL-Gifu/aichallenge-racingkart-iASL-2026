@@ -37,7 +37,7 @@ def recovery_speed_limit(path):
 
 
 def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
-             previous_steering=0., steering_step=math.inf, overlap=None, min_reverse_distance=.1):
+             previous_steering=0., steering_step=math.inf, overlap=None, min_reverse_distance=.1, reverse_clear=None):
     """Choose WP-directed forward motion, otherwise straight reverse.
 
     Neither corridor membership nor corridor improvement participates in this
@@ -89,7 +89,8 @@ def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
                                             -motion.improvement, abs(motion.steering)))
         return candidates[0], 'forward_to_waypoint'
     path = rollout(pose, -1, 0., distance, wheelbase)
-    safe, reverse_reason = clear(path)
+    check_reverse = reverse_clear or clear
+    safe, reverse_reason = check_reverse(path)
     if safe:
         return Motion(-1, 0., path, 0.), 'reverse: ' + '; '.join(reasons)
     # Stop the validated prefix before worsening overlap OR a new wall.
@@ -100,7 +101,7 @@ def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
             length = math.hypot(prefix[-1][0]-pose[0], prefix[-1][1]-pose[1])
             if length+1e-8 < max(.1, min_reverse_distance):
                 break
-            safe, reason = clear(prefix)
+            safe, reason = check_reverse(prefix)
             if safe and reason in ('wall_escape', 'clear'):
                 return Motion(-1, 0., prefix, 0.,
                               speed_limit=recovery_speed_limit(prefix)), (

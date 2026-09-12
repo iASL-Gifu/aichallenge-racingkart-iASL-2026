@@ -1604,6 +1604,8 @@ class MPCController(Node):
             "straight_reentry_enabled", True))
         self._straight_reentry_speed = max(float(get_cfg(
             "straight_reentry_speed", .5)), 0.0)
+        self._reverse_overlap_allowance = float(get_cfg(
+            "reverse_overlap_allowance", .03))
         self._straight_reentry_probe_distance = max(float(get_cfg(
             "straight_reentry_probe_distance", 2.0)), 0.1)
         self._straight_reentry_success_cycles_required = max(int(get_cfg(
@@ -2034,12 +2036,8 @@ class MPCController(Node):
             return reject("nonfinite_command")
         if float(u[0]) <= .1:
             return reject(f"speed_too_low: {float(u[0]):.3f}")
-        # Check the rate-limited command actually returned by MPC, not the
-        # unrelated PP steering that currently owns the controller.
-        safe, reason = self._pure_pursuit_feedback_is_safe(
-            pose, max(abs(float(speed)), float(u[0])), float(u[1]))
-        if not safe:
-            return reject(f"command_wall: {reason}")
+        if not self._mpc_prediction_path_is_clear(pose, u):
+            return False
         near = getattr(mpc, "collision_prediction_context", None)
         if near is None or near[0] is not mpc.current_prediction:
             return reject("stale_collision_prediction")
@@ -6592,17 +6590,21 @@ class MPCController(Node):
             return math.inf
         return max(lower-offset, offset-upper, 0.0)
 
-    def _reentry_path_is_clear(self, path, speed=None):
+    def _reentry_path_is_clear(self, path, speed=None, reverse=False):
         """Check physical static bodies and moving traffic, not corridor membership."""
         from types import SimpleNamespace
         if not self._recovery_localization_available:
             return False, 'localization_unavailable'
-        if self._straight_reentry_speed <= 0.0:
+        if speed is None and self._straight_reentry_speed <= 0.0:
             return False, 'recovery_speed_disabled'
         bodies = [collision.ego_body(self, SimpleNamespace(x=x, y=y, theta=yaw))
                   for x, y, yaw in path]
         geometry = collision.geometry(self)
-        safe, static_reason = self._map.static_recovery_path_is_clear(bodies, geometry)
+        if reverse:
+            safe, static_reason = self._map.static_recovery_path_is_clear(
+                bodies, geometry, temporary_depth_increase=self._reverse_overlap_allowance)
+        else:
+            safe, static_reason = self._map.static_recovery_path_is_clear(bodies, geometry)
         if not safe:
             if 'invalid_body' in static_reason or 'invalid_ego_body' in static_reason:
                 static_reason += (
@@ -6630,9 +6632,21 @@ class MPCController(Node):
         return True, static_reason
 
     def _reentry_mpc_path_is_valid(self, pose, command):
-        """Validate actual MPC positions and yaw with the shared physical checker."""
-        if (not getattr(self._mpc, 'last_solution_accurate', False)
-                or not self._prediction_has_forward_progress(pose, command)):
+        """Recovery additionally requires an accurate solve and forward progress."""
+        return bool(
+            getattr(self._mpc, 'last_solution_accurate', False)
+            and self._prediction_has_forward_progress(pose, command)
+            and self._mpc_prediction_path_is_clear(pose, command))
+
+    def _mpc_prediction_path_is_clear(self, pose, command):
+        """Shared physical MPC path check for normal and recovery handoff."""
+        self._mpc_handoff_reason = 'invalid_mpc_path'
+        mpc = self._mpc
+        if (mpc.infeasibility_counter != 0 or mpc.current_prediction is None
+                or mpc.used_prediction_fallback or mpc.recovery_requested
+                or mpc.time_budget_exceeded
+                or not all(math.isfinite(float(v)) for v in (*command, pose.x, pose.y, pose.theta))
+                or command[0] <= 0.):
             return False
         prediction = getattr(self._mpc, 'current_recovery_prediction', None)
         if prediction is None or len(prediction) < 2:
@@ -6651,6 +6665,7 @@ class MPCController(Node):
                 ratio = i/steps
                 path.append((x+ratio*dx, y+ratio*dy, yaw+ratio*angle))
         safe, reason = self._reentry_path_is_clear(path, speed=command[0])
+        self._mpc_handoff_reason = 'mpc_path_clear' if safe else f'mpc_path: {reason}'
         if not safe:
             self.get_logger().warn(f'[MPCRecoveryPathBlocked] {reason}', throttle_duration_sec=.5)
         return safe
@@ -6699,6 +6714,7 @@ class MPCController(Node):
             steering_step=(float(self._mpc.max_steering_rate)
                            / float(self._mpc_cfg.control_rate) if moving else math.inf),
             clear=self._reentry_path_is_clear, overlap=self._reentry_overlap,
+            reverse_clear=lambda path: self._reentry_path_is_clear(path, reverse=True),
             min_reverse_distance=(.05 + .5*abs(float(self._velocity_report.longitudinal_velocity))
                                   + .5*float(self._velocity_report.longitudinal_velocity)**2))
 
@@ -6813,12 +6829,7 @@ class MPCController(Node):
         mpc_forward_ready = bool(
             fresh_mpc and normal_forward_ready
             and self._reentry_mpc_path_is_valid(pose, normal_command))
-        forward_and_stable = bool(
-            mpc_forward_ready or (
-            fresh_mpc and normal_forward_ready
-            and motion is not None and motion.direction > 0
-            and self._current_gear_is_drive()
-            and float(getattr(self._velocity_report, 'longitudinal_velocity', 0.)) > .15))
+        forward_and_stable = mpc_forward_ready
         if not forward_and_stable:
             self._straight_reentry_returning_drive = False
         self._straight_reentry_success_cycles = (
@@ -12275,7 +12286,9 @@ class MPCController(Node):
                     solution_valid and not solution_accurate
                     and self._inaccurate_mpc_handoff_is_safe(
                         predicted_pose, v, u))
-                if solution_accurate or checked_approximate:
+                checked_accurate = bool(
+                    solution_accurate and self._mpc_prediction_path_is_clear(predicted_pose, u))
+                if checked_accurate or checked_approximate:
                     self._steering_fallback_success_cycles += 1
                 else:
                     self._steering_fallback_success_cycles = 0

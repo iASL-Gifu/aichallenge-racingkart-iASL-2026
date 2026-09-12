@@ -19,6 +19,7 @@ def controller():
     c._mpc.last_solution_accurate = False
     c._mpc.collision_prediction_context = (c._mpc.current_prediction, c._mpc.current_prediction)
     c._pure_pursuit_feedback_is_safe = Mock(return_value=(True, 'ok'))
+    c._mpc_prediction_path_is_clear = Mock(return_value=True)
     c._inaccurate_mpc_handoff_is_safe = MethodType(
         controller_method('_inaccurate_mpc_handoff_is_safe'), c)
     return c
@@ -27,7 +28,8 @@ def controller():
 def test_approximate_prediction_passing_two_stopped_cars_is_usable():
     c = controller()
     assert c._inaccurate_mpc_handoff_is_safe(POSE, 0., [2., .1])
-    c._pure_pursuit_feedback_is_safe.assert_called_once_with(POSE, 2., .1)
+    c._mpc_prediction_path_is_clear.assert_called_once_with(POSE, [2., .1])
+    c._pure_pursuit_feedback_is_safe.assert_not_called()
 
 
 @pytest.mark.parametrize('case', ['wall', 'collision', 'unknown_vehicle', 'stale', 'failure',
@@ -36,7 +38,7 @@ def test_approximate_solution_needs_current_command_and_clear_connected_path(cas
     c = controller()
     m = c._mpc
     u = [2., .1]
-    if case == 'wall': c._pure_pursuit_feedback_is_safe.return_value = (False, 'wall')
+    if case == 'wall': c._mpc_prediction_path_is_clear.return_value = False
     elif case == 'collision': m.current_prediction[1][:] = [0.] * len(m.current_prediction[0])
     elif case == 'unknown_vehicle': c._v2x_tracker.update(_msg(.1, [('new', 15., 0.)]))
     elif case == 'stale': m.collision_prediction_context = (object(), m.current_prediction)
@@ -54,14 +56,14 @@ def test_approximate_solution_needs_current_command_and_clear_connected_path(cas
     assert not c._inaccurate_mpc_handoff_is_safe(POSE, 0., u)
 
 
-def fallback_tick(c):
+def fallback_tick(c, accurate=False):
     # Execute the actual ownership block, including its eight-cycle latch and
     # PP override, with the real additional collision validation.
     node = next(n for n in ast.walk(control_tree()) if isinstance(n, ast.If)
                 and ast.unparse(n.test) == 'self._steering_fallback_armed'
                 and any(isinstance(a, ast.Name) and a.id == 'checked_approximate'
                         for a in ast.walk(n)))
-    scope = dict(math=math, self=c, solution_valid=True, solution_accurate=False,
+    scope = dict(math=math, self=c, solution_valid=True, solution_accurate=accurate,
                  predicted_pose=POSE, v=0., u=[2., .1],
                  moving_target_prediction_clear=False,
                  wall_fallback_stop=False, pure_pursuit_safe_this_cycle=False)
@@ -100,6 +102,7 @@ def test_unsafe_cycle_resets_handoff_confirmation():
     c._steering_fallback_speed = 7.5
     c._active_path_pure_pursuit_feedback = lambda *a: (None, 1., 262, 'wall')
     c._legacy_active_path_feedback = lambda: -.314
+    c._mpc_prediction_path_is_clear.return_value = False
     c._pure_pursuit_feedback_is_safe.return_value = (False, 'wall')
     c.get_logger = Mock(return_value=Mock())
     assert fallback_tick(c)['u'][0] == 0.
@@ -108,7 +111,7 @@ def test_unsafe_cycle_resets_handoff_confirmation():
 
 
 @pytest.mark.parametrize('case,reason', [
-    ('wall', 'command_wall: wall'),
+    ('wall', 'mpc_path: wall'),
     ('zero', 'speed_too_low:'),
     ('collision', 'vehicle_collision:'),
     ('stale', 'stale_collision_prediction'),
@@ -117,7 +120,10 @@ def test_handoff_reports_rejection_reason(case, reason):
     c = controller()
     u = [2., .1]
     if case == 'wall':
-        c._pure_pursuit_feedback_is_safe.return_value = (False, 'wall')
+        def reject(*args):
+            c._mpc_handoff_reason='mpc_path: wall'
+            return False
+        c._mpc_prediction_path_is_clear.side_effect=reject
     elif case == 'zero':
         u[0] = 0.
     elif case == 'collision':
@@ -248,3 +254,22 @@ def test_generic_reverse_still_stops_for_rear_hazards(clearance, traffic_clear, 
     assert c._begin_stuck_drive_transition.called is stopped
     if stopped:
         assert scope['u'] == [0., 0.]
+
+
+
+@pytest.mark.parametrize('safe', [True, False])
+def test_accurate_normal_handoff_requires_shared_mpc_path_check(safe):
+    c=controller()
+    c._mpc_prediction_path_is_clear.return_value=safe
+    c._steering_fallback_armed=True
+    c._steering_fallback_success_cycles=7
+    c._steering_fallback_success_required=8
+    c._steering_fallback_speed=7.5
+    c._active_path_pure_pursuit_feedback=lambda *a:(None,1.,262,'wall')
+    c._legacy_active_path_feedback=lambda:-.314
+    c._pure_pursuit_feedback_is_safe.return_value=(False,'wall')
+    c.get_logger=Mock(return_value=Mock())
+    result=fallback_tick(c,accurate=True)
+    assert c._steering_fallback_armed is not safe
+    assert result['u'][0] == (2. if safe else 0.)
+    c._mpc_prediction_path_is_clear.assert_called_once()

@@ -444,6 +444,7 @@ stuck_recovery:
   generic_reverse_min_distance: 0.5 # [m] 前方車由来でないReverseは、MPC有効だけではこの実後退量未満でDRIVEへ戻さない
   straight_reentry_enabled: true # スタック復帰（境界内外共通。前進:左/直進/右、後退:直進）
   straight_reentry_speed: 1.0 # [m/s] 前進・後退の復帰速度。実装上限1.0m/s
+  reverse_overlap_allowance: 0.03 # [m] 後退予測途中の最大食い込み増加上限。終端は総量減少・最大値初期以下。0で単調改善
   straight_reentry_probe_distance: 2.0 # [m] 各候補の物理衝突検証距離。重なり減少→WP方位改善→WP接近の順で比較
   straight_reentry_success_cycles: 8 # 安全な前進候補・実前進・MPC正常・通常前進指令を連続確認して終了
   cooldown: 2.0
