@@ -1,6 +1,7 @@
 """Reuse cannot bypass changing geometry, traffic gates or Shadow proof counts."""
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
+import numpy as np
 
 from multi_purpose_mpc_ros.core.traffic_work import TrafficWork
 from multi_purpose_mpc_ros.overtake_session import OvertakeSession, ShadowProbe
@@ -9,15 +10,19 @@ from .test_overtake_session import controller_method, active_session
 
 
 def passage_controller():
-    wp = NS(x=0., y=0., psi=0., lb=-4., ub=4.)
-    path = NS(waypoints=[wp], n_lanes=3, inner_lane_width=.5,
+    wp = NS(x=0., y=0., psi=0., lb=-4., ub=4.,
+            static_border_cells=((0., 4.), (0., -4.)))
+    path = NS(waypoints=[wp], n_waypoints=1, n_lanes=3, inner_lane_width=.5,
+              map=NS(data=object(), revision=0),
+              update_path_constraints=lambda *a, **k: (
+                  np.full(3, wp.ub), np.full(3, wp.lb), None),
               get_waypoint=lambda i: wp,
               get_lane_bounds=lambda i: [(wp.lb+2, wp.lb), (1, -1), (wp.ub, wp.ub-2)])
     tracker = NS(_samples={'d2': [(0., 0., 0.)]}, velocity=Mock(return_value=(0., 0.)))
     return NS(_traffic_work=TrafficWork(), _reference_pathN_center=path,
               _carN_center=NS(wp_id=0, get_closest_waypoint=Mock(return_value=0)),
               _mpcN_center=NS(N=3), _v2x_tracker=tracker,
-              _cfg=NS(bicycle_model=NS(width=1.6)), _v2x_vehicle_radius=.7,
+              _cfg=NS(bicycle_model=NS(width=1.6, length=1.087)), _v2x_vehicle_radius=.7,
               _passage_clearance=.3, _prepass_lane_fallback_prediction_sec=.3,
               _v2x_t_samples=[0., .1, .2], _passage_lane_width_tolerance=.05,
               _passage_lane_width_tolerance_points=2, get_logger=lambda: Mock())

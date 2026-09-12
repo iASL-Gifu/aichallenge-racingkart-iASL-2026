@@ -91,6 +91,7 @@ class Map:
         self.boundaries = list()
 
         self.data_backup = self.data.copy()
+        self.revision = 0
 
     def w2m(self, x, y):
         """
@@ -154,6 +155,95 @@ class Map:
         cells = self.data_backup[min_y:max_y + 1, min_x:max_x + 1]
         return bool(np.all(cells[disk] != 0))
 
+    def static_body_is_free(self, body, geometry, padding=0.0):
+        return self.static_body_collision_detail(body, geometry, padding) is None
+
+    def static_body_collision_detail(self, body, geometry, padding=0.0, *, include_cells=False):
+        """Return collision evidence, or None for a free oriented footprint."""
+        if not body.position_valid or not body.yaw_valid:
+            return {"reason": "invalid_body"}
+        hl = geometry.length / 2 + body.uncertainty + padding
+        hw = geometry.width / 2 + body.lateral_padding + padding
+        c, sn = math.cos(body.yaw), math.sin(body.yaw)
+        rx, ry = abs(c)*hl + abs(sn)*hw, abs(sn)*hl + abs(c)*hw
+        res = float(self.resolution)
+        cx = (body.x-self.origin[0])/res
+        cy = self.height-1-(body.y-self.origin[1])/res
+        xmin, xmax = math.floor(cx-rx/res-.5), math.ceil(cx+rx/res+.5)
+        ymin, ymax = math.floor(cy-ry/res-.5), math.ceil(cy+ry/res+.5)
+        detail = dict(center=[body.x, body.y], yaw=body.yaw,
+                      checked_length=2*hl, checked_width=2*hw,
+                      origin=body.origin, yaw_source=body.yaw_source,
+                      uncertainty=body.uncertainty, lateral_uncertainty=body.lateral_padding,
+                      pixel_bounds=[xmin, xmax, ymin, ymax])
+        if xmin < 0 or ymin < 0 or xmax >= self.width or ymax >= self.height:
+            return dict(detail, reason="out_of_map")
+        iy, ix = np.ogrid[ymin:ymax+1, xmin:xmax+1]
+        dx, dy = (ix-cx)*res, -(iy-cy)*res
+        cell_padding = .5*res*(abs(c)+abs(sn))
+        overlap = ((np.abs(dx*c+dy*sn) <= hl+cell_padding)
+                   & (np.abs(-dx*sn+dy*c) <= hw+cell_padding))
+        occupied = overlap & (self.data_backup[ymin:ymax+1, xmin:xmax+1] == 0)
+        rows, cols = np.nonzero(occupied)
+        if len(rows):
+            px, py = xmin+int(cols[0]), ymin+int(rows[0])
+            if include_cells:
+                detail["occupied_cells"] = set(zip((cols+xmin).tolist(), (rows+ymin).tolist()))
+                depth = np.minimum(hl+cell_padding-np.abs(dx*c+dy*sn),
+                                   hw+cell_padding-np.abs(-dx*sn+dy*c))
+                detail["overlap_depth"] = float(depth[occupied].sum())
+                detail["max_overlap_depth"] = float(depth[occupied].max())
+            return dict(detail, reason="occupied_cell", occupied_count=len(rows),
+                        first_pixel=[px, py], first_world=list(self.m2w(px, py)))
+        return None
+
+    def static_recovery_path_is_clear(self, bodies, geometry):
+        """Allow shrinking continuous wall contact, rejecting new contact patches."""
+        if not bodies:
+            return False, 'empty_path'
+        # Use identical swept padding at every sample, including the start.
+        padding = .05
+        for a, b in zip(bodies, bodies[1:]):
+            if not a.yaw_valid or not b.yaw_valid:
+                return False, 'invalid_ego_body'
+            angle = abs(math.atan2(math.sin(b.yaw-a.yaw), math.cos(b.yaw-a.yaw)))
+            padding = max(padding, .05 + math.hypot(b.x-a.x, b.y-a.y) + geometry.radius*angle)
+        initial_depth = previous_depth = 0.
+        previous_cells = set()
+        previous_max_depth = 0.
+        for i, body in enumerate(bodies):
+            detail = self.static_body_collision_detail(body, geometry, padding, include_cells=True)
+            if detail is not None and detail['reason'] != 'occupied_cell':
+                return False, f"static_collision_at_step={i}, detail={detail}"
+            cells = detail['occupied_cells'] if detail else set()
+            depth = detail['overlap_depth'] if detail else 0.
+            max_depth = detail['max_overlap_depth'] if detail else 0.
+            if i == 0:
+                initial_depth = depth
+            else:
+                # A 5 cm motion can change the contacted 10 cm map cells even
+                # while retreating. New contact must adjoin the previous patch;
+                # a separated obstacle or recontact after clearance is rejected.
+                added = cells - previous_cells
+                disconnected = any(
+                    not any((x+dx, y+dy) in previous_cells
+                            for dx in (-1,0,1) for dy in (-1,0,1))
+                    for x,y in added)
+                if disconnected:
+                    summary = {key: value for key, value in detail.items() if key != 'occupied_cells'}
+                    return False, f'new_wall_contact_at_step={i}, padding={padding:.3f}, detail={summary}'
+                if depth > previous_depth + 1e-8 or max_depth > previous_max_depth + 1e-8:
+                    return False, (f'wall_overlap_increases_at_step={i}, '
+                                   f'depth={previous_depth:.6f}->{depth:.6f}, '
+                                   f'max_depth={previous_max_depth:.6f}->{max_depth:.6f}')
+            previous_cells, previous_depth = cells, depth
+            previous_max_depth = max_depth
+        if initial_depth > 0.:
+            if previous_depth >= initial_depth - 1e-6:
+                return False, 'wall_overlap_not_reduced'
+            return True, 'wall_escape'
+        return True, 'clear'
+
     def static_straight_path_clearance(
         self, x, y, heading, max_distance, footprint_radius, step=None
     ):
@@ -195,6 +285,7 @@ class Map:
                                        connectivity=8).astype(np.int8)
 
     def reset_map(self):
+        self.revision += 1
         self.data = self.data_backup.copy()
         self.obstacles = list()
 
@@ -205,6 +296,7 @@ class Map:
         """
 
         # Extend list of obstacles
+        self.revision += 1
         self.obstacles.extend(obstacles)
 
         # Iterate over list of new obstacles
@@ -229,6 +321,7 @@ class Map:
         """
 
         # Extend list of boundaries
+        self.revision += 1
         self.boundaries.extend(boundaries)
 
         # Iterate over list of boundaries

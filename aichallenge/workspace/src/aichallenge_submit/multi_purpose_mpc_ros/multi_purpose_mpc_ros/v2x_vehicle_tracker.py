@@ -1088,14 +1088,16 @@ def should_recover_from_mpc_stall(
     gnss_is_stuck,
     infeasibility_counter,
     has_fresh_valid_prediction,
+    wall_fallback_stop=False,
 ):
-    """Allow reverse only while MPC still has no fresh feasible solution."""
+    """Recover when no usable forward control remains and motion has stopped."""
     return (
-        safety_recovery_active
+        (safety_recovery_active or wall_fallback_stop)
         and abs(actual_speed) <= stall_speed_threshold
         and gnss_is_stuck
         and (
-            infeasibility_counter > 0
+            wall_fallback_stop
+            or infeasibility_counter > 0
             or not has_fresh_valid_prediction
         )
     )

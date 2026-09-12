@@ -4,7 +4,9 @@
 def passage_key(controller, target_id, pose):
     """Exact inputs, including mutable Center bounds, for one-cycle reuse."""
     path = controller._reference_pathN_center
+    from .passage_constraints import corridor_key
     return (
+        corridor_key(controller, pose),
         target_id, tuple(controller._v2x_tracker._samples.get(target_id, ())),
         tuple(controller._v2x_tracker.velocity(target_id)), pose.x, pose.y,
         controller._carN_center.wp_id, controller._mpcN_center.N,
@@ -20,6 +22,7 @@ def passage_key(controller, target_id, pose):
 class TrafficWork:
     def __init__(self):
         self.passages = {}
+        self.corridors = {}
         self.relative_samples = {}
         self.relative_hits = 0
         self.proposal = None
@@ -33,6 +36,7 @@ class TrafficWork:
 
     def begin_cycle(self):
         self.passages.clear()
+        self.corridors.clear()
         self.relative_samples.clear()
         self.probe_cycle.clear()
 

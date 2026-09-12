@@ -18,7 +18,9 @@ from multi_purpose_mpc_ros.core.reference_path import (
     collapsed_constraint_snapshot,
     retain_first_collapsed_constraint,
 )
-from multi_purpose_mpc_ros.core.precomputed_lane_reference import apply_precomputed_heading
+from multi_purpose_mpc_ros.core.precomputed_lane_reference import (
+    apply_precomputed_heading, apply_precomputed_curvature,
+)
 from multi_purpose_mpc_ros.core.wall_constraints import wall_center_bounds
 
 # Colors
@@ -432,6 +434,7 @@ class MPC:
         # 追加: ay_maxによる速度制限の方式切り替え
         self.use_max_kappa_pred = use_max_kappa_pred
         # 既存の初期化
+        self.current_recovery_prediction = None
         self.current_prediction = None
         self.infeasibility_counter = 0
         self.solve_time_budget_ms = 20.0
@@ -929,6 +932,11 @@ class MPC:
                 l1_center - midpoint, -limit, limit)
 
         # Apply only after hard/soft/Hybrid priority resolved the lateral target.
+        # Share the objective with PP fallback; this is not a predicted path
+        # or permission to move, and is refreshed on every control attempt.
+        self._fallback_lateral_reference = (
+            int(self.model.wp_id), target_lane, np.array(xr[0::self.nx], copy=True))
+
         # The Center coordinate basis, affine dynamics and hard bounds remain
         # unchanged; the offline curve is an objective, not a new corridor.
         apply_precomputed_heading(
@@ -936,6 +944,20 @@ class MPC:
             xr[0::self.nx], xr[1::self.nx], target_lane,
             self.soft_target_lane_idx, self.soft_lateral_targets is not None,
             self.lane_transition_weights)
+
+        if getattr(self.model.reference_path, 'precomputed_curvature_enabled', False):
+            # Only the input objective changes; keep the Center dynamics.
+            curvature_targets = np.array([
+                self.model.reference_path.get_waypoint(self.model.wp_id + n).kappa
+                for n in range(N)], dtype=float)
+            curvature_changed = apply_precomputed_curvature(
+                self.model.reference_path, self.model.wp_id, xr[0::self.nx],
+                curvature_targets, target_lane, self.soft_target_lane_idx,
+                self.soft_lateral_targets is not None, self.lane_transition_weights)
+            for n in range(N):
+                if curvature_changed[n]:
+                    gain = understeer_curvature_gain(ur[n * self.nu], self.understeer_coeff)
+                    ur[n * self.nu + 1] = curvature_targets[n] / max(gain, 1e-3)
 
         t_constraints = time.perf_counter()
         cpu_constraints = time.thread_time() if detail_enabled else 0.
@@ -1114,6 +1136,7 @@ class MPC:
         """
         nx = self.nx
         nu = self.nu
+        self._fallback_lateral_reference = None
         self.used_prediction_fallback = False
         self.time_budget_exceeded = False
         self.recovery_requested = False
@@ -1285,6 +1308,11 @@ class MPC:
 
             # Commit the candidate only after solver and geometry validation.
             self.current_control = control_signals
+            self.current_recovery_prediction = tuple(
+                (float(state.x), float(state.y), float(state.psi))
+                for state in (
+                    self.model.s2t(self.model.reference_path.get_waypoint(self.model.wp_id+n), x[n, :])
+                    for n in range(N)))
             self.current_prediction = candidate_prediction
             self.collision_prediction_context = (
                 candidate_prediction, self.update_prediction(x,N,start_index=0))

@@ -633,6 +633,27 @@ class MPCController(Node):
             except (OSError, ValueError, KeyError, TypeError) as error:
                 self.get_logger().error(
                     f'[PrecomputedL0] disabled; using original lane reference: {error}')
+        lane_profiles = getattr(cfg_ref_path, 'lane_precomputed_reference_csvs', [])
+        if lane_profiles:
+            from multi_purpose_mpc_ros.core.precomputed_lane_reference import (
+                PrecomputedLaneReference, PrecomputedLaneReferences, design_parameters)
+            profiles = []
+            for profile_csv in lane_profiles:
+                try:
+                    profiles.append(PrecomputedLaneReference.load(
+                        self.in_pkg_share(profile_csv), self._reference_pathN_center,
+                        self.in_pkg_share(''), design_parameters(self._cfg),
+                        heading_gain=float(getattr(
+                            cfg_ref_path, 'lane_precomputed_heading_gain', 1.0))))
+                    self.get_logger().info(
+                        f'[PrecomputedLane] loaded L{profiles[-1].lane_idx}: {profile_csv}')
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    self.get_logger().error(
+                        f'[PrecomputedLane] rejected {profile_csv}: {error}')
+            if profiles:
+                self._reference_pathN_center.precomputed_lane_reference = (
+                    PrecomputedLaneReferences(profiles))
+                self._reference_pathN_center.precomputed_curvature_enabled = True
         unsafe_static_fallback = bool(getattr(
             cfg_ref_path, "unsafe_static_fallback_on_narrow", False))
         self._reference_pathN_race.unsafe_static_fallback_on_narrow = (
@@ -1582,16 +1603,9 @@ class MPCController(Node):
         self._straight_reentry_enabled = bool(get_cfg(
             "straight_reentry_enabled", True))
         self._straight_reentry_speed = max(float(get_cfg(
-            "straight_reentry_speed", 1.0)), 0.0)
+            "straight_reentry_speed", .5)), 0.0)
         self._straight_reentry_probe_distance = max(float(get_cfg(
             "straight_reentry_probe_distance", 2.0)), 0.1)
-        self._straight_reentry_timeout = max(float(get_cfg(
-            "straight_reentry_timeout", 8.0)), 0.5)
-        self._straight_reentry_localization_wait_sec = max(float(get_cfg(
-            "straight_reentry_localization_wait_sec", 1.0)),
-            self._adaptive_reverse_localization_confirm_sec)
-        self._straight_reentry_min_improvement = max(float(get_cfg(
-            "straight_reentry_min_improvement", 0.20)), 0.0)
         self._straight_reentry_success_cycles_required = max(int(get_cfg(
             "straight_reentry_success_cycles", 8)), 1)
         self._straight_reentry_active = False
@@ -1606,9 +1620,11 @@ class MPCController(Node):
         self._post_reverse_straight_reentry_pending = False
         self._localization_consistent_since = None
         self._localization_consistent = False
+        self._recovery_localization_available = False
         self._localization_position_error = math.inf
         self._last_odom_received_sec = None
         self._last_gnss_received_sec = None
+        self._localization_checked_at_sec = None
         self._stuck_pre_reverse_until = None
         self._gear_report = None
         self._last_gear_report_received_sec = None
@@ -1883,6 +1899,38 @@ class MPCController(Node):
             max(-delta_limit, previous - rate_step),
             min(delta_limit, previous + rate_step)))
 
+    def _fallback_target_xy(self, wp_id):
+        """Use the applied MPC lateral objective, including Hybrid/soft rejoin."""
+        wp = self._reference_path.get_waypoint(wp_id)
+        mpc = self._mpc
+        lane = self._reference_path.target_lane_idx
+        targets = getattr(mpc, "soft_lateral_targets", None)
+        soft_lane = getattr(mpc, "soft_target_lane_idx", None)
+        index = (wp_id-int(self._car.wp_id)) % self._reference_path.n_waypoints
+        lateral = 0.
+        hybrid = getattr(mpc, "lane_transition_weights", None) is not None and targets is not None
+        reference = getattr(mpc, '_fallback_lateral_reference', None)
+        if (reference is not None and reference[0] == int(self._car.wp_id)
+                and reference[1] == lane):
+            # Use the final objective, including full-width offsets. Beyond
+            # the solved horizon, keep the terminal lateral target.
+            lateral = reference[2][min(index, len(reference[2]) - 1)]
+        elif lane is not None and not hybrid:
+            lateral = mpc._compute_lane_center(wp_id, lane)
+            offsets = getattr(mpc, "target_lane_lateral_offsets", None)
+            if lane == 2 and offsets is not None:
+                lateral += offsets[min(index, len(offsets)-1)]
+        elif soft_lane is not None or targets is not None:
+            from multi_purpose_mpc_ros.core.MPC import blend_lateral_reference
+            target = (targets[min(index, len(targets)-1)] if targets is not None
+                      else mpc._compute_lane_center(wp_id, soft_lane)
+                           + mpc.soft_target_lateral_offset)
+            lateral = blend_lateral_reference(
+                mpc.soft_target_start_e_y, target, mpc.soft_target_alpha)
+        return (float(wp.x)-float(lateral)*math.sin(wp.psi),
+                float(wp.y)+float(lateral)*math.cos(wp.psi))
+
+
     def _active_path_pure_pursuit_feedback(
         self, pose: Pose2D, speed: float,
     ):
@@ -1915,9 +1963,8 @@ class MPCController(Node):
         wheelbase = float(self._cfg.bicycle_model.length)
         rear_x = pose.x - 0.5 * wheelbase * math.cos(pose.theta)
         rear_y = pose.y - 0.5 * wheelbase * math.sin(pose.theta)
-        alpha = math.atan2(
-            float(target_wp.y) - rear_y,
-            float(target_wp.x) - rear_x) - pose.theta
+        target_x, target_y = self._fallback_target_xy(target_wp_id)
+        alpha = math.atan2(target_y - rear_y, target_x - rear_x) - pose.theta
         alpha = math.atan2(math.sin(alpha), math.cos(alpha))
         requested = math.atan2(
             2.0 * wheelbase * math.sin(alpha), lookahead)
@@ -1964,6 +2011,67 @@ class MPCController(Node):
                 predicted.y += rollout_speed * math.sin(mid_yaw) * dt
                 predicted.theta += yaw_rate * dt
         return True, "ok"
+
+    def _inaccurate_mpc_handoff_is_safe(self, pose, speed, u) -> bool:
+        """Validate a fresh approximate solve before releasing steering fallback."""
+        def reject(reason):
+            self._mpc_handoff_reason = reason
+            return False
+
+        self._mpc_handoff_reason = "ok"
+        mpc = self._mpc
+        if (str(mpc.last_solution_status).lower() != "solved inaccurate"
+                or mpc.infeasibility_counter != 0 or mpc.current_prediction is None
+                or mpc.used_prediction_fallback or mpc.recovery_requested
+                or mpc.time_budget_exceeded):
+            return reject(f"solution_unusable: status={mpc.last_solution_status}, "
+                          f"failed={mpc.infeasibility_counter}, "
+                          f"prediction={mpc.current_prediction is not None}, "
+                          f"stale={mpc.used_prediction_fallback}, "
+                          f"recovery={mpc.recovery_requested}, "
+                          f"budget={mpc.time_budget_exceeded}")
+        if not all(math.isfinite(float(v)) for v in (speed, *u)):
+            return reject("nonfinite_command")
+        if float(u[0]) <= .1:
+            return reject(f"speed_too_low: {float(u[0]):.3f}")
+        # Check the rate-limited command actually returned by MPC, not the
+        # unrelated PP steering that currently owns the controller.
+        safe, reason = self._pure_pursuit_feedback_is_safe(
+            pose, max(abs(float(speed)), float(u[0])), float(u[1]))
+        if not safe:
+            return reject(f"command_wall: {reason}")
+        near = getattr(mpc, "collision_prediction_context", None)
+        if near is None or near[0] is not mpc.current_prediction:
+            return reject("stale_collision_prediction")
+        xs, ys = near[1]
+        if (len(xs) < 2 or len(xs) != len(ys)
+                or not all(math.isfinite(float(v)) for v in (*xs, *ys))):
+            return reject("invalid_prediction_coordinates")
+        ego = collision.ego_body(self, pose)
+        path = [ego] + [collision.predicted_ego(self, xs, ys, i) for i in range(len(xs))]
+        if (not all(p.position_valid and p.yaw_valid for p in path)
+                or math.hypot(path[1].x-ego.x, path[1].y-ego.y) > 1.
+                or math.hypot(path[-1].x-ego.x, path[-1].y-ego.y) < .5):
+            return reject("invalid_disconnected_or_stationary_path")
+        if (getattr(self, "_v2x_tracker", None) is None
+                or not getattr(self, "_v2x_t_samples", None)):
+            return reject("missing_traffic_context")
+        # near states start at index zero, unlike the RViz path (+2).
+        times = [0.] + [float(self._v2x_t_samples[min(i, len(self._v2x_t_samples)-1)])
+                        for i in range(len(xs))]
+        geometry = collision.geometry(self)
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            target = collision.target_body(self, vid)
+            if (target is None or not target.position_valid
+                    or not self._v2x_tracker.has_velocity_estimate(vid)):
+                return reject(f"unknown_vehicle: {vid}")
+            velocity = self._v2x_tracker.velocity(vid)
+            age = max(self._collision_now-target.stamp, 0.)
+            if not collision.swept_path_clear(
+                    path, [t+age for t in times], target, velocity, geometry):
+                return reject(f"vehicle_collision: {vid}")
+        return True
+
 
     def _apply_stuck_reverse_command(self, u) -> None:
         if self._stuck_reverse_command_mode in ("teleop", "awsim_reverse_button"):
@@ -2052,6 +2160,7 @@ class MPCController(Node):
             self._adaptive_reverse_forward_success_cycles = 0
             self._localization_consistent_since = None
             self._localization_consistent = False
+            self._recovery_localization_available = False
             self._reset_follow_escape()
         if (
             self._initial_start_boost_enabled
@@ -2393,14 +2502,27 @@ class MPCController(Node):
 
     def _update_localization_consistency(self, now_sec: float) -> None:
         """Track fresh GNSS/odometry position agreement continuously."""
+        last_check = getattr(self, '_localization_checked_at_sec', None)
+        clock_rewound = last_check is not None and now_sec < last_check
+        future_receipt = any(
+            stamp is not None and stamp > now_sec for stamp in (
+                self._last_odom_received_sec, self._last_gnss_received_sec))
+        if clock_rewound or future_receipt:
+            # Require both streams to be received again in this clock epoch.
+            # Keeping the old timestamps would make them fresh again when
+            # simulation time eventually catches up to the previous run.
+            self._last_odom_received_sec = None
+            self._last_gnss_received_sec = None
+            self._localization_consistent_since = None
+        self._localization_checked_at_sec = now_sec
         fresh = bool(
             self._odom is not None
             and self._gnss_pose is not None
             and self._last_odom_received_sec is not None
             and self._last_gnss_received_sec is not None
-            and now_sec - self._last_odom_received_sec
+            and 0.0 <= now_sec - self._last_odom_received_sec
                 <= self._adaptive_reverse_localization_fresh_sec
-            and now_sec - self._last_gnss_received_sec
+            and 0.0 <= now_sec - self._last_gnss_received_sec
                 <= self._adaptive_reverse_localization_fresh_sec
         )
         if fresh:
@@ -2412,6 +2534,10 @@ class MPCController(Node):
             )
         else:
             self._localization_position_error = math.inf
+        # Position disagreement is diagnostic only. Collision recovery must
+        # remain possible while odometry converges back to GNSS.
+        self._recovery_localization_available = bool(
+            fresh and math.isfinite(self._localization_position_error))
         condition = bool(
             fresh
             and self._localization_position_error
@@ -2480,7 +2606,7 @@ class MPCController(Node):
             and any(physical_passage.get(lane, False) for lane in (0, 2))
             and self._latched_target_is_primary_v2x_blocker(
                 pose, ego_speed, target_id)
-            and self._localization_consistent
+            and self._recovery_localization_available
             and self._static_current_footprint_is_free(pose)
             and self._follow_escape_target_prediction_blocked
         )
@@ -2553,14 +2679,22 @@ class MPCController(Node):
             and not self._mpc.time_budget_exceeded
             and getattr(self._mpc, "last_solution_accurate", False)
         )
-        return bool(
+        if not (
             fresh_solution
             and self._prediction_has_forward_progress(pose, u)
             and (
                 target_id is None
                 or self._prediction_is_clear_of_vehicle(target_id)
             )
-        )
+        ):
+            return False
+        safe, reason = self._pure_pursuit_feedback_is_safe(
+            pose, float(u[0]), float(u[1]))
+        if not safe:
+            self.get_logger().warn(
+                f"[ReverseForwardBlocked] forward command rejected: {reason}",
+                throttle_duration_sec=0.5)
+        return safe
 
     def _follow_deadlock_position(self, pose):
         """Use raw GNSS for the deadlock movement gate when it is available."""
@@ -3831,6 +3965,9 @@ class MPCController(Node):
         if not target_buf:
             return {}, None
         from contextlib import nullcontext
+        from multi_purpose_mpc_ros.core.passage_constraints import (
+            candidate_corridor_failure, corridor_inputs,
+        )
         diagnostics = getattr(self, '_runtime_diagnostics', None)
         detail_enabled = diagnostics is not None and diagnostics.recording_detail()
         measure = diagnostics.measure_detail if detail_enabled else lambda name: nullcontext()
@@ -3896,7 +4033,7 @@ class MPCController(Node):
         # which the old single target-waypoint test could not see.
         with measure("vehicle_passage.horizon_widths"):
             horizon_path = self._reference_pathN_center
-            horizon_wp = self._carN_center.wp_id
+            horizon_wp, _ = corridor_inputs(self, pose)
             required_width = float(self._cfg.bicycle_model.width)
             lane_widths = {0: [], 2: []}
             lane_width_wps = {0: [], 2: []}
@@ -3921,6 +4058,7 @@ class MPCController(Node):
             log_passage = periodic_log_due(self, ('passage', target_id), interval)
 
         for lane_idx in (0, 2):
+            corridor_failure = None
             with measure("vehicle_passage.width_decision"):
                 width_result = evaluate_lane_width_samples(
                     lane_widths[lane_idx],
@@ -3930,6 +4068,12 @@ class MPCController(Node):
                         self._passage_lane_width_tolerance_points),
                 )
                 if not width_result["passable"]:
+                    passage[lane_idx] = False
+            if passage[lane_idx]:
+                with measure("vehicle_passage.mpc_corridor"):
+                    corridor_failure = candidate_corridor_failure(
+                        self, pose, lane_idx, key[0] if key is not None else None)
+                if corridor_failure is not None:
                     passage[lane_idx] = False
             if log_passage:
                 with measure("vehicle_passage.diagnostic_format"):
@@ -3944,6 +4088,8 @@ class MPCController(Node):
                         reasons.append("target_boundary_clearance")
                     if width_result["failure_reason"] is not None:
                         reasons.append(width_result["failure_reason"])
+                    if corridor_failure is not None:
+                        reasons.append(corridor_failure['reason'])
                     diagnostic_message = (
                         "[PhysicalPassageDiagnostic] "
                         f"vehicle_id={target_id}, lane=L{lane_idx}, "
@@ -3958,6 +4104,7 @@ class MPCController(Node):
                         f"{self._passage_lane_width_tolerance_points}, "
                         f"clearance_failure={failure}, "
                         f"width_failure_wp={failed_width_wp}, "
+                        f"mpc_corridor_failure={corridor_failure}, "
                         f"reasons={reasons if reasons else ['none']}"
                     )
                 with measure("vehicle_passage.diagnostic_log"):
@@ -4195,6 +4342,72 @@ class MPCController(Node):
         self._mpc.osqp_initialized = False
         self._reset_outer_lane_progress()
         return True
+
+    def _retry_released_outer_pass(self, *, now_sec, vehicle_id, speed,
+                                   velocity_valid, clear_lanes, candidate_lane,
+                                   distance, recovery_active):
+        released = self._outer_lane_released_vehicle_id
+        if released is None or released != self._overtake.target_id:
+            self._released_pass_retry = None
+            return False
+        from multi_purpose_mpc_ros.core.released_pass_retry import ReleasedPassRetry
+        state = getattr(self, '_released_pass_retry', None)
+        if state is None or state.target not in (None, released):
+            state = self._released_pass_retry = ReleasedPassRetry()
+        if vehicle_id != released or not velocity_valid:
+            state.pending = None
+            return False
+        # The return and safety owners finish normally; no cancellation here.
+        blocked = any(bool(getattr(self, name, False)) for name in (
+            '_center_lane_rejoin_active', '_center_lane_rejoin_constraint_released',
+            '_l1_probe_active', '_l1_safety_reprobe_pending',
+            '_prepass_fallback_recovery_active', '_prepass_fallback_commit_pending',
+            '_prepass_fallback_follow_active', '_prepass_fallback_blocked',
+            '_parallel_abort_active', '_follow_escape_active',
+            '_mpc_safety_recovery_active', '_post_reverse_full_width_recovery_active',
+            '_straight_reentry_active', '_prepass_retry_after_reverse',
+            '_close_obstacle_reverse_requested', '_l1_safety_recovery_active',
+            '_race_rejoin_handoff_active', '_initial_start_exclusive_active',
+            '_initial_start_post_hold_active',
+            '_follow_only'))
+        ready = bool(
+            not recovery_active and not blocked and self._enable_control
+            and self._stuck_recovery_until is None
+            and not should_reset_motion_latch(self._awsim_state)
+            and self._reference_path is self._reference_pathN_center
+            and self._reference_path.target_lane_idx not in (0, 2)
+            and self._target_lane_idx not in (0, 2)
+            and now_sec >= getattr(self, '_constraint_transition_until', 0.)
+            and distance is not None and math.isfinite(distance)
+            and 0. < distance <= self._overtake_latch_max_distance)
+        cfg = self._cfg.trajectory_switch
+        reason = state.observe(
+            target=released, now=now_sec, speed=speed, clear_lanes=clear_lanes,
+            candidate_lane=candidate_lane, ready=ready,
+            slow_speed=self._slow_lead_overtake_speed,
+            cooldown=float(getattr(cfg, 'outer_lane_retry_cooldown_sec', 2.)),
+            confirm=float(getattr(cfg, 'outer_lane_retry_confirm_sec', .5)),
+            speed_drop=float(getattr(cfg, 'outer_lane_retry_speed_drop_mps', 1.)))
+        if reason is None:
+            return False
+        # Treat this as a new attempt at the same vehicle. Keeping requested_lane
+        # here would bypass the normal `not existing_outer_latch` Shadow gate.
+        self._overtake.release_target()
+        self._outer_lane_released_vehicle_id = None
+        self._forced_overtake_vehicle_id = None
+        self._overtake_completed_target_id = None
+        self._hybrid_reference_key = None
+        self._follow_latched_cache = None
+        self._reset_overtake_commit_probe()
+        self._clear_committed_shadow_verification()
+        self._reset_outer_lane_progress()
+        self._released_pass_retry = None
+        self.get_logger().info(
+            f"[OuterLaneRetryRearm] vehicle_id={released}, reason={reason}, "
+            f"candidate=L{candidate_lane}, speed={speed:.2f}m/s; "
+            "restarting ordinary lane selection and Shadow verification")
+        return True
+
 
     def _reset_overtake_commit_probe(self):
         """Discard a pending L0/L2 pre-commit feasibility check."""
@@ -4510,6 +4723,10 @@ class MPCController(Node):
         # ``_switch_prepass_to_follow`` clears only the forced-overtake marker
         # and Follow becomes active with no vehicle ID to track.
         self._overtake.target_id = vehicle_id
+
+        # The emergency blocker now owns follow/reverse recovery. Retire normal
+        # L1 rejoin without cancelling independent physical safety recovery.
+        self._cancel_normal_l1_rejoin_for_prepass()
 
         samples = self._relative_lane_vehicle_samples(pose, ego_speed)
         conflicts = {
@@ -6026,6 +6243,10 @@ class MPCController(Node):
         current_pose_has_passage = retry_lane_idx is not None
 
         if front_has_advanced and valid_forward_mpc and current_pose_has_passage:
+            safe, reason = self._pure_pursuit_feedback_is_safe(
+                pose, max(abs(float(ego_speed)), float(u[0])), float(u[1]))
+            if not safe:
+                return False, f"forward_command_wall: {reason}"
             return True, (
                 "latched lead advanced with a valid forward path: "
                 f"advance={lead_advance:.2f}m, "
@@ -6363,237 +6584,353 @@ class MPCController(Node):
         _, offset, lower, upper = self._physical_corridor_state(x, y)
         return max(lower - offset, offset - upper, 0.0)
 
-    def _straight_reentry_rollout(self, pose, direction: int):
-        distances = np.linspace(
-            0.0, self._straight_reentry_probe_distance, 11)
-        violations = []
-        for distance in distances:
-            signed_distance = float(direction) * float(distance)
-            violations.append(self._full_corridor_violation(
-                pose.x + signed_distance * math.cos(pose.theta),
-                pose.y + signed_distance * math.sin(pose.theta),
-            ))
-        return np.asarray(violations, dtype=float)
+    def _reentry_violation(self, x, y, yaw):
+        if not all(math.isfinite(float(v)) for v in (x, y, yaw)):
+            return math.inf
+        _, offset, lower, upper = self._physical_corridor_state(x, y, yaw)
+        if not all(math.isfinite(float(v)) for v in (offset, lower, upper)) or lower > upper:
+            return math.inf
+        return max(lower-offset, offset-upper, 0.0)
 
-    def _select_straight_reentry_direction(self, pose) -> int:
-        current_violation = self._full_corridor_violation(pose.x, pose.y)
-        if not np.isfinite(current_violation) or current_violation <= 0.05:
-            return 0
-        candidates = []
-        for direction in (1, -1):
-            violations = self._straight_reentry_rollout(pose, direction)
-            if not np.all(np.isfinite(violations)):
-                continue
-            improvement = current_violation - float(violations[-1])
-            # Permit small waypoint-projection noise, but reject a direction
-            # which first drives materially farther out of the corridor.
-            if (
-                improvement >= self._straight_reentry_min_improvement
-                and float(np.max(violations)) <= current_violation + 0.10
-            ):
-                candidates.append((float(violations[-1]), direction))
-        if not candidates:
-            return 0
-        for _, direction in sorted(candidates, key=lambda item: item[0]):
-            if direction > 0:
-                forward_blocked = any(
-                    0.0 < float(longitudinal)
-                    <= self._straight_reentry_probe_distance + 2.0
-                    for _, _, longitudinal
-                    in self._relative_lane_vehicle_samples(pose, 0.0)
-                )
-                if forward_blocked:
-                    continue
-            return direction
-        return 0
+    def _reentry_path_is_clear(self, path, speed=None):
+        """Check physical static bodies and moving traffic, not corridor membership."""
+        from types import SimpleNamespace
+        if not self._recovery_localization_available:
+            return False, 'localization_unavailable'
+        if self._straight_reentry_speed <= 0.0:
+            return False, 'recovery_speed_disabled'
+        bodies = [collision.ego_body(self, SimpleNamespace(x=x, y=y, theta=yaw))
+                  for x, y, yaw in path]
+        geometry = collision.geometry(self)
+        safe, static_reason = self._map.static_recovery_path_is_clear(bodies, geometry)
+        if not safe:
+            if 'invalid_body' in static_reason or 'invalid_ego_body' in static_reason:
+                static_reason += (
+                    f", metadata={getattr(self, '_collision_ego_metadata', None)}, "
+                    f"now={getattr(self, '_collision_now', None)}, "
+                    f"timing={getattr(self, '_collision_ego_timing', None)}")
+            return False, static_reason
+        from multi_purpose_mpc_ros.core.boundary_recovery import recovery_speed_limit
+        speed = min(self._straight_reentry_speed, recovery_speed_limit(path)) if speed is None else float(speed)
+        if not math.isfinite(speed) or speed <= 0.:
+            return False, 'insufficient_stopping_distance'
+        times = [0.0]
+        for a, b in zip(path, path[1:]):
+            times.append(times[-1]+math.hypot(b[0]-a[0], b[1]-a[1])/speed)
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            target = collision.target_body(self, vid)
+            if (target is None or not target.position_valid
+                    or not self._v2x_tracker.has_velocity_estimate(vid)):
+                return False, f'unknown_vehicle={vid}'
+            age = max(self._collision_now-target.stamp, 0.0)
+            if not collision.swept_path_clear(
+                    bodies, [t+age for t in times], target,
+                    self._v2x_tracker.velocity(vid), geometry):
+                return False, f'vehicle_collision={vid}'
+        return True, static_reason
+
+    def _reentry_mpc_path_is_valid(self, pose, command):
+        """Validate actual MPC positions and yaw with the shared physical checker."""
+        if (not getattr(self._mpc, 'last_solution_accurate', False)
+                or not self._prediction_has_forward_progress(pose, command)):
+            return False
+        prediction = getattr(self._mpc, 'current_recovery_prediction', None)
+        if prediction is None or len(prediction) < 2:
+            return False
+        path = [(float(pose.x), float(pose.y), float(pose.theta))]
+        # Include the current pose and densify every segment, including the
+        # connection to the delay-compensated MPC starting state.
+        for point in prediction:
+            if len(point) != 3 or not all(math.isfinite(float(v)) for v in point):
+                return False
+            x, y, yaw = path[-1]
+            dx, dy = point[0]-x, point[1]-y
+            angle = math.atan2(math.sin(point[2]-yaw), math.cos(point[2]-yaw))
+            steps = max(1, math.ceil(math.hypot(dx, dy)/.05), math.ceil(abs(angle)/.05))
+            for i in range(1, steps+1):
+                ratio = i/steps
+                path.append((x+ratio*dx, y+ratio*dy, yaw+ratio*angle))
+        safe, reason = self._reentry_path_is_clear(path, speed=command[0])
+        if not safe:
+            self.get_logger().warn(f'[MPCRecoveryPathBlocked] {reason}', throttle_duration_sec=.5)
+        return safe
+
+    def _reentry_overlap(self, pose):
+        """Comparable penetration metric with identical padding for every candidate."""
+        from types import SimpleNamespace
+        x, y, yaw = pose
+        body = collision.ego_body(self, SimpleNamespace(x=x, y=y, theta=yaw))
+        detail = self._map.static_body_collision_detail(
+            body, collision.geometry(self), padding=.05, include_cells=True)
+        if detail is None:
+            return 0.
+        if detail.get('reason') != 'occupied_cell':
+            return math.inf
+        return float(detail['overlap_depth'])
+
+    def _select_reentry_motion(self, pose, now_sec):
+        from multi_purpose_mpc_ros.core.boundary_recovery import evaluate
+        ref = self._reference_path
+        count = int(ref.n_waypoints)
+        if count < 2:
+            return None, 'invalid_waypoints'
+        wp_id = int(self._car.get_closest_waypoint(pose.x, pose.y))
+        target = ref.get_waypoint(wp_id)
+        travelled = 0.
+        for offset in range(1, count):
+            index = wp_id + offset
+            if not ref.circular and index >= count:
+                break
+            candidate = ref.get_waypoint(index % count)
+            travelled += math.hypot(candidate.x-target.x, candidate.y-target.y)
+            target = candidate
+            if travelled >= 3.5:
+                break
+        if not math.isfinite(travelled) or travelled < 1e-3:
+            return None, 'invalid_waypoints'
+        moving = abs(float(getattr(self._velocity_report, 'longitudinal_velocity', 0.))) > .1
+        return evaluate(
+            (float(pose.x), float(pose.y), float(pose.theta)),
+            target=(float(target.x), float(target.y)),
+            distance=self._straight_reentry_probe_distance,
+            wheelbase=float(self._cfg.bicycle_model.length),
+            steering_limit=min(float(self._mpc_cfg.delta_max), .314),
+            previous_steering=float(self._last_u[1]),
+            steering_step=(float(self._mpc.max_steering_rate)
+                           / float(self._mpc_cfg.control_rate) if moving else math.inf),
+            clear=self._reentry_path_is_clear, overlap=self._reentry_overlap,
+            min_reverse_distance=(.05 + .5*abs(float(self._velocity_report.longitudinal_velocity))
+                                  + .5*float(self._velocity_report.longitudinal_velocity)**2))
+
+    def _boundary_recovery_input(self, pose, now_sec):
+        """Validate fresh position and heading independently of corridor bounds."""
+        # The caller may pass the cycle-start time, before the rate wait and
+        # newer sensor callbacks. Validate against the clock at this check.
+        self._update_localization_consistency(
+            float(self.get_clock().now().nanoseconds) / 1e9)
+        if not self._recovery_localization_available:
+            return None, 'position_unavailable_or_stale'
+        orientation = self._odom.pose.pose.orientation
+        quaternion = (orientation.x, orientation.y, orientation.z, orientation.w)
+        if (not all(math.isfinite(float(v)) for v in quaternion)
+                or abs(sum(float(v)**2 for v in quaternion)-1.0) > .1
+                or not all(math.isfinite(float(v)) for v in (pose.x, pose.y, pose.theta))):
+            return None, 'heading_or_pose_invalid'
+        return 0.0, 'valid'
+
+    def _boundary_recovery_ready(self, pose, now_sec):
+        violation, reason = self._boundary_recovery_input(pose, now_sec)
+        # Use current time for the GNSS observation window too; the stale
+        # cycle-start time can precede the last sample and falsely reset it.
+        now_sec = float(self.get_clock().now().nanoseconds) / 1e9
+        reported_speed = float(getattr(self._velocity_report, 'longitudinal_velocity', math.inf))
+        if (not self._straight_reentry_enabled or not self._enable_control
+                or self._collision_evidence_hold or self._intentional_follow_stop_active
+                or violation is None
+                or not math.isfinite(reported_speed)
+                or abs(reported_speed) > self._stuck_speed_threshold):
+            self._boundary_stop_samples = []
+            if violation is None:
+                self.get_logger().info(
+                    f'[StuckMotionNotReady] {reason}; normal control retains ownership',
+                    throttle_duration_sec=.5)
+            return False
+        samples = getattr(self, '_boundary_stop_samples', [])
+        stamp = self._last_gnss_received_sec
+        position = self._gnss_pose.pose.pose.position
+        current = (stamp, float(position.x), float(position.y))
+        if samples and (stamp < samples[-1][0] or now_sec < samples[-1][0]):
+            samples = []
+        if not samples or stamp > samples[-1][0]:
+            samples.append(current)
+        # Retain one sample just before the observation window, rather than
+        # resetting on solver handoffs. Only actual GNSS updates count.
+        cutoff = now_sec-self._stuck_time_threshold
+        while len(samples) > 1 and samples[1][0] <= cutoff:
+            samples.pop(0)
+        self._boundary_stop_samples = samples
+        if len(samples) < 2 or samples[-1][0]-samples[0][0] < self._stuck_time_threshold:
+            return False
+        # Span over the whole window also rejects a move away and back.
+        span = math.hypot(max(p[1] for p in samples)-min(p[1] for p in samples),
+                          max(p[2] for p in samples)-min(p[2] for p in samples))
+        return span < self._stuck_gnss_distance_threshold
 
     def _start_straight_reentry(self, pose, now_sec: float) -> bool:
-        if not self._straight_reentry_enabled:
-            return False
-        direction = self._select_straight_reentry_direction(pose)
-        if direction == 0:
-            return False
-        if direction < 0 and not self._reverse_rear_is_clear(
-            pose, 0.0, reverse_distance=self._straight_reentry_probe_distance
-        ):
+        if not self._boundary_recovery_ready(pose, now_sec):
             return False
         self._straight_reentry_active = True
-        self._straight_reentry_direction = direction
+        self._straight_reentry_direction = 0
+        self._reentry_steering = 0.0
+        self._reentry_hold_until = 0.0
+        self._reentry_steering_ready_at = now_sec
         self._straight_reentry_started_at = now_sec
-        self._straight_reentry_pre_reverse_until = (
-            now_sec + self._stuck_pre_reverse_duration
-            if direction < 0 and self._stuck_pre_reverse_duration > 0.0
-            else None
-        )
+        self._straight_reentry_pre_reverse_until = None
         self._straight_reentry_returning_drive = False
         self._straight_reentry_success_cycles = 0
-        self._straight_reentry_last_violation = self._full_corridor_violation(
-            pose.x, pose.y)
         self._straight_reentry_localization_wait_started_at = now_sec
-        self._straight_reentry_allow_boundary_step_increase = False
-        self._last_stuck_gear_command = None
         self._stuck_last_drive_request_at = None
         self._stuck_last_reverse_request_at = None
         self.get_logger().warn(
-            "[StraightReentryStart] MPC-independent straight recovery "
-            f"selected direction={'DRIVE' if direction > 0 else 'REVERSE'}, "
-            f"violation={self._straight_reentry_last_violation:.2f}m, "
-            f"probe={self._straight_reentry_probe_distance:.2f}m"
-        )
+            '[StuckMotionStart] comparing left/straight/right toward WP, then straight reverse')
         return True
 
     def _apply_straight_reentry(self, now, pose, u) -> bool:
-        now_sec = float(now.nanoseconds) / 1e9
-        u[0] = 0.0
-        u[1] = 0.0
+        """Own low-speed recovery until safe forward motion and MPC are stable."""
+        now_sec = float(now.nanoseconds)/1e9
+        normal_command = (float(u[0]), float(u[1]))
+        normal_forward_ready = bool(
+            not getattr(self, '_steering_fallback_armed', True)
+            and all(math.isfinite(value) for value in normal_command)
+            and normal_command[0] > .15)
+        u[0], u[1] = 0.0, float(self._last_u[1])
         self._request_awsim_control_mode_for_recovery()
-
-        if self._straight_reentry_returning_drive:
-            drive_request_due = (
-                self._stuck_last_drive_request_at is None
-                or now_sec - self._stuck_last_drive_request_at
-                    >= self._stuck_drive_request_resend_sec
-            )
-            if drive_request_due:
-                self._publish_gear_command(
-                    now, self._gear_drive_command, force=True)
-                self._stuck_last_drive_request_at = now_sec
-            if self._current_gear_is_drive():
-                self._straight_reentry_active = False
-                self._straight_reentry_returning_drive = False
-                self._straight_reentry_direction = 0
-                self._straight_reentry_localization_wait_started_at = None
-                self._stuck_since = None
-                self._gnss_history = []
-                self._post_reverse_full_width_recovery_active = True
-                self._mpc_safety_recovery_active = True
-                self.get_logger().info(
-                    "[StraightReentryComplete] DRIVE confirmed; returning "
-                    "to full-width MPC recovery."
-                )
+        violation, reason = self._boundary_recovery_input(pose, now_sec)
+        if violation is None:
+            self._straight_reentry_success_cycles = 0
+            self._straight_reentry_returning_drive = False
+            self._reentry_hold_until = 0.0
+            self.get_logger().warn(
+                f'[StuckMotionBlocked] waiting for valid input: {reason}',
+                throttle_duration_sec=.5)
             return True
-
-        violation = self._full_corridor_violation(pose.x, pose.y)
+        reported_speed = float(getattr(self._velocity_report, 'longitudinal_velocity', math.inf))
+        if not math.isfinite(reported_speed):
+            self._straight_reentry_success_cycles = 0
+            self.get_logger().warn('[StuckMotionBlocked] invalid_velocity', throttle_duration_sec=.5)
+            return True
+        motion, reason = self._select_reentry_motion(pose, now_sec)
+        if motion is not None and math.isfinite(motion.speed_limit):
+            self.get_logger().info(
+                f'[StuckMotionReversePrefix] {reason}, speed_limit={motion.speed_limit:.3f}m/s',
+                throttle_duration_sec=.5)
         fresh_mpc = bool(
             self._mpc.infeasibility_counter == 0
             and self._mpc.current_prediction is not None
             and not self._mpc.used_prediction_fallback
             and not self._mpc.recovery_requested
-        )
-        inside_and_stable = violation <= 0.02 and fresh_mpc
+            and not self._mpc.time_budget_exceeded)
+        mpc_forward_ready = bool(
+            fresh_mpc and normal_forward_ready
+            and self._reentry_mpc_path_is_valid(pose, normal_command))
+        forward_and_stable = bool(
+            mpc_forward_ready or (
+            fresh_mpc and normal_forward_ready
+            and motion is not None and motion.direction > 0
+            and self._current_gear_is_drive()
+            and float(getattr(self._velocity_report, 'longitudinal_velocity', 0.)) > .15))
+        if not forward_and_stable:
+            self._straight_reentry_returning_drive = False
         self._straight_reentry_success_cycles = (
-            self._straight_reentry_success_cycles + 1
-            if inside_and_stable else 0
-        )
-        timed_out = (
-            self._straight_reentry_started_at is not None
-            and now_sec - self._straight_reentry_started_at
-                >= self._straight_reentry_timeout
-        )
-        localization_wait_elapsed = (
-            now_sec - self._straight_reentry_localization_wait_started_at
-            if self._straight_reentry_localization_wait_started_at is not None
-            else 0.0
-        )
-        localization_waiting = bool(
-            not self._localization_consistent
-            and localization_wait_elapsed
-                < self._straight_reentry_localization_wait_sec
-        )
-        localization_failed = bool(
-            not self._localization_consistent
-            and not localization_waiting
-        )
-        if localization_waiting:
-            self.get_logger().info(
-                "[StraightReentryLocalizationWait] holding zero speed until "
-                "GNSS/odom agreement is confirmed: "
-                f"elapsed={localization_wait_elapsed:.2f}s/"
-                f"{self._straight_reentry_localization_wait_sec:.2f}s, "
-                f"position_error={self._localization_position_error:.2f}m",
-                throttle_duration_sec=0.25,
-            )
-            return True
-        moving_wrong_way = bool(
-            not self._straight_reentry_allow_boundary_step_increase
-            and
-            self._straight_reentry_last_violation is not None
-            and violation > self._straight_reentry_last_violation + 0.15
-        )
-        completed = self._straight_reentry_success_cycles >= (
-            self._straight_reentry_success_cycles_required)
-        if timed_out or localization_failed or moving_wrong_way or completed:
-            reason = (
-                "corridor_and_mpc_recovered" if completed
-                else "localization_inconsistent" if localization_failed
-                else "corridor_violation_increased" if moving_wrong_way
-                else "timeout"
-            )
-            self.get_logger().warn(
-                "[StraightReentryStop] stopping continuous recovery: "
-                f"reason={reason}, violation={violation:.2f}m"
-            )
-            if self._straight_reentry_direction < 0:
-                self._straight_reentry_returning_drive = True
-            else:
+            self._straight_reentry_success_cycles+1
+            if forward_and_stable else 0)
+        completed = self._straight_reentry_success_cycles >= self._straight_reentry_success_cycles_required
+        if completed or self._straight_reentry_returning_drive:
+            self._straight_reentry_returning_drive = True
+            # Brake to rest before changing direction, even with a valid MPC.
+            if reported_speed < -.1:
+                return True
+            self._publish_gear_command(now, self._gear_drive_command, force=True)
+            if self._current_gear_is_drive():
                 self._straight_reentry_active = False
+                self._straight_reentry_returning_drive = False
                 self._straight_reentry_direction = 0
-                self._straight_reentry_allow_boundary_step_increase = False
-                self._straight_reentry_localization_wait_started_at = None
-                self._stuck_since = None
-                self._gnss_history = []
+                self._boundary_stop_samples = []
+                self._post_reverse_full_width_recovery_active = True
+                self._mpc_safety_recovery_active = True
+                self._mpc_safety_recovery_success_cycles = 0
+                self.get_logger().info('[StuckMotionComplete] executable normal forward command confirmed; handing over without braking')
+                u[0], u[1] = normal_command
+                return False
             return True
 
-        self._straight_reentry_last_violation = min(
-            float(self._straight_reentry_last_violation), violation)
-        if self._straight_reentry_direction > 0:
-            drive_request_due = (
-                self._stuck_last_drive_request_at is None
-                or now_sec - self._stuck_last_drive_request_at
-                    >= self._stuck_drive_request_resend_sec
-            )
-            if drive_request_due:
-                self._publish_gear_command(
-                    now, self._gear_drive_command, force=True)
+        if mpc_forward_ready:
+            # Do not request/drive REVERSE while confirming a usable MPC path.
+            self.get_logger().info(
+                f'[MPCRecoveryConfirm] forward path safe; holding for confirmation '
+                f'{self._straight_reentry_success_cycles}/{self._straight_reentry_success_cycles_required}',
+                throttle_duration_sec=.5)
+            return True
+
+        if motion is None:
+            self._reentry_hold_until = 0.0
+            self.get_logger().warn(
+                f'[StuckMotionBlocked] no safe motion: {reason}',
+                throttle_duration_sec=.5)
+            return True
+
+        old = (self._straight_reentry_direction, getattr(self, '_reentry_steering', 0.0))
+        new = (motion.direction, motion.steering)
+        measured_speed = abs(float(getattr(self._velocity_report, 'longitudinal_velocity', math.inf)))
+        if (new[0] != old[0]
+                or (measured_speed <= .1 and abs(new[1]-old[1]) > 1e-6)):
+            # Stop for a gear change; allow rate-limited steering updates in motion.
+            if measured_speed > .1:
+                self.get_logger().info('[StuckMotionWait] braking before candidate change',
+                                       throttle_duration_sec=.5)
+                return True
+            self._straight_reentry_direction, self._reentry_steering = new
+            self._reentry_hold_until = now_sec+.5
+            rate = max(float(self._mpc.max_steering_rate), .01)
+            self._reentry_steering_ready_at = now_sec+abs(motion.steering-float(self._last_u[1]))/rate+.25
+            self._straight_reentry_pre_reverse_until = (
+                now_sec+self._stuck_pre_reverse_duration if motion.direction < 0 else None)
+            self.get_logger().info(
+                f'[StuckMotionSelect] wall_reduction={motion.wall_reduction:.6f}, '
+                f'heading_improvement={math.degrees(motion.heading_improvement):+.2f}deg, '
+                f'direction={motion.direction:+d}, '
+                f'steering={motion.steering:+.3f}, improvement={motion.improvement:.3f}m, '
+                f'speed_limit={motion.speed_limit:.3f}, reason={reason}')
+        self._reentry_steering = motion.steering
+        u[1] = motion.steering if motion.direction > 0 else 0.0
+        if motion.direction > 0:
+            if (self._stuck_last_drive_request_at is None
+                    or now_sec-self._stuck_last_drive_request_at >= self._stuck_drive_request_resend_sec):
+                self._publish_gear_command(now, self._gear_drive_command, force=True)
                 self._stuck_last_drive_request_at = now_sec
-            if self._current_gear_is_drive():
-                u[0] = self._straight_reentry_speed
+            gear_ready = self._current_gear_is_drive()
+        elif (self._straight_reentry_pre_reverse_until is not None
+              and now_sec < self._straight_reentry_pre_reverse_until):
+            self._publish_gear_command(now, self._gear_pre_reverse_command)
+            gear_ready = False
         else:
-            if (
-                self._straight_reentry_pre_reverse_until is not None
-                and now_sec < self._straight_reentry_pre_reverse_until
-            ):
-                self._publish_gear_command(now, self._gear_pre_reverse_command)
-            else:
-                self._straight_reentry_pre_reverse_until = None
-                reverse_request_due = (
-                    self._stuck_last_reverse_request_at is None
-                    or now_sec - self._stuck_last_reverse_request_at
-                        >= self._stuck_reverse_request_resend_sec
-                )
-                if reverse_request_due:
-                    self._publish_gear_command(
-                        now, self._gear_reverse_command, force=True)
-                    self._stuck_last_reverse_request_at = now_sec
-                if self._current_gear_is_reverse():
-                    u[0] = self._straight_reentry_speed
-        self.get_logger().info(
-            "[StraightReentry] continuous straight recovery active: "
-            f"direction={'DRIVE' if self._straight_reentry_direction > 0 else 'REVERSE'}, "
-            f"violation={violation:.2f}m, speed={float(u[0]):.2f}m/s",
-            throttle_duration_sec=0.5,
-        )
+            if (self._stuck_last_reverse_request_at is None
+                    or now_sec-self._stuck_last_reverse_request_at >= self._stuck_reverse_request_resend_sec):
+                self._publish_gear_command(now, self._gear_reverse_command, force=True)
+                self._stuck_last_reverse_request_at = now_sec
+            gear_ready = self._current_gear_is_reverse()
+        if gear_ready and now_sec >= getattr(self, '_reentry_steering_ready_at', now_sec):
+            u[0] = min(self._straight_reentry_speed, 1.0, motion.speed_limit)
+        else:
+            self.get_logger().info('[StuckMotionWait] confirming gear/steering before motion',
+                                   throttle_duration_sec=.5)
         return True
 
-    def _apply_stuck_recovery(self, now, u, actual_speed: float, pose) -> bool:
+    def _apply_stuck_recovery(
+        self, now, u, actual_speed: float, pose, *, wall_fallback_stop=False,
+    ) -> bool:
         if not self._stuck_recovery_enabled:
             return False
-
-        now_sec = float(now.nanoseconds) / 1e9
-
+        now_sec = float(self.get_clock().now().nanoseconds) / 1e9
         if self._straight_reentry_active:
-            return self._apply_straight_reentry(now, pose, u)
+            if (not self._enable_control or self._collision_evidence_hold
+                    or self._intentional_follow_stop_active):
+                u[0], u[1] = 0., 0.
+                return True
+            return self._apply_straight_reentry(self.get_clock().now(), pose, u)
+        # Explicit traffic manoeuvres retain their own distance bookkeeping.
+        if self._prepass_retry_after_reverse or self._stuck_recovery_until is not None:
+            return self._apply_vehicle_stuck_recovery(
+                now, u, actual_speed, pose, wall_fallback_stop=wall_fallback_stop)
+        if self._start_straight_reentry(pose, now_sec):
+            return self._apply_straight_reentry(self.get_clock().now(), pose, u)
+        return False
 
+    def _apply_vehicle_stuck_recovery(
+        self, now, u, actual_speed: float, pose, *, wall_fallback_stop=False,
+    ) -> bool:
+        """Existing traffic-requested reverse; generic stalls use waypoint recovery."""
+        now_sec = float(self.get_clock().now().nanoseconds) / 1e9
         # Grid waiting is intentional.  Never convert a Grounded/Ready stop or
         # a stale close-obstacle request into a reverse manoeuvre.
         if (
@@ -6643,6 +6980,23 @@ class MPCController(Node):
                 if reverse_arc_delta is not None:
                     self._prepass_reverse_distance = max(
                         0.0, -reverse_arc_delta)
+            # A blocked forward command must not prolong generic reverse into
+            # a rear wall. Keep this stop independent of forward-MPC readiness.
+            if (self._stuck_reverse_drive_active
+                    and not in_drive_transition
+                    and not self._adaptive_reverse_active):
+                rear_probe = max(
+                    self._generic_reverse_min_distance - self._prepass_reverse_distance,
+                    0.0) + self._adaptive_reverse_wall_margin
+                rear_clearance = self._static_reverse_clearance(pose, rear_probe)
+                if (rear_clearance + 0.05 < rear_probe
+                        or not self._reverse_rear_is_clear(
+                            pose, actual_speed, reverse_distance=rear_probe)):
+                    u[0] = 0.0
+                    u[1] = 0.0
+                    self._begin_stuck_drive_transition(
+                        now_sec, "rear path blocked; stopping generic reverse")
+                    in_drive_transition = True
             # Both distance-controlled and ordinary timed reverse must stop
             # as soon as a fresh executable forward MPC path is stable. The
             # former implementation evaluated this only in adaptive mode, so
@@ -6683,7 +7037,7 @@ class MPCController(Node):
                             minimum_distance=
                                 self._generic_reverse_min_distance,
                             localization_consistent=
-                                self._localization_consistent,
+                                self._recovery_localization_available,
                             boundary_has_remaining_clearance=
                                 boundary_has_remaining_clearance,
                         )
@@ -6713,8 +7067,8 @@ class MPCController(Node):
                         )
                         exception_reason = "minimum_reached"
                         if not self._prepass_retry_after_reverse:
-                            if not self._localization_consistent:
-                                exception_reason = "localization_inconsistent"
+                            if not self._recovery_localization_available:
+                                exception_reason = "localization_unavailable"
                             elif not boundary_has_remaining_clearance:
                                 exception_reason = "boundary_clearance_insufficient"
                         self.get_logger().info(
@@ -6752,7 +7106,7 @@ class MPCController(Node):
                     self._stuck_reverse_target_distance or 0.0)
                 remaining = max(
                     target_distance - self._prepass_reverse_distance, 0.0)
-                localization_lost = not self._localization_consistent
+                localization_lost = not self._recovery_localization_available
                 static_remaining = self._static_reverse_clearance(
                     pose, remaining + self._adaptive_reverse_wall_margin)
                 wall_became_unsafe = (
@@ -7092,31 +7446,10 @@ class MPCController(Node):
                     "full width until fresh MPC predictions recover "
                     f"continuously for {self._mpc_safety_recovery_success_sec:.2f}s."
                 )
-                if self._post_reverse_straight_reentry_pending:
-                    self._straight_reentry_active = True
-                    self._straight_reentry_direction = 1
-                    self._straight_reentry_started_at = now_sec
-                    self._straight_reentry_pre_reverse_until = None
-                    self._straight_reentry_returning_drive = False
-                    self._straight_reentry_success_cycles = 0
-                    self._straight_reentry_localization_wait_started_at = now_sec
-                    self._straight_reentry_last_violation = (
-                        self._full_corridor_violation(pose.x, pose.y)
-                    )
-                    # Consecutive collision-free forward MPC checks already
-                    # authorized DRIVE. A waypoint-boundary discontinuity may
-                    # temporarily increase the numeric violation, so let
-                    # corridor entry or timeout terminate this forward creep.
-                    self._straight_reentry_allow_boundary_step_increase = True
-                    self._post_reverse_straight_reentry_pending = False
-                    self.get_logger().warn(
-                        "[PostReverseStraightReentry] transient forward MPC "
-                        "was confirmed while still outside the full corridor; "
-                        "continuing low-speed DRIVE until corridor and MPC "
-                        "recover: violation="
-                        f"{self._straight_reentry_last_violation:.2f}m, "
-                        f"speed={self._straight_reentry_speed:.2f}m/s"
-                    )
+                # Re-enter boundary recovery only through the normal valid,
+                # continuously outside and stationary observation gate.
+                self._post_reverse_straight_reentry_pending = False
+                self._boundary_stop_samples = []
             if self._prepass_retry_after_reverse:
                 requested_lane_idx = self._prepass_retry_lane_idx
                 reverse_succeeded = self._prepass_reverse_motion_started
@@ -7228,12 +7561,14 @@ class MPCController(Node):
         if (
             self._mpc_safety_recovery_active
             and has_fresh_valid_prediction
+            and not wall_fallback_stop
         ):
-            # A newly solved prediction takes priority over every stall path,
-            # including the generic positive-command detector.  Restart the
-            # observation window if MPC becomes invalid again later.
-            self._stuck_since = None
-            self._gnss_history = []
+            # A solved cycle does not prove the vehicle has escaped the stop.
+            # Preserve observation across brief MPC/fallback handoffs.
+            if (gnss_moved_dist is not None
+                    and gnss_moved_dist >= self._stuck_gnss_distance_threshold):
+                self._stuck_since = None
+                self._gnss_history = []
             return False
         recover_from_mpc_stall = should_recover_from_mpc_stall(
             safety_recovery_active=self._mpc_safety_recovery_active,
@@ -7242,6 +7577,7 @@ class MPCController(Node):
             gnss_is_stuck=gnss_is_stuck,
             infeasibility_counter=self._mpc.infeasibility_counter,
             has_fresh_valid_prediction=has_fresh_valid_prediction,
+            wall_fallback_stop=wall_fallback_stop,
         )
         if is_stuck_state and (
             u[0] > self._stuck_forward_cmd_threshold
@@ -7257,12 +7593,6 @@ class MPCController(Node):
                     else now_sec
                 )
             elif now_sec - self._stuck_since >= self._stuck_time_threshold:
-                if (
-                    recover_from_mpc_stall
-                    and not self._prepass_retry_after_reverse
-                    and self._start_straight_reentry(pose, now_sec)
-                ):
-                    return self._apply_straight_reentry(now, pose, u)
                 if recover_from_mpc_stall:
                     self.get_logger().warn(
                         "[MPCStallRecovery] starting reverse after GNSS "
@@ -7270,7 +7600,8 @@ class MPCController(Node):
                         f"{self._stuck_gnss_distance_threshold:.2f}m for "
                         f"{self._stuck_time_threshold:.1f}s at "
                         f"speed={abs(actual_speed):.2f}m/s; "
-                        f"mpc_infeasible={self._mpc.infeasibility_counter}."
+                        f"mpc_infeasible={self._mpc.infeasibility_counter}, "
+                        f"wall_fallback_stop={wall_fallback_stop}."
                     )
                 if not self._prepass_retry_after_reverse:
                     self._stuck_reverse_target_distance = None
@@ -7989,15 +8320,22 @@ class MPCController(Node):
 
         #オドメトリ(x,y,yaw,v)取得
         pose = self.get_ego_pose()
-        self._collision_now = float(self.get_clock().now().nanoseconds)/1e9
         self._collision_ego_yaw = float(pose.theta)
         position_msg = self._gnss_pose if self._gnss_pose is not None else self._odom
         position_stamp = position_msg.header.stamp.sec + position_msg.header.stamp.nanosec/1e9
-        yaw_stamp = self._odom.header.stamp.sec + self._odom.header.stamp.nanosec/1e9
-        valid = (0.0 <= self._collision_now-position_stamp <= getattr(self,"_collision_max_age",0.5)
-                 and 0.0 <= self._collision_now-yaw_stamp <= getattr(self,"_collision_max_age",0.5)
+        yaw_msg = self._odom
+        yaw_stamp = yaw_msg.header.stamp.sec + yaw_msg.header.stamp.nanosec/1e9
+        # Read the clock after snapshotting messages, so a newer callback cannot
+        # be compared against a clock captured before its arrival.
+        self._collision_now = float(self.get_clock().now().nanoseconds)/1e9
+        valid = (-1e-9 <= self._collision_now-position_stamp <= getattr(self,"_collision_max_age",0.5)
+                 and -1e-9 <= self._collision_now-yaw_stamp <= getattr(self,"_collision_max_age",0.5)
                  and abs(position_stamp-yaw_stamp) <= 0.2)
         self._collision_ego_metadata = (position_stamp,position_msg.header.frame_id,valid)
+        self._collision_ego_timing = dict(
+            position_age=self._collision_now-position_stamp,
+            yaw_age=self._collision_now-yaw_stamp,
+            stamp_gap=abs(position_stamp-yaw_stamp))
         self._collision_ego_alignment = None
         if self.USE_OBSTACLE_AVOIDANCE:
             measured = self._v2x_tracker._measured_bodies.get(self._ego_vehicle_id)
@@ -9136,6 +9474,7 @@ class MPCController(Node):
         new_target_lane_idx = self._target_lane_idx  # Keep current active lane by default
         left_is_free = False
         right_is_free = False
+        retry_clear_lanes = set()
 
         if (
             self._follow_only
@@ -9165,6 +9504,11 @@ class MPCController(Node):
                     )
                     for lane_idx in (0, 2)
                 }
+                retry_clear_lanes = {
+                    lane for lane in (0, 2)
+                    if horizon_passage.get(lane, False)
+                    and not any(horizon_conflicts[lane].get(kind, [])
+                                for kind in ('front', 'side', 'rear'))}
                 selected_outer_lane = self._propose_traffic_lane(
                     new_target_lane_idx,
                     horizon_passage,
@@ -9273,6 +9617,11 @@ class MPCController(Node):
                 self._slow_lead_overtake_prepare_distance,
             )
         )
+        self._retry_released_outer_pass(
+            now_sec=now_sec, vehicle_id=opponent_vehicle_id,
+            speed=opponent_v_lead, velocity_valid=opponent_velocity_valid,
+            clear_lanes=retry_clear_lanes, candidate_lane=new_target_lane_idx,
+            distance=opponent_arc_distance, recovery_active=recovery_active)
         active_overtake_target_id = (
             self._overtake.target_id
             if self._overtake.target_id is not None
@@ -9895,7 +10244,12 @@ class MPCController(Node):
             )
         )
         prepass_selection_exclusive = (
-            recovery_active
+            # Preserve the emergency target while reverse is still queued,
+            # or while following a blocker with no available passing lane.
+            (self._overtake.target_id is not None
+             and (self._prepass_retry_after_reverse
+                  or self._prepass_fallback_follow_active))
+            or recovery_active
             or self._post_reverse_full_width_recovery_active
             or self._follow_escape_active
             or prepass_recovery_owns_lane_selection(
@@ -10326,7 +10680,10 @@ class MPCController(Node):
             )
 
         current_time_sec = float(now.nanoseconds) / 1e9
-        self._update_localization_consistency(current_time_sec)
+        # `now` was captured before the rate wait. Callbacks during that wait
+        # can have newer receipt times, so use the clock at validation time.
+        self._update_localization_consistency(
+            float(self.get_clock().now().nanoseconds) / 1e9)
         prepass_distance_gate_released_this_cycle = False
 
         retry_target_id = self._overtake.target_id
@@ -11903,7 +12260,7 @@ class MPCController(Node):
                 and getattr(self._mpc, "last_solution_accurate", False))
             # Two-state controller ownership. One invalid MPC cycle enters the
             # fallback state; fallback keeps ownership until enough consecutive
-            # accurate MPC solutions have been observed.
+            # accurate or collision-checked approximate solutions have been observed.
             if not solution_valid and not self._steering_fallback_armed:
                 self._steering_fallback_armed = True
                 self._steering_fallback_success_cycles = 0
@@ -11912,7 +12269,13 @@ class MPCController(Node):
                     "invalid; fallback now owns steering")
 
             if self._steering_fallback_armed:
-                if solution_accurate:
+                self._mpc_handoff_reason = (
+                    "accurate" if solution_accurate else "invalid_solution")
+                checked_approximate = bool(
+                    solution_valid and not solution_accurate
+                    and self._inaccurate_mpc_handoff_is_safe(
+                        predicted_pose, v, u))
+                if solution_accurate or checked_approximate:
                     self._steering_fallback_success_cycles += 1
                 else:
                     self._steering_fallback_success_cycles = 0
@@ -11976,6 +12339,7 @@ class MPCController(Node):
                         "mpc_recovery_cycles="
                         f"{self._steering_fallback_success_cycles}/"
                         f"{self._steering_fallback_success_required}, "
+                        f"mpc_handoff_reason={self._mpc_handoff_reason}, "
                         f"pp_reason={reason}, lookahead={lookahead:.2f}m, "
                         f"target_wp={target_wp}, speed={float(u[0]):.2f}m/s, "
                         f"steering={fallback_delta:+.3f}rad",
@@ -14003,7 +14367,10 @@ class MPCController(Node):
             intentional_follow_stop_active
             and not self._follow_escape_active
         )
-        recovering_from_stuck = self._apply_stuck_recovery(now, u, v, pose)
+        recovering_from_stuck = self._apply_stuck_recovery(
+            now, u, v, pose,
+            wall_fallback_stop=(wall_fallback_stop and self._enable_control
+                                and not self._collision_evidence_hold))
 
         committed_overtake_acceleration_active = bool(
             self._committed_overtake_acceleration_boost_enabled
@@ -14066,7 +14433,7 @@ class MPCController(Node):
                 # attempt times out.
                 acc = np.clip(
                     self.KP * (float(u[0]) - abs(v)),
-                    0.0,
+                    self._mpc_cfg.a_min,
                     self._mpc_cfg.a_max,
                 )
             elif not self._stuck_reverse_drive_active:
@@ -14218,6 +14585,10 @@ class MPCController(Node):
         self._last_acc = acc
         self._last_u[0] = u[0]
         self._last_u[1] = u[1]
+        # Recovery and smoothing can replace the solver's steering command.
+        # The next live solve (and Race/Center handoff) must start from the
+        # command actually sent, not from that discarded solver output.
+        self._mpc.previous_steering = float(u[1])
 
         self._runtime_checkpoint('safety_fallback')
         # update car state (use v for feedback actual speed)

@@ -38,6 +38,13 @@ reference_path:
   center_csv_path: "env/centerline/traj_center_mincurv_capped.csv"
   # 追い越し・追従フラグ時の境界線CSV（センターライン基準）
   center_bounds_csv_path: "env/centerline/waypoint_bounds_center_mincurv_capped.csv"
+  # Oldと同じ区間。現在の設計条件で補間・車体掃引を検証した参照。
+  l0_precomputed_reference_csv: "env/centerline/l0_reference_wp220_290.csv"
+  l0_precomputed_heading_gain: 0.25
+  lane_precomputed_reference_csvs:
+    - "env/centerline/l0_reference_wp220_340.csv"
+    - "env/centerline/l2_reference_wp235_340.csv"
+  lane_precomputed_heading_gain: 1.0
 
   resolution: 0.6
   smoothing_distance: 2
@@ -61,6 +68,9 @@ trajectory_switch:
   overtake_commit_max_relaxation_m: 0.20 # [m] shadow MPCで許可する人工車線境界の最大緩和量
   overtake_commit_valid_width_distance_m: 20.0 # [m] MPC horizonとは別に候補車線の有効幅を確認する前方距離
   outer_lane_progress_timeout_sec: 2.5 # [s] 外側車線中心到達後、追越し距離が縮まらなければL1復帰を評価
+  outer_lane_retry_cooldown_sec: 2.0 # [s] 外側解除後の最初の有効観測から再評価までの待機
+  outer_lane_retry_confirm_sec: 0.5 # [s] 状況改善と同じ候補の継続確認
+  outer_lane_retry_speed_drop_mps: 1.0 # [m/s] 同一対象の低速化による再評価の最小速度低下
   outer_lane_min_progress_m: 0.5 # [m] 追越し進捗タイマーを更新する相対距離の最小減少量
   slow_lead_overtake_speed_kmh: 16.0 # [km/h] 停止車とは分離して特別追越しする低速前方車の上限
   slow_lead_overtake_speed_margin: 0.8 # [m/s] Shadow未確定で確定距離内へ入った後も残す保守的な接近余裕
@@ -200,6 +210,12 @@ center_lane_rejoin_stability:
   soft_rejoin_max_reference_speed: 1.0 # [m/s] 追い越し完了後のL1参照横移動速度
   soft_rejoin_max_ramp_sec: 3.0 # [s] 外側車線からのL1参照移動時間の上限
   release_infeasible_cycles: 5 # L1復帰中にこの回数連続失敗したらL1固定を解除
+
+# 既定の車体寸法。事前参照の生成と読み込みで同じ条件を検証する。
+collision_geometry:
+  length: 2.064
+  width: 1.45
+  rear_axle_to_center: 0.522
 
 bicycle_model:
   length: 1.087
@@ -421,18 +437,15 @@ stuck_recovery:
   adaptive_reverse_wall_margin: 0.3 # [m] 静的壁まで必ず残す後方余裕
   adaptive_reverse_footprint_radius: 1.13 # [m] 後退掃引で使う保守的な車体包絡半径
   adaptive_reverse_min_clear_distance: 0.3 # [m] これ未満しか下がれなければ停止維持
-  adaptive_reverse_localization_max_error: 0.5 # [m] GNSS位置とodom位置の許容差
+  adaptive_reverse_localization_max_error: 0.5 # [m] GNSS位置とodom位置の診断用閾値（復帰停止には使わない）
   adaptive_reverse_localization_fresh_sec: 0.5 # [s] 両位置情報の最大受信経過時間
-  adaptive_reverse_localization_confirm_sec: 0.25 # [s] 整合条件の連続確認時間
+  adaptive_reverse_localization_confirm_sec: 0.25 # [s] 位置整合の診断用連続確認時間
   adaptive_reverse_forward_success_cycles: 3 # 有効な前進MPCをこの周期数連続確認したら後退終了
   generic_reverse_min_distance: 0.5 # [m] 前方車由来でないReverseは、MPC有効だけではこの実後退量未満でDRIVEへ戻さない
-  straight_reentry_enabled: true # 境界外MPCスタック時、MPCと独立した直進復帰を使用
-  straight_reentry_speed: 1.0 # [m/s] 直進復帰中の低速指令
-  straight_reentry_probe_distance: 2.0 # [m] DRIVE/REVERSE直進方向の比較距離
-  straight_reentry_min_improvement: 0.20 # [m] 採用方向に必要な境界超過量の改善
-  straight_reentry_timeout: 8.0 # [s] 一度の連続直進復帰の上限
-  straight_reentry_localization_wait_sec: 1.0 # [s] 開始直後は停止保持してGNSS/odom整合を待つ
-  straight_reentry_success_cycles: 8 # 境界内かつMPC正常を連続確認して終了
+  straight_reentry_enabled: true # スタック復帰（境界内外共通。前進:左/直進/右、後退:直進）
+  straight_reentry_speed: 1.0 # [m/s] 前進・後退の復帰速度。実装上限1.0m/s
+  straight_reentry_probe_distance: 2.0 # [m] 各候補の物理衝突検証距離。重なり減少→WP方位改善→WP接近の順で比較
+  straight_reentry_success_cycles: 8 # 安全な前進候補・実前進・MPC正常・通常前進指令を連続確認して終了
   cooldown: 2.0
   reverse_speed: 1.5
   reverse_acceleration: 2.5

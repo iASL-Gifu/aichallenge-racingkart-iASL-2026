@@ -256,13 +256,14 @@ def has_collision_in_line(map, p0, p1):
 
 
 def lane_constraint_margins(target_lane, safety_margin):
-    """Return (upper, lower) margins for a dynamic free-space segment.
+    """Return (upper, lower) base margins at the physical course edges.
 
     A selected L0/L1/L2 corridor already uses lane boundaries generated from
     course bounds whose physical outside edges include OUTER_COURSE_MARGIN.
     Applying the model safety margin again to both sides used to consume up to
     40 percent of each side of a lane and also narrowed the boundary adjoining
-    L1.  Selected lanes therefore receive no additional dynamic edge margin.
+    L1. Selected lanes therefore receive no additional course-edge margin.
+    Obstacle edges still need the ego half-width via obstacle_center_bounds.
 
     Full-width driving (target_lane is None) retains the normal model safety
     margin on both physical course edges for recovery and ordinary Race mode.
@@ -271,6 +272,23 @@ def lane_constraint_margins(target_lane, safety_margin):
     if target_lane in (0, 1, 2):
         return 0.0, 0.0
     return margin, margin
+
+
+def obstacle_center_bounds(lower, upper, model_width, target_lane, safety_margin,
+                           *, lower_occupied, upper_occupied):
+    """Inset occupied edges for the ego body before intersecting a center lane.
+
+    Course bounds already include OUTER_COURSE_MARGIN. Free grid endpoints
+    at those bounds must not count the body width twice. Artificial lane
+    boundaries, including narrow L1, are reference-point limits, not walls.
+    """
+    upper_margin, lower_margin = lane_constraint_margins(target_lane, safety_margin)
+    half_width = .5 * max(float(model_width), 0.)
+    if lower_occupied:
+        lower_margin = max(lower_margin, half_width)
+    if upper_occupied:
+        upper_margin = max(upper_margin, half_width)
+    return lower + lower_margin, upper - upper_margin
 
 
 def lane_minimum_free_segment_width(
@@ -1291,9 +1309,8 @@ class ReferencePath:
         # Hard free space must fit the vehicle. The narrow L1 definition is
         # an artificial lane layer and must not weaken obstacle clearance.
         min_width = max(float(model_width), 0.0)
-        # A post-margin corridor must still accommodate the lane-specific
-        # minimum width.  The former 0.1 m threshold could accept a sliver
-        # that was physically impossible for the vehicle.
+        # The raw free segment must fit the vehicle, before its occupied
+        # endpoints are converted into bounds on the vehicle reference point.
         min_segment_length = min_width
 
         # container for constraints and border cells
@@ -1365,6 +1382,21 @@ class ReferencePath:
         def compute_bound(wp, ls):
             return _signed_boundary_distance(wp.x, wp.y, wp.psi, ls[0], ls[1])
 
+        def occupied_endpoint(cell):
+            x, y = self.map.w2m(*cell)
+            return self.map.data[y, x] == 0
+
+        segment_bounds_cache = {}
+
+        def segment_center_bounds(upper, lower, upper_cell, lower_cell):
+            key = (upper, lower, tuple(upper_cell), tuple(lower_cell))
+            if key not in segment_bounds_cache:
+                segment_bounds_cache[key] = obstacle_center_bounds(
+                    lower, upper, model_width, target_lane, safety_margin,
+                    lower_occupied=occupied_endpoint(lower_cell),
+                    upper_occupied=occupied_endpoint(upper_cell))
+            return segment_bounds_cache[key]
+
         def add_constraint(wp, ub_ls, lb_ls, horizon_index):
             '''
             print("----------------")
@@ -1383,25 +1415,24 @@ class ReferencePath:
             segment_length = ub - lb
             
             target_lane = getattr(self, 'target_lane_idx', None)
-            upper_margin, lower_margin = lane_constraint_margins(
-                target_lane, safety_margin)
-            segment_length_sm = segment_length - upper_margin - lower_margin
+            center_lb, center_ub = segment_center_bounds(ub, lb, ub_ls, lb_ls)
 
             # Check feasibility of the path
-            # segment_lengthから両側のsafety_marginを引いた値がmin_segment_lengthより小さい場合は、
-            # border_cellsで囲まれる領域の隙間が狭すぎて障害物回避が困難なため、
             # Do not replace an obstacle-narrowed corridor with static full
             # width: that would erase the obstacle from the MPC constraints.
             # Use the zero-width sentinel and let the existing infeasibility
             # recovery stop/replan safely.
-            if segment_length_sm < min_segment_length:
+            # The raw free space fits the body; the inset interval contains
+            # its reference point. Requiring another full vehicle width of
+            # the inset interval would count that width twice.
+            if segment_length < min_segment_length or center_ub - center_lb <= 1e-3:
                 if self.unsafe_static_fallback_on_narrow:
                     # Deliberately erase the dynamic narrowing and restore the
                     # static corridor. This is useful for comparison runs but
                     # may permit a collision with a real obstacle.
                     ub, lb = wp.ub, wp.lb
-                    upper_margin, lower_margin = lane_constraint_margins(
-                        target_lane, safety_margin)
+                    upper_margin, lower_margin = lane_constraint_margins(target_lane, safety_margin)
+                    center_lb, center_ub = lb + lower_margin, ub - upper_margin
                     fallback_wp = (
                         int(wp_id + len(ub_hor)) % self.n_waypoints)
                     if fallback_wp not in self.unsafe_static_fallback_wp_ids:
@@ -1409,11 +1440,10 @@ class ReferencePath:
                 else:
                     ub = 0.0
                     lb = 0.0
-                    upper_margin = 0.0
-                    lower_margin = 0.0
+                    center_lb = center_ub = 0.0
 
-            hard_ub = min(float(wp.ub_sm), float(ub - upper_margin))
-            hard_lb = max(float(wp.lb_sm), float(lb + lower_margin))
+            hard_ub = min(float(wp.ub_sm), float(center_ub))
+            hard_lb = max(float(wp.lb_sm), float(center_lb))
             lane_lb, lane_ub = lane_bounds_for(horizon_index, wp)
             lb_sm, ub_sm = intersect_constraint_bounds(
                 hard_lb, hard_ub, lane_lb, lane_ub)
@@ -1474,11 +1504,14 @@ class ReferencePath:
             free_segments = self._compute_free_segments(wp, min_width, wp_idx=(wp_id+n))
             if target_lane in (0, 1, 2):
                 lane_lb, lane_ub = lane_bounds_for(n, wp)
-                free_segments = [
-                    segment for segment in free_segments
-                    if min(compute_bound(wp, segment[0]), lane_ub)
-                    > max(compute_bound(wp, segment[1]), lane_lb)
-                ]
+                candidates = []
+                for segment in free_segments:
+                    center_lb, center_ub = segment_center_bounds(
+                        compute_bound(wp, segment[0]), compute_bound(wp, segment[1]),
+                        segment[0], segment[1])
+                    if min(center_ub, lane_ub) > max(center_lb, lane_lb) + 1e-3:
+                        candidates.append(segment)
+                free_segments = candidates
             free_segments_hor.append(free_segments)
             self.free_segs.extend(free_segments)
 
@@ -1524,6 +1557,7 @@ class ReferencePath:
                         candidate_wp = self.get_waypoint(wp_id + n + i)
                         hard_ub = compute_bound(candidate_wp, ub_fs)
                         hard_lb = compute_bound(candidate_wp, lb_fs)
+                        hard_lb, hard_ub = segment_center_bounds(hard_ub, hard_lb, ub_fs, lb_fs)
                         lane_lb, lane_ub = lane_bounds_for(n + i, candidate_wp)
                         total_segment_length += max(
                             0.0,

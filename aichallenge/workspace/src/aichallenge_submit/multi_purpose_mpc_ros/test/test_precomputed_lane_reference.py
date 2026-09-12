@@ -34,6 +34,8 @@ def test_offline_sweep_and_steering_envelope():
     rows = np.genfromtxt(CSV, delimiter=',', names=True)
     _, _, metrics = design.validate(rows['e_y'])
     assert metrics['max_steering_deg'] < CFG['mpc']['delta_max_deg']
+    assert metrics['max_steering_rate'] < (
+        CFG['mpc']['steer_rate_max'] / CFG['mpc']['steering_tire_angle_gain_var'])
     assert metrics['min_body_wall_clearance_m'] >= .25
     assert metrics['min_body_grid_distance_m'] >= .25
 
@@ -54,6 +56,15 @@ def test_loader_rejects_other_path_and_design(configured):
         wp.x = before
 
 
+def test_loader_accepts_installed_share_without_python_sources(configured, tmp_path):
+    _, path, _ = configured
+    (tmp_path / 'env').symlink_to(ROOT / 'env', target_is_directory=True)
+    profile = PrecomputedLaneReference.load(
+        tmp_path / CFG['reference_path']['l0_precomputed_reference_csv'],
+        path, tmp_path, design_parameters(CFG))
+    assert profile.sample(249, 0) is not None
+
+
 def test_profile_only_l0_and_wraps_without_changing_seams(configured):
     mpc, path, profile = configured
     path.precomputed_lane_reference = profile
@@ -62,6 +73,9 @@ def test_profile_only_l0_and_wraps_without_changing_seams(configured):
     for lane in (None, 1, 2):
         assert profile.sample(260, lane) is None
     assert mpc._compute_lane_center(260, 0) == profile.sample(260, 0)[0]
+    for wp_id in (230, 240, 249, 250):
+        assert profile.sample(wp_id, 0)[3] == 1.0
+        assert mpc._compute_lane_center(wp_id, 0) == profile.sample(wp_id, 0)[0]
     assert profile.sample(path.n_waypoints + 260, 0)[0] == profile.sample(260, 0)[0]
     with pytest.raises(ValueError):
         profile.table[260, 0] = 0.0

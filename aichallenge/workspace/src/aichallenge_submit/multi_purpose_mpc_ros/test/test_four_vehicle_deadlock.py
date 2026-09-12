@@ -82,6 +82,7 @@ def reverse_controller(rear=-4.):
     c._latched_target_passage=lambda *a:({2:True},None)
     c._latched_target_is_primary_v2x_blocker=lambda *a:True
     c._localization_consistent=True
+    c._recovery_localization_available=True
     c._static_current_footprint_is_free=lambda *a:True
     c._follow_escape_target_prediction_blocked=True
     c._adaptive_reverse_max_distance=6.
@@ -140,7 +141,7 @@ def test_waiting_to_reverse_checks_planned_short_distance_not_default_corridor()
     from pathlib import Path
     source=Path(__file__).resolve().parents[1] / 'multi_purpose_mpc_ros' / 'mpc_controller.py'
     tree=ast.parse(source.read_text())
-    recovery=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='_apply_stuck_recovery')
+    recovery=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='_apply_vehicle_stuck_recovery')
     check=next(n for n in ast.walk(recovery) if isinstance(n,ast.If) and
         '_prepass_retry_after_reverse' in ast.unparse(n.test) and
         '_stuck_recovery_until is None' in ast.unparse(n.test))
