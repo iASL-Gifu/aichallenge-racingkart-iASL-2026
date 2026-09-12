@@ -28,11 +28,11 @@ def profiles():
     p = m.model.reference_path
     items = [PrecomputedLaneReference.load(
         ROOT/f'env/centerline/l{lane}_reference_wp{start}_340.csv', p, ROOT,
-        design_parameters(CFG), heading_gain=1.) for lane, start in ((0,220),(2,190))]
+        design_parameters(CFG), heading_gain=1.) for lane, start in ((0,130),(2,130))]
     return PrecomputedLaneReferences(items)
 
 
-@pytest.mark.parametrize('lane,start', [(0,220),(2,190)])
+@pytest.mark.parametrize('lane,start', [(0,130),(2,130)])
 def test_dense_geometry_and_body_envelope(lane,start):
     generator = runpy.run_path(str(ROOT/'scripts/generate_l0_reference.py'))
     design = generator['LaneDesign'](lane_idx=lane,start_wp=start,end_wp=340)
@@ -109,7 +109,7 @@ def test_hybrid_uses_blended_geometry_not_final_lane(profiles):
     assert not np.allclose(results[0][1],[profiles.sample(305+i,2)[2] for i in range(15)])
 
 
-@pytest.mark.parametrize('lane,start', [(0,220),(2,190)])
+@pytest.mark.parametrize('lane,start', [(0,130),(2,130)])
 def test_installed_loader_checks_profile_and_current_source(profiles, tmp_path, lane, start):
     (tmp_path/'env').symlink_to((ROOT/'env').resolve(), target_is_directory=True)
     relative = f'env/centerline/l{lane}_reference_wp{start}_340.csv'
@@ -155,17 +155,18 @@ def test_controller_startup_loads_both_lanes_from_installed_share(tmp_path):
     controller.get_logger().error.assert_not_called()
 
 
-@pytest.mark.parametrize('index', [203, 225, 249])
-def test_extended_l2_reference_resolves_corner_failures(profiles, index):
+@pytest.mark.parametrize('lane,index', [(0,144),(0,150),(0,162),(0,194),(0,205),
+                                       (2,149),(2,174),(2,180),(2,203),(2,225),(2,249)])
+def test_extended_reference_resolves_corner_failures(profiles, lane, index):
     m = configured_mpc()
     p = m.model.reference_path
     p.precomputed_lane_reference = profiles
     p.precomputed_curvature_enabled = True
-    p.target_lane_idx = 2
+    p.target_lane_idx = lane
     p.is_overtaking = True
     def point(i):
         wp = p.get_waypoint(i)
-        ey = m._compute_lane_center(i, 2)
+        ey = m._compute_lane_center(i, lane)
         return np.array([wp.x-ey*np.sin(wp.psi), wp.y+ey*np.cos(wp.psi)])
     xy = point(index)
     direction = point(index+1)-point(index-1)

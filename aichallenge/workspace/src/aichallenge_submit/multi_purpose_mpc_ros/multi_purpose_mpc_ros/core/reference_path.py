@@ -1314,6 +1314,7 @@ class ReferencePath:
         min_segment_length = min_width
 
         # container for constraints and border cells
+        physical_width_hor = []
         ub_hor = []
         lb_hor = []
         border_cells_hor = []
@@ -1413,6 +1414,8 @@ class ReferencePath:
             lb = compute_bound(wp, lb_ls)
 
             segment_length = ub - lb
+            # Preserve raw obstacle-free width before body inset or static fallback.
+            physical_width_hor.append(float(segment_length))
             
             target_lane = getattr(self, 'target_lane_idx', None)
             center_lb, center_ub = segment_center_bounds(ub, lb, ub_ls, lb_ls)
@@ -1727,6 +1730,7 @@ class ReferencePath:
             waypoint_mid.lb_sm = new_bound_sm[1]
 
         # The prediction guard remains a third independent layer in MPC.py.
+        self.last_physical_free_widths = np.asarray(physical_width_hor, dtype=float)
         self.last_constraint_bounds = ConstraintBounds(
             hard_lb=np.asarray(hard_lb_hor, dtype=float),
             hard_ub=np.asarray(hard_ub_hor, dtype=float),

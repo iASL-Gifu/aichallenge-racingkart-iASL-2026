@@ -5825,6 +5825,9 @@ class MPCController(Node):
                 )
                 return
 
+            physical_widths = np.asarray(getattr(
+                self._mpc, "_constraint_physical_free_widths", []),
+                dtype=float).reshape(-1)
             reference_path = self._reference_path
             rows = []
             horizon_centers = []
@@ -5863,6 +5866,8 @@ class MPCController(Node):
                     "upper": float(upper[i]),
                     "lower": float(lower[i]),
                     "width": effective_width,
+                    "physical_width": (float(physical_widths[i])
+                        if i < len(physical_widths) else math.nan),
                     "center_margin": center_margin,
                     "narrowing": narrowing,
                     "x": float(wp.x),
@@ -5885,8 +5890,12 @@ class MPCController(Node):
                 vehicle_width,
                 self._reference_path.inner_lane_width,
             )
+            raw_widths = np.asarray([row["physical_width"] for row in rows])
+            physical_known = np.isfinite(raw_widths)
+            physical_min = (float(np.min(raw_widths[physical_known]))
+                            if np.any(physical_known) else math.nan)
             below_vehicle_count = int(np.count_nonzero(
-                np.isfinite(widths) & (widths < required_width)))
+                physical_known & (raw_widths < required_width)))
             center_excluded_count = int(np.count_nonzero(
                 np.isfinite(center_margins) & (center_margins < 0.0)))
 
@@ -5930,7 +5939,7 @@ class MPCController(Node):
             if invalid_count:
                 likely_cause = "invalid_or_collapsed_bounds"
             elif below_vehicle_count:
-                likely_cause = "effective_width_below_required_width"
+                likely_cause = "physical_free_width_below_required_width"
             elif center_excluded_count:
                 likely_cause = (
                     f"{lane_tag.lower()}_center_excluded_from_free_segment")
@@ -5951,9 +5960,11 @@ class MPCController(Node):
                 f"target_lane={getattr(self._mpc, '_constraint_target_lane', None)}, "
                 f"safety_margin={getattr(self._mpc, '_constraint_safety_margin', math.nan):.3f}m, "
                 f"horizon={count}, base_width_min={np.nanmin(base_widths):.3f}m, "
-                f"effective_width_min={min_row['width']:.3f}m@"
+                f"physical_free_width_min={physical_min:.3f}m, "
+                f"physical_width_known={np.count_nonzero(physical_known)}/{count}, "
+                f"reference_point_width_min={min_row['width']:.3f}m@"
                 f"i{min_row['index']}/wp{min_row['wp']}, "
-                f"invalid={invalid_count}, below_required_width="
+                f"invalid={invalid_count}, physical_below_required_width="
                 f"{below_vehicle_count}/{count}, required_width="
                 f"{required_width:.3f}m, center_excluded="
                 f"{center_excluded_count}/{count}, max_narrowing="
@@ -5967,7 +5978,8 @@ class MPCController(Node):
                 f"i{row['index']}/wp{row['wp']}:"
                 f"base=[{row['base_lower']:.2f},{row['base_upper']:.2f}]"
                 f"({row['base_width']:.2f}m),"
-                f"effective=[{row['lower']:.2f},{row['upper']:.2f}]"
+                f"physical_free_width={row['physical_width']:.2f}m,"
+                f"reference_point=[{row['lower']:.2f},{row['upper']:.2f}]"
                 f"({row['width']:.2f}m),"
                 f"center_margin={row['center_margin']:.2f}m"
                 for row in detail_rows

@@ -76,6 +76,11 @@ def test_passage_and_actual_mpc_reject_same_blocked_corridor(mpc, start, blocked
     assert preview(mpc, 2 - lane) is None
     with redirect_stdout(io.StringIO()):
         mpc._init_problem(mpc.N, 0.)
+    assert len(mpc._constraint_physical_free_widths) == mpc.N
+    np.testing.assert_array_equal(mpc._constraint_physical_free_widths,
+                                  path.last_physical_free_widths)
+    assert not np.shares_memory(mpc._constraint_physical_free_widths,
+                                path.last_physical_free_widths)
     assert mpc._constraint_collapse_detected
     assert failure['wp'] == mpc._constraint_collapse_detail['wp']
 

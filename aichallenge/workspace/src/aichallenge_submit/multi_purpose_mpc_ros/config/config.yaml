@@ -42,8 +42,8 @@ reference_path:
   l0_precomputed_reference_csv: "env/centerline/l0_reference_wp220_290.csv"
   l0_precomputed_heading_gain: 0.25
   lane_precomputed_reference_csvs:
-    - "env/centerline/l0_reference_wp220_340.csv"
-    - "env/centerline/l2_reference_wp190_340.csv"
+    - "env/centerline/l0_reference_wp130_340.csv"
+    - "env/centerline/l2_reference_wp130_340.csv"
   lane_precomputed_heading_gain: 1.0
 
   resolution: 0.6

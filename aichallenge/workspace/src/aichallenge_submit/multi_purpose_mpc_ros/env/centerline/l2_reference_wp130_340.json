@@ -13,7 +13,7 @@
     "mpc.v_max": 35.0,
     "mpc.understeer_coeff": 0.001
   },
-  "profile_sha256": "95c817aeb1fe7ceaa0b8e7c8cd019c697c7fc7bbb0e40f4d38a6e0a2a4b9cf2a",
+  "profile_sha256": "a0278b205bc63f01a9cafe9737eec8d961a6bfd4559369d0d32d6ab8112258a1",
   "sources": {
     "env/centerline/traj_center_mincurv_capped.csv": "42e1846c0b8649301ee38f541d8a29f3f5884988628a34004db59668d47e6d46",
     "env/centerline/waypoint_bounds_center_mincurv_capped.csv": "ebb56565b40ac24f8acc2fb18e6752c284ccb659f25e06722a35aa646c69f84e",
@@ -22,12 +22,12 @@
     "env/min_curv/occupancy_grid_map.pgm": "c32f680e7378c9908bf9f2c59c0c2b242c1884ed46133d2bc6831c45e8fc5d65"
   },
   "metrics": {
-    "max_curvature": 0.2672734435737397,
-    "max_steering_deg": 17.640000000020258,
-    "max_steering_rate": 1.1309523810692834,
+    "max_curvature": 0.26727344343160325,
+    "max_steering_deg": 17.639999991220936,
+    "max_steering_rate": 1.1309524130466846,
     "design_speed_mps": 9.722222222222221,
-    "min_body_wall_clearance_m": 0.6128678996532629,
-    "min_body_grid_distance_m": 0.670820393249937,
+    "min_body_wall_clearance_m": 0.40055148063995455,
+    "min_body_grid_distance_m": 0.36055512754639896,
     "sweep_step_m": 0.05,
     "body_width_m": 1.6,
     "body_longitudinal_interval_m": [

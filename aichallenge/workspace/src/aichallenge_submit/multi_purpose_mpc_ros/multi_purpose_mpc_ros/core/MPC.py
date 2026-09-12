@@ -771,6 +771,8 @@ class MPC:
             else float(safety_margin)
         )
         self._constraint_lane_relaxation = max(float(lane_relaxation), 0.0)
+        # Reset on every solve, including retries and topic-supplied bounds.
+        self._constraint_physical_free_widths = np.full(N, np.nan)
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
                 self.model.wp_id + 1,
@@ -787,6 +789,8 @@ class MPC:
                 lane_connection_points=(
                     self.lane_constraint_connection_points),
                 lane_transition_weights=self.lane_transition_weights)
+            self._constraint_physical_free_widths = np.array(
+                self.model.reference_path.last_physical_free_widths, copy=True)
         else:
             ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
