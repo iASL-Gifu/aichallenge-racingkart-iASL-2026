@@ -197,7 +197,7 @@ class Map:
                         first_pixel=[px, py], first_world=list(self.m2w(px, py)))
         return None
 
-    def static_recovery_path_is_clear(self, bodies, geometry, *, temporary_depth_increase=0.):
+    def static_recovery_path_is_clear(self, bodies, geometry, *, temporary_depth_increase=0., recovery_contact_slide=False):
         """Allow shrinking continuous wall contact, rejecting new contact patches."""
         if not math.isfinite(temporary_depth_increase) or temporary_depth_increase < 0.:
             return False, 'invalid_overlap_allowance'
@@ -232,6 +232,25 @@ class Map:
                     not any((x+dx, y+dy) in previous_cells
                             for dx in (-1,0,1) for dy in (-1,0,1))
                     for x,y in added)
+                if disconnected and recovery_contact_slide and initial_depth > 0. and previous_cells:
+                    # Trace the occupied wall locally, not through free space.
+                    # Three cells bound contact migration; globally connected
+                    # walls must not make every new obstacle permissible.
+                    reached = set(previous_cells)
+                    frontier = reached.copy()
+                    for _ in range(3):
+                        next_cells = set()
+                        for x, y in frontier:
+                            for dx in (-1, 0, 1):
+                                for dy in (-1, 0, 1):
+                                    nx, ny = x+dx, y+dy
+                                    if (0 <= nx < self.width and 0 <= ny < self.height
+                                            and self.data_backup[ny, nx] == 0
+                                            and (nx, ny) not in reached):
+                                        next_cells.add((nx, ny))
+                        reached.update(next_cells)
+                        frontier = next_cells
+                    disconnected = not added.issubset(reached)
                 if disconnected:
                     summary = {key: value for key, value in detail.items() if key != 'occupied_cells'}
                     return False, f'new_wall_contact_at_step={i}, padding={padding:.3f}, detail={summary}'

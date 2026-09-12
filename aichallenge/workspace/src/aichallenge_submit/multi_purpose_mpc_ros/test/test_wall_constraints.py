@@ -35,8 +35,8 @@ def test_guard_rows_exist_for_all_lanes_and_survive_lane_relaxation():
         rows = mpc.A0[-2*mpc.N:].toarray()
         for n in range(1, mpc.N+1):
             assert rows[2*(n-1), n*mpc.nx] == 1.
-            assert rows[2*(n-1), n*mpc.nx+1] == -mpc.wall_body_half_length
-            assert rows[2*(n-1)+1, n*mpc.nx+1] == mpc.wall_body_half_length
+            assert rows[2*(n-1), n*mpc.nx+1] == mpc.wall_body_center_offset - mpc.wall_body_half_length
+            assert rows[2*(n-1)+1, n*mpc.nx+1] == mpc.wall_body_center_offset + mpc.wall_body_half_length
         # A centre inside the old scalar bound can still have a corner outside.
         candidate = np.zeros(rows.shape[1])
         wp = mpc.model.reference_path.get_waypoint(mpc.model.wp_id+1)

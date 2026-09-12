@@ -138,7 +138,8 @@ def ego_body(controller, pose):
     observation = getattr(controller,'_collision_ego_metadata',None)
     stamp,frame,valid = observation if observation is not None else (now,'map',True)
     alignment = getattr(controller,'_collision_ego_alignment',None)
-    if alignment is not None:
+    # An explicit pose origin takes precedence over inferred V2X alignment.
+    if alignment is not None and getattr(controller, '_collision_ego_origin', 'unconfirmed') == 'unconfirmed':
         dx,dy,rotation,measured_stamp = alignment
         c,s = math.cos(pose.theta),math.sin(pose.theta)
         return body_pose(float(pose.x)+dx*c-dy*s,float(pose.y)+dx*s+dy*c,
@@ -178,6 +179,17 @@ def _sweep_ego_samples(a, b, steps, angle, padding):
         for j in range(steps))
 
 
+def prediction_times_from_observation(stamp, now, times):
+    """Convert a now-relative horizon to the shared V2X observation origin."""
+    age = max(float(now)-float(stamp), 0.)
+    return [age+float(t) for t in times]
+
+
+def linear_prediction_position(x, y, velocity, time):
+    """Same held-velocity forecast for MPC obstacles and body-sweep checks."""
+    return x+velocity[0]*time, y+velocity[1]*time
+
+
 def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
     """Conservative continuous-segment check, including translation and yaw sweep.
 
@@ -208,9 +220,67 @@ def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
         for j, ego in enumerate(ego_samples):
             ratio = (j+.5)/steps
             time = t0+(t1-t0)*ratio
-            other = replace(target, x=target.x+vx*time, y=target.y+vy*time,
+            ox, oy = linear_prediction_position(target.x, target.y, velocity, time)
+            other = replace(target, x=ox, y=oy,
                             uncertainty=target.uncertainty+target_padding,
                             lateral_uncertainty=target.lateral_padding+target_padding)
             if overlaps(ego,other,geometry,margin=clearance) is not False:
                 return False
     return True
+
+
+def _body_distance(a, b, geometry):
+    """Rectangle distance retaining localization/origin uncertainty."""
+    if overlaps(a, b, geometry) is not False:
+        return 0.
+    first, second = outline(a, geometry), outline(b, geometry)
+    def point_edge(p, u, v):
+        dx, dy = v[0]-u[0], v[1]-u[1]
+        q = max(0., min(1., ((p[0]-u[0])*dx+(p[1]-u[1])*dy)/(dx*dx+dy*dy)))
+        return math.hypot(p[0]-u[0]-q*dx, p[1]-u[1]-q*dy)
+    return min(point_edge(p, u, v) for points, edges in
+               ((first, second), (second, first)) for p in points[:-1]
+               for u, v in zip(edges, edges[1:]))
+
+
+def separating_forward_path_clear(poses, times, target, velocity, geometry, clearance=.1):
+    """Allow only initial clearance-margin overlap that forward motion resolves.
+
+    Keep all physical uncertainty and continuous-sweep padding. This exception
+    never applies to reverse, unknown yaw, physical overlap, or a new contact.
+    """
+    if (not target.yaw_valid or not poses or not all(p.yaw_valid for p in poses)
+            or not swept_path_clear(poses, times, target, velocity, geometry, clearance=0.)):
+        return False
+    def other(t):
+        x, y = linear_prediction_position(target.x, target.y, velocity, t)
+        return replace(target, x=x, y=y)
+    if overlaps(poses[0], other(times[0]), geometry, margin=clearance) is not True:
+        return False
+    previous = _body_distance(poses[0], other(times[0]), geometry)
+    initial = previous
+    cleared = False
+    for a, b, t0, t1 in zip(poses, poses[1:], times, times[1:]):
+        dx, dy = b.x-a.x, b.y-a.y
+        if dx*math.cos(a.yaw)+dy*math.sin(a.yaw) < -1e-9:
+            return False
+        angle = math.atan2(math.sin(b.yaw-a.yaw), math.cos(b.yaw-a.yaw))
+        steps = max(1, math.ceil(math.hypot(dx,dy)/.025),
+                    math.ceil(abs(angle)/.01), math.ceil((t1-t0)/.025))
+        if steps > 2048:
+            return False
+        for j in range(1, steps+1):
+            q = j/steps
+            ego = replace(a, x=a.x+q*dx, y=a.y+q*dy, yaw=a.yaw+q*angle,
+                          uncertainty=max(a.uncertainty,b.uncertainty),
+                          lateral_uncertainty=max(a.lateral_padding,b.lateral_padding))
+            opponent = other(t0+q*(t1-t0))
+            gap = _body_distance(ego, opponent, geometry)
+            if gap < previous-1e-9:
+                return False
+            previous = gap
+            overlap = overlaps(ego, opponent, geometry, margin=clearance)
+            if cleared and overlap is not False:
+                return False
+            cleared = cleared or overlap is False
+    return cleared and previous > initial+1e-3

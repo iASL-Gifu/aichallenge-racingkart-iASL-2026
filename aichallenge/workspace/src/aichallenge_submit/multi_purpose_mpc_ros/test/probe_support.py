@@ -46,5 +46,12 @@ def configured_mpc(kind='center'):
                  'lane_constraint_connection_points'):
         if name in c:
             setattr(mpc, name, c[name])
+    from types import SimpleNamespace
+    from multi_purpose_mpc_ros.core.wall_constraints import longitudinal_extent, center_offset, wall_half_width
+    geometry_cfg = SimpleNamespace(collision_geometry=SimpleNamespace(**cfg['collision_geometry']),
+                                   bicycle_model=SimpleNamespace(**b))
+    mpc.wall_body_half_length = longitudinal_extent(geometry_cfg)
+    mpc.wall_body_center_offset = center_offset(geometry_cfg)
+    mpc.wall_body_half_width = wall_half_width(geometry_cfg)
     mpc.debug_counter = 1
     return mpc

@@ -86,7 +86,7 @@ def test_hybrid_objective_overrides_lane_only_with_matching_boundary_weights(mpc
         with redirect_stdout(io.StringIO()):
             mpc._init_problem(mpc.N, 0.0)
         q = mpc.optimizer._derivative_cache['q']
-        cost = np.concatenate([np.tile(mpc.Q.diagonal(), mpc.N), mpc.QN.diagonal()])
+        cost = mpc.optimizer._derivative_cache['P'].diagonal()[:mpc.nx_N]
         np.testing.assert_allclose(q[:mpc.nx*(mpc.N+1):mpc.nx], -cost[::mpc.nx]*targets)
         # A normal hard lane must still win over unrelated soft objectives.
         mpc.set_lane_transition_weights()

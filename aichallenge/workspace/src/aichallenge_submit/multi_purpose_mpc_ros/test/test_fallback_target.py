@@ -104,7 +104,7 @@ def test_full_width_mpc_objective_is_shared_with_pp_without_changing_it():
     reference = mpc._fallback_lateral_reference[2]
     # Compare against the actual QP objective, not a second lane calculation.
     q = mpc.optimizer._derivative_cache['q']
-    weights = np.r_[np.tile(mpc.Q.diagonal(), mpc.N), mpc.QN.diagonal()]
+    weights = mpc.optimizer._derivative_cache['P'].diagonal()[:mpc.nx_N]
     np.testing.assert_allclose(reference, (-q[:len(weights)] / weights)[::mpc.nx])
     x, y = controller_method('_fallback_target_xy')(c, 50)
     target = path.get_waypoint(50)

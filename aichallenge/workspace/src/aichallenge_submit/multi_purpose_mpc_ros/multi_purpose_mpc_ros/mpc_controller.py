@@ -3,6 +3,7 @@
 import yaml
 import math
 import time
+import threading
 from typing import List, Tuple, Optional, NamedTuple
 import dataclasses
 from scipy import sparse
@@ -238,6 +239,9 @@ class MPCController(Node):
         self._odom: Optional[Odometry] = None
         self._gnss_pose: Optional[PoseWithCovarianceStamped] = None
         self._enable_control = True
+        self._manual_control_lock = threading.RLock()
+        self._manual_control_override = False
+        self._manual_recovery_reset_pending = False
         self._initialize()
         self._setup_parameters_callback()
         self._setup_pub_sub()
@@ -569,8 +573,10 @@ class MPCController(Node):
                 cfg_mpc, "lane_constraint_connection_points", 10)), 1)
 
 
-            from multi_purpose_mpc_ros.core.wall_constraints import longitudinal_extent
+            from multi_purpose_mpc_ros.core.wall_constraints import longitudinal_extent, center_offset, wall_half_width
             mpc.wall_body_half_length = longitudinal_extent(self._cfg)
+            mpc.wall_body_center_offset = center_offset(self._cfg)
+            mpc.wall_body_half_width = wall_half_width(self._cfg)
             return mpc_cfg, mpc
 
         def compute_speed_profile(car: BicycleModel, mpc_config: MPCConfig) -> None:
@@ -1604,6 +1610,8 @@ class MPCController(Node):
             "straight_reentry_enabled", True))
         self._straight_reentry_speed = max(float(get_cfg(
             "straight_reentry_speed", .5)), 0.0)
+        self._forward_turn_overlap_allowance = float(get_cfg(
+            "forward_turn_overlap_allowance", .03))
         self._reverse_overlap_allowance = float(get_cfg(
             "reverse_overlap_allowance", .03))
         self._straight_reentry_probe_distance = max(float(get_cfg(
@@ -1828,27 +1836,31 @@ class MPCController(Node):
         return ackerman_boost_cmd
 
     def _publish_control_command(self, stamp, u, acc, bug_acc_enabled):
-        cmd = self._create_ackerman_control_command(stamp, u, acc, bug_acc_enabled)
+        from contextlib import nullcontext
+        with getattr(self, '_manual_control_lock', nullcontext()):
+            if getattr(self, '_manual_control_override', False):
+                return
+            cmd = self._create_ackerman_control_command(stamp, u, acc, bug_acc_enabled)
 
-        # publish raw control command
-        self._command_raw_pub.publish(cmd)
+            # publish raw control command
+            self._command_raw_pub.publish(cmd)
 
-        # Store the measured-response-equivalent angle for delay prediction.
-        prediction_steer = float(u[1]) * self._delay_prediction_steer_gain
-        self._steering_command_history.append((
-            float(stamp.nanoseconds) / 1e9,
-            prediction_steer,
-        ))
+            # Store the measured-response-equivalent angle for delay prediction.
+            prediction_steer = float(u[1]) * self._delay_prediction_steer_gain
+            self._steering_command_history.append((
+                float(stamp.nanoseconds) / 1e9,
+                prediction_steer,
+            ))
 
-        # Apply the actuator command gain only to the published command.
-        cmd.lateral.steering_tire_angle *= (
-            self._mpc_cfg.steering_tire_angle_gain_var)
-        self._command_pub.publish(cmd)
-        diagnostics = getattr(self, '_runtime_diagnostics', None)
-        if diagnostics is not None:
-            diagnostics.published()
-            diagnostics.samples['command_stamp_age_sim_ms'].append(
-                (self.get_clock().now().nanoseconds-stamp.nanoseconds)/1e6)
+            # Apply the actuator command gain only to the published command.
+            cmd.lateral.steering_tire_angle *= (
+                self._mpc_cfg.steering_tire_angle_gain_var)
+            self._command_pub.publish(cmd)
+            diagnostics = getattr(self, '_runtime_diagnostics', None)
+            if diagnostics is not None:
+                diagnostics.published()
+                diagnostics.samples['command_stamp_age_sim_ms'].append(
+                    (self.get_clock().now().nanoseconds-stamp.nanoseconds)/1e6)
 
     def _predict_pose_after_steering_delay(
         self, pose: Pose2D, speed: float, now_sec: float,
@@ -2085,30 +2097,38 @@ class MPCController(Node):
     def _publish_gear_command(
         self, now, command: int, *, force: bool = False
     ) -> None:
-        if not self._stuck_send_gear_command or GearCommand is None or self._gear_cmd_pub is None:
-            return
-        if not force and self._last_stuck_gear_command == command:
-            return
-        msg = GearCommand()
-        msg.stamp = now.to_msg()
-        msg.command = command
-        self._gear_cmd_pub.publish(msg)
-        self._last_stuck_gear_command = command
+        from contextlib import nullcontext
+        with getattr(self, '_manual_control_lock', nullcontext()):
+            if getattr(self, '_manual_control_override', False):
+                return
+            if not self._stuck_send_gear_command or GearCommand is None or self._gear_cmd_pub is None:
+                return
+            if not force and self._last_stuck_gear_command == command:
+                return
+            msg = GearCommand()
+            msg.stamp = now.to_msg()
+            msg.command = command
+            self._gear_cmd_pub.publish(msg)
+            self._last_stuck_gear_command = command
 
     def _publish_stuck_actuation_command(self, now, accel: float, brake: float, steer_cmd: float) -> None:
-        if (
-            not self._stuck_use_actuation_cmd
-            or ActuationCommandStamped is None
-            or self._actuation_cmd_pub is None
-        ):
-            return
-        msg = ActuationCommandStamped()
-        msg.header.stamp = now.to_msg()
-        msg.header.frame_id = "base_link"
-        msg.actuation.accel_cmd = accel
-        msg.actuation.brake_cmd = brake
-        msg.actuation.steer_cmd = steer_cmd
-        self._actuation_cmd_pub.publish(msg)
+        from contextlib import nullcontext
+        with getattr(self, '_manual_control_lock', nullcontext()):
+            if getattr(self, '_manual_control_override', False):
+                return
+            if (
+                not self._stuck_use_actuation_cmd
+                or ActuationCommandStamped is None
+                or self._actuation_cmd_pub is None
+            ):
+                return
+            msg = ActuationCommandStamped()
+            msg.header.stamp = now.to_msg()
+            msg.header.frame_id = "base_link"
+            msg.actuation.accel_cmd = accel
+            msg.actuation.brake_cmd = brake
+            msg.actuation.steer_cmd = steer_cmd
+            self._actuation_cmd_pub.publish(msg)
 
     def _current_gear_is_reverse(self) -> bool:
         if self._gear_report is None:
@@ -2128,8 +2148,29 @@ class MPCController(Node):
         self._last_gear_report_received_sec = (
             float(self.get_clock().now().nanoseconds) / 1e9)
 
+    def _set_manual_control_override(self, manual: bool) -> None:
+        with self._manual_control_lock:
+            changed = self._manual_control_override != manual
+            self._manual_control_override = manual
+            self._enable_control = not manual
+            if manual:
+                self._manual_recovery_reset_pending = True
+            if changed:
+                self.get_logger().info(
+                    '[ManualControlOverride] manual control owns outputs; recovery suspended'
+                    if manual else '[ManualControlOverride] explicit autonomous transition received')
+
     def _control_mode_status_callback(self, msg) -> None:
-        self._control_mode_report = msg
+        with self._manual_control_lock:
+            previous = self._control_mode_report
+            self._control_mode_report = msg
+            if msg.mode == msg.MANUAL:
+                self._set_manual_control_override(True)
+            elif (msg.mode == msg.AUTONOMOUS and previous is not None
+                  and previous.mode == previous.MANUAL):
+                # A queued autonomous report must not cancel an explicit manual
+                # request before the vehicle has even reported MANUAL.
+                self._set_manual_control_override(False)
 
     def _velocity_status_callback(self, msg) -> None:
         self._velocity_report = msg
@@ -6494,34 +6535,35 @@ class MPCController(Node):
         )
 
     def _publish_initial_turbo(self) -> None:
-        """Toggle AWSIM turbo once, matching teleop_manager's button command."""
-        if (
-            not self._initial_start_turbo_enabled
-            or self._initial_start_turbo_published
-        ):
-            return
-        turbo_on = Float32MultiArray()
-        turbo_on.data = [1.0]
-        self._awsim_turbo_pub.publish(turbo_on)
-        turbo_release = Float32MultiArray()
-        turbo_release.data = [0.0]
-        self._awsim_turbo_pub.publish(turbo_release)
-        self._initial_start_turbo_published = True
-        self.get_logger().info(
-            "[InitialStartTurbo] published AWSIM turbo toggle [1.0] -> [0.0] "
-            "on /awsim/cmd."
-        )
+        from contextlib import nullcontext
+        with getattr(self, '_manual_control_lock', nullcontext()):
+            if getattr(self, '_manual_control_override', False):
+                return
+            """Toggle AWSIM turbo once, matching teleop_manager's button command."""
+            if (
+                not self._initial_start_turbo_enabled
+                or self._initial_start_turbo_published
+            ):
+                return
+            turbo_on = Float32MultiArray()
+            turbo_on.data = [1.0]
+            self._awsim_turbo_pub.publish(turbo_on)
+            turbo_release = Float32MultiArray()
+            turbo_release.data = [0.0]
+            self._awsim_turbo_pub.publish(turbo_release)
+            self._initial_start_turbo_published = True
+            self.get_logger().info(
+                "[InitialStartTurbo] published AWSIM turbo toggle [1.0] -> [0.0] "
+                "on /awsim/cmd."
+            )
 
     def _request_awsim_control_mode_for_recovery(self) -> None:
-        if not self._stuck_request_control_mode:
-            return
-        msg = Bool()
-        msg.data = True
-        self._awsim_control_mode_request_pub.publish(msg)
-        self.get_logger().info(
-            "[StuckRecovery] requested AWSIM control mode (data=True).",
-            throttle_duration_sec=1.0,
-        )
+        """Recovery never acquires autonomous mode; only operator requests do.
+
+        Kept for legacy recovery callers. Repeated mode requests can overwrite
+        an operator takeover before its status report reaches this node.
+        """
+        return
 
     def _begin_stuck_drive_transition(self, now_sec: float, reason: str) -> None:
         """Stop and request DRIVE until AWSIM reports that the shift completed."""
@@ -6565,16 +6607,15 @@ class MPCController(Node):
             (x - wp.x) * math.cos(normal_angle)
             + (y - wp.y) * math.sin(normal_angle)
         )
-        half_width = 0.5 * float(self._cfg.bicycle_model.width)
         guard = float(getattr(
             self._cfg.mpc, "prediction_outer_boundary_guard", 0.10))
         from multi_purpose_mpc_ros.core.reference_path import OUTER_COURSE_MARGIN
-        from multi_purpose_mpc_ros.core.wall_constraints import wall_center_bounds, longitudinal_extent
+        from multi_purpose_mpc_ros.core.wall_constraints import wall_center_bounds, longitudinal_extent, center_offset, wall_half_width
         error = 0. if yaw is None else math.atan2(math.sin(yaw-wp.psi), math.cos(yaw-wp.psi))
         lower, upper = wall_center_bounds(
             float(wp.lb), float(wp.ub), course_margin=OUTER_COURSE_MARGIN,
-            half_width=half_width, guard=guard, heading_error=error,
-            half_length=longitudinal_extent(self._cfg))
+            half_width=wall_half_width(self._cfg), guard=guard, heading_error=error,
+            half_length=longitudinal_extent(self._cfg), body_center_offset=center_offset(self._cfg))
         return wp_id, offset, lower, upper
 
     def _full_corridor_violation(self, x: float, y: float) -> float:
@@ -6590,19 +6631,24 @@ class MPCController(Node):
             return math.inf
         return max(lower-offset, offset-upper, 0.0)
 
-    def _reentry_path_is_clear(self, path, speed=None, reverse=False):
+    def _reentry_path_is_clear(self, path, speed=None, reverse=False, forward_turn=False, wall_escape=False, times=None):
         """Check physical static bodies and moving traffic, not corridor membership."""
         from types import SimpleNamespace
         if not self._recovery_localization_available:
             return False, 'localization_unavailable'
-        if speed is None and self._straight_reentry_speed <= 0.0:
+        if times is None and speed is None and self._straight_reentry_speed <= 0.0:
             return False, 'recovery_speed_disabled'
         bodies = [collision.ego_body(self, SimpleNamespace(x=x, y=y, theta=yaw))
                   for x, y, yaw in path]
         geometry = collision.geometry(self)
-        if reverse:
+        if wall_escape:
             safe, static_reason = self._map.static_recovery_path_is_clear(
-                bodies, geometry, temporary_depth_increase=self._reverse_overlap_allowance)
+                bodies, geometry, temporary_depth_increase=.03, recovery_contact_slide=True)
+        elif reverse or forward_turn:
+            allowance = (self._reverse_overlap_allowance if reverse
+                         else self._forward_turn_overlap_allowance)
+            safe, static_reason = self._map.static_recovery_path_is_clear(
+                bodies, geometry, temporary_depth_increase=allowance)
         else:
             safe, static_reason = self._map.static_recovery_path_is_clear(bodies, geometry)
         if not safe:
@@ -6612,23 +6658,32 @@ class MPCController(Node):
                     f"now={getattr(self, '_collision_now', None)}, "
                     f"timing={getattr(self, '_collision_ego_timing', None)}")
             return False, static_reason
-        from multi_purpose_mpc_ros.core.boundary_recovery import recovery_speed_limit
-        speed = min(self._straight_reentry_speed, recovery_speed_limit(path)) if speed is None else float(speed)
-        if not math.isfinite(speed) or speed <= 0.:
-            return False, 'insufficient_stopping_distance'
-        times = [0.0]
-        for a, b in zip(path, path[1:]):
-            times.append(times[-1]+math.hypot(b[0]-a[0], b[1]-a[1])/speed)
+        if times is None:
+            from multi_purpose_mpc_ros.core.boundary_recovery import recovery_speed_limit
+            speed = min(self._straight_reentry_speed, recovery_speed_limit(path)) if speed is None else float(speed)
+            if not math.isfinite(speed) or speed <= 0.:
+                return False, 'insufficient_stopping_distance'
+            times = [0.0]
+            for a, b in zip(path, path[1:]):
+                times.append(times[-1]+math.hypot(b[0]-a[0], b[1]-a[1])/speed)
+        if (len(times) != len(path) or not all(math.isfinite(t) and t >= 0. for t in times)
+                or any(b < a for a, b in zip(times, times[1:]))):
+            return False, 'invalid_prediction_times'
         for vid in self._v2x_tracker.active_vehicle_ids():
             target = collision.target_body(self, vid)
             if (target is None or not target.position_valid
                     or not self._v2x_tracker.has_velocity_estimate(vid)):
                 return False, f'unknown_vehicle={vid}'
-            age = max(self._collision_now-target.stamp, 0.0)
+            observation_times = collision.prediction_times_from_observation(
+                target.stamp, self._collision_now, times)
+            velocity = self._v2x_tracker.velocity(vid)
             if not collision.swept_path_clear(
-                    bodies, [t+age for t in times], target,
-                    self._v2x_tracker.velocity(vid), geometry):
-                return False, f'vehicle_collision={vid}'
+                    bodies, observation_times, target, velocity, geometry):
+                # Shared by forward recovery and fresh MPC/corridor handoff.
+                # Reverse and unrelated collision bypasses remain strict.
+                if reverse or not collision.separating_forward_path_clear(
+                        bodies, observation_times, target, velocity, geometry):
+                    return False, f'vehicle_collision={vid}'
         return True, static_reason
 
     def _reentry_mpc_path_is_valid(self, pose, command):
@@ -6648,23 +6703,18 @@ class MPCController(Node):
                 or not all(math.isfinite(float(v)) for v in (*command, pose.x, pose.y, pose.theta))
                 or command[0] <= 0.):
             return False
-        prediction = getattr(self._mpc, 'current_recovery_prediction', None)
-        if prediction is None or len(prediction) < 2:
+        from multi_purpose_mpc_ros.core.control_continuity import timed_mpc_path
+        delay = (float(getattr(self, '_steering_command_delay', 0.))
+                 if getattr(self, '_delay_prediction_enabled', False) else 0.)
+        timed = timed_mpc_path(mpc, pose, delay)
+        if timed is None:
+            self._mpc_handoff_reason = 'invalid_prediction_times'
             return False
-        path = [(float(pose.x), float(pose.y), float(pose.theta))]
-        # Include the current pose and densify every segment, including the
-        # connection to the delay-compensated MPC starting state.
-        for point in prediction:
-            if len(point) != 3 or not all(math.isfinite(float(v)) for v in point):
-                return False
-            x, y, yaw = path[-1]
-            dx, dy = point[0]-x, point[1]-y
-            angle = math.atan2(math.sin(point[2]-yaw), math.cos(point[2]-yaw))
-            steps = max(1, math.ceil(math.hypot(dx, dy)/.05), math.ceil(abs(angle)/.05))
-            for i in range(1, steps+1):
-                ratio = i/steps
-                path.append((x+ratio*dx, y+ratio*dy, yaw+ratio*angle))
-        safe, reason = self._reentry_path_is_clear(path, speed=command[0])
+        path, times = timed
+        attempts = getattr(self, '_recovery_attempts', None)
+        safe, reason = attempts.wall_path_is_clear(path) if attempts else (True, 'clear')
+        if safe:
+            safe, reason = self._reentry_path_is_clear(path, times=times)
         self._mpc_handoff_reason = 'mpc_path_clear' if safe else f'mpc_path: {reason}'
         if not safe:
             self.get_logger().warn(f'[MPCRecoveryPathBlocked] {reason}', throttle_duration_sec=.5)
@@ -6684,7 +6734,22 @@ class MPCController(Node):
         return float(detail['overlap_depth'])
 
     def _select_reentry_motion(self, pose, now_sec):
-        from multi_purpose_mpc_ros.core.boundary_recovery import evaluate
+        from multi_purpose_mpc_ros.core.boundary_recovery import evaluate, RecoveryAttempts, recovery_speed_limit
+        from multi_purpose_mpc_ros.core.boundary_recovery import SteeringEstimate
+        if not hasattr(self, '_reentry_steering_estimate'):
+            self._reentry_steering_estimate = SteeringEstimate()
+        estimated_steering = self._reentry_steering_estimate.update(
+            now_sec, float(self._last_u[1]), float(self._mpc.max_steering_rate))
+        if estimated_steering is None:
+            return None, 'invalid_steering_estimate'
+        if not hasattr(self, '_recovery_attempts'):
+            self._recovery_attempts = RecoveryAttempts()
+        current = (float(pose.x), float(pose.y), float(pose.theta))
+        self._recovery_attempts.observe(
+            now_sec, current, self._reentry_overlap(current),
+            getattr(self, '_straight_reentry_direction', 0),
+            getattr(self, '_reentry_steering', 0.), self._last_u[0] > .01,
+            commanded_speed=float(self._last_u[0]))
         ref = self._reference_path
         count = int(ref.n_waypoints)
         if count < 2:
@@ -6703,20 +6768,57 @@ class MPCController(Node):
                 break
         if not math.isfinite(travelled) or travelled < 1e-3:
             return None, 'invalid_waypoints'
-        moving = abs(float(getattr(self._velocity_report, 'longitudinal_velocity', 0.))) > .1
-        return evaluate(
+        direction = getattr(self, '_straight_reentry_direction', 0)
+        steering = getattr(self, '_reentry_steering', 0.)
+        key = (direction, 0 if abs(steering) < .01 else (1 if steering > 0 else -1))
+        attempts = self._recovery_attempts
+        # Allow preparation plus a bounded observation period. Thereafter only
+        # measured movement/contact improvement extends retention.
+        retain = (direction != 0 and key not in attempts.excluded
+                  and (now_sec < getattr(self, '_reentry_hold_until', 0.)
+                       or (attempts.improving_key == key and now_sec < attempts.improving_until)))
+        origin = getattr(self, '_reentry_motion_origin', None)
+        if (direction < 0 and origin is not None
+                and math.hypot(current[0]-origin[0], current[1]-origin[1])
+                    >= self._straight_reentry_probe_distance):
+            # Straight reverse cannot improve heading indefinitely. After real
+            # backing over one horizon, compare forward again even if wall-free.
+            retain = False
+        motion, reason = evaluate(
             (float(pose.x), float(pose.y), float(pose.theta)),
+            allow_forward=not getattr(getattr(self, "_forward_progress", None), "blocked", False),
             target=(float(target.x), float(target.y)),
+            target_heading=float(getattr(target, 'psi', math.atan2(target.y-pose.y, target.x-pose.x))),
+            preferred_steering=(getattr(self, '_reentry_steering', 0.)
+                                if getattr(self, '_straight_reentry_direction', 0) == 1 else 0.),
             distance=self._straight_reentry_probe_distance,
             wheelbase=float(self._cfg.bicycle_model.length),
             steering_limit=min(float(self._mpc_cfg.delta_max), .314),
-            previous_steering=float(self._last_u[1]),
-            steering_step=(float(self._mpc.max_steering_rate)
-                           / float(self._mpc_cfg.control_rate) if moving else math.inf),
+            previous_steering=estimated_steering,
+            prepare_steering=abs(float(self._velocity_report.longitudinal_velocity)) <= .1,
+            steering_rate=float(self._mpc.max_steering_rate),
+            motion_speed=min(1., float(getattr(self, '_straight_reentry_speed', 1.))),
+            measured_speed=float(self._velocity_report.longitudinal_velocity),
+            retained=(direction, steering) if retain else None,
             clear=self._reentry_path_is_clear, overlap=self._reentry_overlap,
+            excluded=self._recovery_attempts.excluded,
+            failure_path_clear=attempts.wall_path_is_clear,
+            wall_escape_clear=lambda path: self._reentry_path_is_clear(
+                path, speed=min(.5, self._straight_reentry_speed, recovery_speed_limit(path)),
+                wall_escape=True),
+            forward_turn_clear=lambda path: self._reentry_path_is_clear(path, forward_turn=True),
             reverse_clear=lambda path: self._reentry_path_is_clear(path, reverse=True),
             min_reverse_distance=(.05 + .5*abs(float(self._velocity_report.longitudinal_velocity))
                                   + .5*float(self._velocity_report.longitudinal_velocity)**2))
+
+        if (direction == 1 and (motion is None or motion.direction < 0)
+                and any(marker in reason for marker in (
+                    'new_wall_contact', 'wall_overlap_', 'static_collision_at_step='))):
+            attempts.remember_wall_return(current, steering)
+            self.get_logger().info(
+                f'[RecoveryWallReturn] remembering failed forward steering={steering:+.3f}; '
+                'rejecting paths returning to this pose, not the steering direction', throttle_duration_sec=.5)
+        return motion, reason
 
     def _boundary_recovery_input(self, pose, now_sec):
         """Validate fresh position and heading independently of corridor bounds."""
@@ -6773,8 +6875,16 @@ class MPCController(Node):
         return span < self._stuck_gnss_distance_threshold
 
     def _start_straight_reentry(self, pose, now_sec: float) -> bool:
-        if not self._boundary_recovery_ready(pose, now_sec):
+        forced_reverse = getattr(getattr(self, '_forward_progress', None), 'blocked', False)
+        if forced_reverse:
+            valid, _ = self._boundary_recovery_input(pose, now_sec)
+            if (valid is None or not self._straight_reentry_enabled or not self._enable_control
+                    or self._collision_evidence_hold or self._intentional_follow_stop_active):
+                return False
+        elif not self._boundary_recovery_ready(pose, now_sec):
             return False
+        from multi_purpose_mpc_ros.core.boundary_recovery import SteeringEstimate
+        self._reentry_steering_estimate = SteeringEstimate()
         self._straight_reentry_active = True
         self._straight_reentry_direction = 0
         self._reentry_steering = 0.0
@@ -6803,6 +6913,8 @@ class MPCController(Node):
         self._request_awsim_control_mode_for_recovery()
         violation, reason = self._boundary_recovery_input(pose, now_sec)
         if violation is None:
+            if hasattr(self, '_recovery_attempts'):
+                self._recovery_attempts.anchor = None
             self._straight_reentry_success_cycles = 0
             self._straight_reentry_returning_drive = False
             self._reentry_hold_until = 0.0
@@ -6816,9 +6928,20 @@ class MPCController(Node):
             self.get_logger().warn('[StuckMotionBlocked] invalid_velocity', throttle_duration_sec=.5)
             return True
         motion, reason = self._select_reentry_motion(pose, now_sec)
+        # Stopped rollouts assume steering is already at the selected target.
+        # Re-establish preparation after slowing down even if the target itself
+        # did not change. Advancing the estimate keeps this deadline stable.
+        estimate = getattr(getattr(self, '_reentry_steering_estimate', None), 'angle', None)
+        if motion is not None and abs(reported_speed) <= .1 and estimate is not None:
+            remaining_angle = abs(motion.steering-estimate)
+            if remaining_angle > .01:
+                rate = max(float(self._mpc.max_steering_rate), .01)
+                self._reentry_steering_ready_at = max(
+                    getattr(self, '_reentry_steering_ready_at', now_sec),
+                    now_sec+remaining_angle/rate+.25)
         if motion is not None and math.isfinite(motion.speed_limit):
             self.get_logger().info(
-                f'[StuckMotionReversePrefix] {reason}, speed_limit={motion.speed_limit:.3f}m/s',
+                f'[StuckMotionValidatedPath] {reason}, speed_limit={motion.speed_limit:.3f}m/s',
                 throttle_duration_sec=.5)
         fresh_mpc = bool(
             self._mpc.infeasibility_counter == 0
@@ -6827,7 +6950,10 @@ class MPCController(Node):
             and not self._mpc.recovery_requested
             and not self._mpc.time_budget_exceeded)
         mpc_forward_ready = bool(
-            fresh_mpc and normal_forward_ready
+            not getattr(getattr(self, "_forward_progress", None), "blocked", False)
+            and not any(direction > 0 for direction, _ in
+                        getattr(getattr(self, '_recovery_attempts', None), 'excluded', ()))
+            and fresh_mpc and normal_forward_ready
             and self._reentry_mpc_path_is_valid(pose, normal_command))
         forward_and_stable = mpc_forward_ready
         if not forward_and_stable:
@@ -6836,7 +6962,9 @@ class MPCController(Node):
             self._straight_reentry_success_cycles+1
             if forward_and_stable else 0)
         completed = self._straight_reentry_success_cycles >= self._straight_reentry_success_cycles_required
-        if completed or self._straight_reentry_returning_drive:
+        steering_prepared = (abs(reported_speed) > .1 or
+                             now_sec >= getattr(self, '_reentry_steering_ready_at', now_sec))
+        if (completed or self._straight_reentry_returning_drive) and steering_prepared:
             self._straight_reentry_returning_drive = True
             # Brake to rest before changing direction, even with a valid MPC.
             if reported_speed < -.1:
@@ -6851,17 +6979,21 @@ class MPCController(Node):
                 self._mpc_safety_recovery_active = True
                 self._mpc_safety_recovery_success_cycles = 0
                 self.get_logger().info('[StuckMotionComplete] executable normal forward command confirmed; handing over without braking')
+                # Discard recovery braking history; final safety limiters still apply.
+                self._last_acc = max(0., float(getattr(self, '_last_acc', 0.)))
                 u[0], u[1] = normal_command
                 return False
             return True
 
         if mpc_forward_ready:
-            # Do not request/drive REVERSE while confirming a usable MPC path.
             self.get_logger().info(
-                f'[MPCRecoveryConfirm] forward path safe; holding for confirmation '
+                f'[MPCRecoveryConfirm] forward path safe; preparing/executing safe forward candidate; confirmation '
                 f'{self._straight_reentry_success_cycles}/{self._straight_reentry_success_cycles_required}',
                 throttle_duration_sec=.5)
-            return True
+            # Use the common gear/steering preparation below, including from
+            # rest. A valid MPC alone cannot execute an unsafe/reverse candidate.
+            if motion is None or motion.direction != 1 or reported_speed < -.1:
+                return True
 
         if motion is None:
             self._reentry_hold_until = 0.0
@@ -6881,11 +7013,16 @@ class MPCController(Node):
                                        throttle_duration_sec=.5)
                 return True
             self._straight_reentry_direction, self._reentry_steering = new
-            self._reentry_hold_until = now_sec+.5
+            self._reentry_motion_origin = (float(pose.x), float(pose.y))
             rate = max(float(self._mpc.max_steering_rate), .01)
-            self._reentry_steering_ready_at = now_sec+abs(motion.steering-float(self._last_u[1]))/rate+.25
+            estimate = getattr(getattr(self, '_reentry_steering_estimate', None), 'angle', None)
+            start_angle = float(self._last_u[1]) if estimate is None else estimate
+            self._reentry_steering_ready_at = now_sec+abs(motion.steering-start_angle)/rate+.25
             self._straight_reentry_pre_reverse_until = (
                 now_sec+self._stuck_pre_reverse_duration if motion.direction < 0 else None)
+            self._reentry_hold_until = max(
+                self._reentry_steering_ready_at,
+                self._straight_reentry_pre_reverse_until or now_sec)+1.5
             self.get_logger().info(
                 f'[StuckMotionSelect] wall_reduction={motion.wall_reduction:.6f}, '
                 f'heading_improvement={math.degrees(motion.heading_improvement):+.2f}deg, '
@@ -6894,6 +7031,10 @@ class MPCController(Node):
                 f'speed_limit={motion.speed_limit:.3f}, reason={reason}')
         self._reentry_steering = motion.steering
         u[1] = motion.steering if motion.direction > 0 else 0.0
+        if measured_speed > .1 and motion.direction > 0:
+            step = float(self._mpc.max_steering_rate)/float(self._mpc_cfg.control_rate)
+            u[1] = float(np.clip(u[1], float(self._last_u[1])-step,
+                                float(self._last_u[1])+step))
         if motion.direction > 0:
             if (self._stuck_last_drive_request_at is None
                     or now_sec-self._stuck_last_drive_request_at >= self._stuck_drive_request_resend_sec):
@@ -6912,6 +7053,8 @@ class MPCController(Node):
             gear_ready = self._current_gear_is_reverse()
         if gear_ready and now_sec >= getattr(self, '_reentry_steering_ready_at', now_sec):
             u[0] = min(self._straight_reentry_speed, 1.0, motion.speed_limit)
+            if mpc_forward_ready:
+                u[0] = min(u[0], normal_command[0])
         else:
             self.get_logger().info('[StuckMotionWait] confirming gear/steering before motion',
                                    throttle_duration_sec=.5)
@@ -6923,6 +7066,80 @@ class MPCController(Node):
         if not self._stuck_recovery_enabled:
             return False
         now_sec = float(self.get_clock().now().nanoseconds) / 1e9
+        from multi_purpose_mpc_ros.core.boundary_recovery import ForwardProgress
+        if getattr(self, '_manual_recovery_reset_pending', False):
+            from contextlib import nullcontext
+            with getattr(self, '_manual_control_lock', nullcontext()):
+                self._straight_reentry_active = False
+                self._straight_reentry_returning_drive = False
+                self._straight_reentry_direction = 0
+                self._stuck_recovery_until = None
+                self._stuck_reverse_drive_active = False
+                self._stuck_wait_for_drive = False
+                self._stuck_pre_reverse_until = None
+                self._stuck_pre_drive_until = None
+                self._prepass_retry_after_reverse = False
+                self._close_obstacle_reverse_requested = False
+                self._boundary_stop_samples = []
+                self._forward_progress = ForwardProgress()
+                self._last_stuck_gear_command = None
+                if getattr(self, '_manual_control_override', False):
+                    u[0], u[1] = 0., 0.
+                    return False
+                self._manual_recovery_reset_pending = False
+        if not hasattr(self, '_forward_progress'):
+            self._forward_progress = ForwardProgress()
+        metadata = getattr(self, '_collision_ego_metadata', None)
+        stamp = getattr(self, '_last_gnss_received_sec', None)
+        valid = bool(metadata and metadata[2] and stamp is not None
+                     and 0. <= now_sec-stamp <= .5)
+        if not getattr(self, '_recovery_motion_confirmed', False):
+            from multi_purpose_mpc_ros.core.boundary_recovery import MotionStart
+            if not hasattr(self, '_recovery_motion_start'):
+                self._recovery_motion_start = MotionStart()
+            self._recovery_motion_confirmed = self._recovery_motion_start.update(
+                stamp if stamp is not None else now_sec, pose.x, pose.y,
+                float(getattr(self._velocity_report, 'longitudinal_velocity', math.nan)), valid)
+            if not self._recovery_motion_confirmed:
+                # Stationary pre-start observations cannot prove a stall.
+                # Leave normal forward control available; do not request reverse.
+                self._boundary_stop_samples = []
+                self._forward_progress = ForwardProgress()
+                if hasattr(self, '_recovery_attempts'):
+                    self._recovery_attempts.anchor = None
+                    self._recovery_attempts.excluded.clear()
+                self._straight_reentry_active = False
+                return False
+            self.get_logger().info(
+                '[RecoveryMotionObserved] GNSS travel >=0.30m and measured speed >0.15m/s; '
+                'stall recovery enabled')
+        was_blocked = self._forward_progress.blocked
+        self._forward_progress.update(
+            stamp if stamp is not None else now_sec, pose.x, pose.y,
+            self._reentry_overlap((pose.x, pose.y, pose.theta)) if valid else 0.,
+            valid=valid, heading=float(pose.theta), reverse=valid and self._current_gear_is_reverse(),
+            forward=(valid and self._enable_control and not self._collision_evidence_hold
+                     and not self._intentional_follow_stop_active
+                     and self._current_gear_is_drive() and self._last_u[0] > .15))
+        if self._forward_progress.blocked and not was_blocked:
+            self.get_logger().warn(
+                f'[RecoveryForwardNoProgress] {self._forward_progress.reason}; '
+                'holding failed-pose MPC handoff until measured escape or pose change')
+        if was_blocked and not self._forward_progress.blocked:
+            # Candidate exclusions describe the same failed pose. Do not let
+            # them veto the freshly released MPC safety evaluation.
+            if hasattr(self, '_recovery_attempts'):
+                self._recovery_attempts.excluded.clear()
+                self._recovery_attempts.anchor = None
+                self._recovery_attempts.failure_position = None
+            self.get_logger().info(
+                '[RecoveryForwardReevaluate] measured escape/pose change; '
+                'rechecking fresh MPC path and recovery candidates')
+        if (self._forward_progress.blocked and not self._straight_reentry_active
+                and not self._prepass_retry_after_reverse and self._stuck_recovery_until is None):
+            # Enter through the same initializer, even if velocity reports slide
+            # along a wall. The direction-change branch brakes before shifting.
+            self._start_straight_reentry(pose, now_sec)
         if self._straight_reentry_active:
             if (not self._enable_control or self._collision_evidence_hold
                     or self._intentional_follow_stop_active):
@@ -7499,10 +7716,7 @@ class MPCController(Node):
                 self._prepass_reverse_start_xy = None
                 self._prepass_reverse_distance = 0.0
             # 自動運転モードを明示的にONにする
-            if self._stuck_request_control_mode:
-                msg = Bool()
-                msg.data = True
-                self._awsim_control_mode_request_pub.publish(msg)
+            self._request_awsim_control_mode_for_recovery()
             return False
 
         # 4. 通常時の判定（誤爆防止マスク＆スタック検知）
@@ -7713,9 +7927,13 @@ class MPCController(Node):
         return None
 
     def _control_mode_request_callback(self, msg):
-        if msg.data and not self._enable_control:
-            self.get_logger().info("Control mode request received")
-            self._enable_control = True
+        with self._manual_control_lock:
+            self._set_manual_control_override(not bool(msg.data))
+            # Forward an explicit operator request through the existing vehicle
+            # interface; recovery-generated requests never enter this callback.
+            publisher = getattr(self, '_awsim_control_mode_request_pub', None)
+            if publisher is not None:
+                publisher.publish(msg)
 
     def _path_constraints_callback(self, msg: PathConstraints):
         self._reference_path.set_path_constraints(
@@ -8220,7 +8438,7 @@ class MPCController(Node):
             ):
                 self._last_lane_change_time = now_sec
             self.get_logger().info(
-                f"[LaneChange] request={requested_lane}, "
+                f"[LaneChangeCandidate] request={requested_lane}, "
                 f"applied={decision.applied_lane}, mode={decision.mode}, "
                 f"vehicle_id={decision.target_id}"
             )
@@ -8232,6 +8450,217 @@ class MPCController(Node):
             decision.mode == "lane_transition",
         )
 
+
+    def _solve_with_corridor_commit(self, pose, speed):
+        """Validate the final proposal privately, then publish one applied state.
+
+        Selectors keep their requests. Only executable corridor/reference and
+        application progress are rolled back when a proposal cannot be solved.
+        """
+        from multi_purpose_mpc_ros.core.control_continuity import (
+            CorridorState, fork_solver, adopt_solver, fresh_solution)
+        live = self._mpc
+        candidate_state = CorridorState.capture(self)
+        candidate_session = self._overtake
+        self._overtake = getattr(self, '_corridor_request_session', candidate_session)
+        self._corridor_request_session = self._overtake
+        previous = getattr(self, '_committed_corridor', None)
+        if previous is None or previous.path is not candidate_state.path:
+            # Initial placement / Race-Center switch has its own admission.
+            self._remaining_mpc_plan = None
+            self._overtake.__dict__.update(candidate_session.__dict__)
+            result = live.get_control()
+            self._committed_corridor = CorridorState.capture(self)
+            self._corridor_hold_failed = False
+            return result
+        if previous.equivalent(candidate_state):
+            self._overtake.__dict__.update(candidate_session.__dict__)
+            self._corridor_hold_failed = False
+            result = live.get_control()
+            if fresh_solution(live):
+                self._committed_corridor = CorridorState.capture(self)
+            return result
+
+        if previous.continues_transition(candidate_state):
+            diagnostics = getattr(self, '_runtime_diagnostics', None)
+            if diagnostics is not None:
+                diagnostics.counts['corridor_routine_updates'] += 1
+            # Same admitted spatial transition: solve this horizon once. Keep
+            # checking current walls/traffic; historical admission is no proof
+            # that an updated trajectory is still executable.
+            self._overtake.__dict__.update(candidate_session.__dict__)
+            command, max_delta = live.get_control()
+            self._corridor_hold_failed = False
+            if fresh_solution(live):
+                if self._mpc_prediction_path_is_clear(
+                        pose, np.array([max(float(command[0]), abs(speed), .1), command[1]])):
+                    self._committed_corridor = CorridorState.capture(self)
+                    return command, max_delta
+                self._corridor_hold_failed = True
+                live.recovery_requested = True
+                live.failure_reason = self._mpc_handoff_reason
+                command = np.array([0., float(self._last_u[1])])
+            # Do not advance the admitted ramp on a failed solve/check, and do
+            # not run a second MPC in this cycle. Existing safe continuation
+            # or recovery handles the failure using the original evidence.
+            previous.apply(live)
+            previous.restore_progress(self, pause=True)
+            for path in (self._reference_path, self._reference_pathN):
+                path.target_lane_idx = previous.lane
+                path.is_overtaking = previous.overtaking
+            return command, max_delta
+
+        # Candidate uses current pose, traffic and speed constraints, but its
+        # mutable path/solver state cannot contaminate the applied controller.
+        candidate = fork_solver(live)
+        previous.apply(live)
+        previous.restore_progress(self, pause=True)
+        for path in (self._reference_path, self._reference_pathN):
+            path.target_lane_idx = previous.lane
+            path.is_overtaking = previous.overtaking
+        accepted = False
+        try:
+            command, max_delta = candidate.get_control()
+            reason = candidate.failure_reason or 'invalid_candidate'
+            if fresh_solution(candidate):
+                self._mpc = candidate
+                # Stopping candidates still need their geometric path checked.
+                check_command = np.array([max(float(command[0]), abs(speed), .1), command[1]])
+                accepted = self._mpc_prediction_path_is_clear(pose, check_command)
+                reason = self._mpc_handoff_reason
+        except Exception as error:
+            # A private trial may fail during matrix construction as well as
+            # solving. It must not leave a half-applied corridor behind.
+            reason = f'candidate_exception:{type(error).__name__}: {error}'
+        finally:
+            self._mpc = live
+        if accepted:
+            self._overtake.__dict__.update(candidate_session.__dict__)
+            candidate_state.apply(live)
+            candidate_state.restore_progress(self)
+            for path in (self._reference_path, self._reference_pathN):
+                path.target_lane_idx = candidate_state.lane
+                path.is_overtaking = candidate_state.overtaking
+            adopt_solver(live, candidate)
+            self._committed_corridor = CorridorState.capture(self)
+            self._remaining_mpc_plan = None
+            self._corridor_hold_failed = False
+            if previous.progress.get('_lane_decision') != candidate_state.progress.get('_lane_decision'):
+                self.get_logger().info(
+                    f'[CorridorCommit] applied={candidate_state.lane}, '
+                    f'mode={candidate_state.progress.get("_applied_corridor_mode")}; '
+                    'adopted checked MPC solution and reference together')
+            return command, max_delta
+
+        for key, value in getattr(self, '_corridor_request_progress', {}).items():
+            setattr(self, key, value)
+        self.get_logger().warn(
+            f'[CorridorCandidateRejected] candidate={candidate_state.lane}, '
+            f'holding={previous.lane}, reason={reason}', throttle_duration_sec=.5)
+        command, max_delta = live.get_control()
+        self._committed_corridor = CorridorState.capture(self)
+        self._corridor_hold_failed = not (
+            fresh_solution(live)
+            and self._mpc_prediction_path_is_clear(
+                pose, np.array([max(float(command[0]), abs(speed), .1), command[1]])))
+        if self._corridor_hold_failed:
+            # Never continue a held corridor merely because it used to solve.
+            # Existing fallback/recovery owns the resulting stop and release.
+            live.recovery_requested = True
+            live.failure_reason = 'held corridor is no longer executable'
+            command = np.array([0., float(self._last_u[1])])
+            self._remaining_mpc_plan = None
+        return command, max_delta
+
+    def _continue_checked_mpc(self, pose, speed, now_sec, command, recovery_active):
+        """Return a bounded, freshly collision-checked remaining MPC command."""
+        from multi_purpose_mpc_ros.core.control_continuity import RemainingPlan, fresh_solution
+        mpc = self._mpc
+        was_continuing = getattr(self, '_mpc_continuation_active', False)
+        self._mpc_continuation_active = False
+        self._mpc_continuation_reason = 'not_needed'
+        if (recovery_active or self._mpc_safety_recovery_active
+                or self._post_reverse_full_width_recovery_active
+                or self._steering_fallback_armed or not self._enable_control
+                or not self._current_gear_is_drive()):
+            self._remaining_mpc_plan = None
+            return command
+        if fresh_solution(mpc):
+            if was_continuing and (
+                    abs(float(command[1])-float(self._last_u[1]))
+                        > float(mpc.max_steering_rate)*float(mpc.model.Ts)+1e-6
+                    or not self._mpc_prediction_path_is_clear(pose, command)):
+                self._remaining_mpc_plan = None
+                self._mpc_continuation_reason = 'fresh_path_handoff_rejected'
+                mpc.recovery_requested = True
+                mpc.failure_reason = 'fresh MPC after continuation failed path/steering check'
+                return np.array([0., float(self._last_u[1])])
+            self._remaining_mpc_plan = RemainingPlan.capture(
+                mpc, min(now_sec, float(getattr(self, '_collision_now', now_sec))), command)
+            return command
+        plan = getattr(self, '_remaining_mpc_plan', None)
+        if (plan is None or plan.path_id is not mpc.model.reference_path
+                or plan.lane != mpc.model.reference_path.target_lane_idx
+                or not 1 <= mpc.infeasibility_counter <= 3
+                or getattr(self, '_corridor_hold_failed', False)):
+            self._mpc_continuation_reason = 'missing_or_incompatible_plan'
+            return command
+        steering = float(self._last_u[1])
+        for stamp, angle in reversed(self._steering_command_history):
+            if stamp <= now_sec-self._steering_command_delay:
+                steering = float(angle)
+                break
+        aligned = self._predict_pose_after_steering_delay(pose, speed, now_sec)
+        result, reason = plan.rollout(
+            (pose.x, pose.y, pose.theta), now=now_sec, speed=float(speed),
+            previous_command=self._last_u, steering=steering,
+            wheelbase=float(mpc.model.length), rate=float(mpc.max_steering_rate),
+            delay=float(self._steering_command_delay),
+            deceleration=abs(float(self._mpc_cfg.a_min)), period=float(mpc.model.Ts),
+            understeer=float(mpc.understeer_coeff),
+            alignment_pose=(aligned.x, aligned.y, aligned.theta),
+            steering_history=tuple(self._steering_command_history))
+        if result is not None:
+            replacement, path, times = result
+            safe, reason = self._continuation_path_is_clear(path, times)
+            if safe:
+                self._mpc_continuation_active = True
+                self._mpc_continuation_speed = float(replacement[0])
+                self._mpc_continuation_steering = float(replacement[1])
+                self.get_logger().info(
+                    f'[MPCContinuation] failed={mpc.infeasibility_counter}/3, '
+                    f'age={now_sec-plan.stamp:.3f}s, speed={replacement[0]:.2f}',
+                    throttle_duration_sec=.5)
+                return replacement
+        self._mpc_continuation_reason = reason
+        self.get_logger().warn(
+            f'[MPCContinuationRejected] {reason}; solve={mpc.failure_reason}',
+            throttle_duration_sec=.5)
+        return command
+
+    def _continuation_path_is_clear(self, path, times):
+        """Strict normal-driving body sweep, with actual rollout timestamps."""
+        from types import SimpleNamespace
+        if not self._recovery_localization_available:
+            return False, 'localization_unavailable'
+        bodies = [collision.ego_body(self, SimpleNamespace(x=x, y=y, theta=yaw))
+                  for x, y, yaw in path]
+        geometry = collision.geometry(self)
+        # No wall-overlap recovery allowance is used for normal MPC reuse.
+        for body in bodies:
+            if self._map.static_body_collision_detail(body, geometry, padding=.05) is not None:
+                return False, 'wall_or_invalid_body'
+        for vid in self._v2x_tracker.active_vehicle_ids():
+            target = collision.target_body(self, vid)
+            if (target is None or not target.position_valid
+                    or not self._v2x_tracker.has_velocity_estimate(vid)):
+                return False, f'unknown_vehicle={vid}'
+            age = max(self._collision_now-target.stamp, 0.)
+            if not collision.swept_path_clear(
+                    bodies, [t+age for t in times], target,
+                    self._v2x_tracker.velocity(vid), geometry):
+                return False, f'vehicle_collision={vid}'
+        return True, 'clear'
 
     def _runtime_checkpoint(self, name):
         diagnostics = getattr(self, '_runtime_diagnostics', None)
@@ -8300,7 +8729,8 @@ class MPCController(Node):
         if self.USE_OBSTACLE_AVOIDANCE:
             self._v2x_tracker = self._v2x_input_tracker.snapshot()
             if self._v2x_tracker.generation != self._v2x_applied_generation:
-                predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
+                predictions = self._v2x_tracker.predict_all(
+                    self._v2x_t_samples, now=self.get_clock().now().nanoseconds / 1e9)
                 self._dynamic_obstacles = predictions_to_obstacles(
                     predictions, self._v2x_vehicle_radius)
                 self._map.reset_map()
@@ -12061,6 +12491,15 @@ class MPCController(Node):
                 self._overtake_completed_target_id == self._overtake.target_id,
             ))
         )
+        # Stage application bookkeeping separately from the selectors' latest
+        # target/side/probe decisions. A rejected corridor must not clear their
+        # proof or advance an unapplied Hybrid transition.
+        self._corridor_request_session = self._overtake
+        self._corridor_request_progress = {
+            key: getattr(self, key) for key in (
+                '_outer_lane_progress_vehicle_id', '_outer_lane_progress_best_longitudinal',
+                '_outer_lane_last_progress_at')}
+        self._overtake = copy.deepcopy(self._overtake)
         applied_lane_idx, hybrid_outer_transition, in_transition = self._apply_lane_decision(
             requested_lane=self._target_lane_idx,
             now_sec=current_time_sec,
@@ -12251,13 +12690,15 @@ class MPCController(Node):
         self._runtime_checkpoint('lane_decision')
         # MPCの実行
         with self._stats.time_block("control"):
-            u, max_delta = self._mpc.get_control()
+            u, max_delta = self._solve_with_corridor_commit(predicted_pose, v)
         self._runtime_checkpoint('live_mpc')
         self._live_prediction_context = (
             self._mpc, self._mpc.current_prediction,
             self._reference_path.target_lane_idx, self._reference_path,
             self._v2x_tracker)
 
+        u = self._continue_checked_mpc(
+            pose, v, float(self.get_clock().now().nanoseconds)/1e9, u, recovery_active)
         pure_pursuit_safe_this_cycle = False
         if self._steering_fallback_enabled:
             solution_valid = bool(
@@ -12272,12 +12713,15 @@ class MPCController(Node):
             # Two-state controller ownership. One invalid MPC cycle enters the
             # fallback state; fallback keeps ownership until enough consecutive
             # accurate or collision-checked approximate solutions have been observed.
-            if not solution_valid and not self._steering_fallback_armed:
+            if (not solution_valid and not self._steering_fallback_armed
+                    and not self._mpc_continuation_active):
                 self._steering_fallback_armed = True
                 self._steering_fallback_success_cycles = 0
                 self.get_logger().warn(
                     "[ActivePathSteeringFallbackEnter] MPC output became "
-                    "invalid; fallback now owns steering")
+                    "invalid; fallback now owns steering; "
+                    f"reason={self._mpc.failure_reason}, "
+                    f"continuation={self._mpc_continuation_reason}")
 
             if self._steering_fallback_armed:
                 self._mpc_handoff_reason = (
@@ -12453,6 +12897,7 @@ class MPCController(Node):
         )
         if (
             self._mpc.recovery_requested
+            and not getattr(self, '_mpc_continuation_active', False)
             and not ignore_outer_failure_during_handoff
         ):
             self._mpc_recovery_request_cycles += 1
@@ -12473,6 +12918,7 @@ class MPCController(Node):
         )
         recovery_request_confirmed = bool(
             self._mpc.recovery_requested
+            and not getattr(self, '_mpc_continuation_active', False)
             and (
                 outer_bounds_collapsed
                 or self._mpc_recovery_request_cycles >= recovery_confirm_cycles
@@ -14595,6 +15041,15 @@ class MPCController(Node):
             acc = float(self._mpc_cfg.a_min)
             bug_acc_enabled = False
 
+        if (getattr(self, '_mpc_continuation_active', False)
+                and not recovering_from_stuck and self._enable_control):
+            # Later boost/filter writers may reduce speed but may not accelerate
+            # or replace the steering of the trajectory just checked above.
+            u[0] = min(float(u[0]), self._mpc_continuation_speed)
+            u[1] = self._mpc_continuation_steering
+            acc = min(float(acc), 0.)
+            bug_acc_enabled = False
+
         self._last_acc = acc
         self._last_u[0] = u[0]
         self._last_u[1] = u[1]
@@ -14722,7 +15177,9 @@ class MPCController(Node):
 
         # Publish zero command to stop the car completely
         zero_cmd = self._create_ackerman_control_command(self.get_clock().now(), [0.0, 0.0], 0.0, False)
-        self._command_pub.publish(zero_cmd)
+        with self._manual_control_lock:
+            if not self._manual_control_override:
+                self._command_pub.publish(zero_cmd)
 
         self.get_logger().warn(">> Stop Completed!")
 

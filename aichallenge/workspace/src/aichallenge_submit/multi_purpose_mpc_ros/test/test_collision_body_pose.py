@@ -144,6 +144,7 @@ def test_prediction_cannot_release_current_stale_or_wrong_frame_body():
 
 def test_measured_ego_alignment_is_applied_to_current_and_predicted_pose_once():
     c=controller()
+    c._collision_ego_origin='unconfirmed'
     c._collision_ego_alignment=(.522,0.,.1,.1)
     b=cg.ego_body(c,NS(x=0.,y=0.,theta=0.))
     assert (b.x,b.y,b.yaw)==pytest.approx((.522,0.,.1))

@@ -28,11 +28,11 @@ def profiles():
     p = m.model.reference_path
     items = [PrecomputedLaneReference.load(
         ROOT/f'env/centerline/l{lane}_reference_wp{start}_340.csv', p, ROOT,
-        design_parameters(CFG), heading_gain=1.) for lane, start in ((0,220),(2,235))]
+        design_parameters(CFG), heading_gain=1.) for lane, start in ((0,220),(2,190))]
     return PrecomputedLaneReferences(items)
 
 
-@pytest.mark.parametrize('lane,start', [(0,220),(2,235)])
+@pytest.mark.parametrize('lane,start', [(0,220),(2,190)])
 def test_dense_geometry_and_body_envelope(lane,start):
     generator = runpy.run_path(str(ROOT/'scripts/generate_l0_reference.py'))
     design = generator['LaneDesign'](lane_idx=lane,start_wp=start,end_wp=340)
@@ -109,7 +109,7 @@ def test_hybrid_uses_blended_geometry_not_final_lane(profiles):
     assert not np.allclose(results[0][1],[profiles.sample(305+i,2)[2] for i in range(15)])
 
 
-@pytest.mark.parametrize('lane,start', [(0,220),(2,235)])
+@pytest.mark.parametrize('lane,start', [(0,220),(2,190)])
 def test_installed_loader_checks_profile_and_current_source(profiles, tmp_path, lane, start):
     (tmp_path/'env').symlink_to((ROOT/'env').resolve(), target_is_directory=True)
     relative = f'env/centerline/l{lane}_reference_wp{start}_340.csv'
@@ -153,3 +153,29 @@ def test_controller_startup_loads_both_lanes_from_installed_share(tmp_path):
     assert set(path.precomputed_lane_reference.profiles)=={0,2}
     assert path.precomputed_curvature_enabled
     controller.get_logger().error.assert_not_called()
+
+
+@pytest.mark.parametrize('index', [203, 225, 249])
+def test_extended_l2_reference_resolves_corner_failures(profiles, index):
+    m = configured_mpc()
+    p = m.model.reference_path
+    p.precomputed_lane_reference = profiles
+    p.precomputed_curvature_enabled = True
+    p.target_lane_idx = 2
+    p.is_overtaking = True
+    def point(i):
+        wp = p.get_waypoint(i)
+        ey = m._compute_lane_center(i, 2)
+        return np.array([wp.x-ey*np.sin(wp.psi), wp.y+ey*np.cos(wp.psi)])
+    xy = point(index)
+    direction = point(index+1)-point(index-1)
+    yaw = np.arctan2(direction[1], direction[0])
+    wp = p.get_waypoint(index)
+    steer = np.clip(np.arctan(m.model.length*wp.kappa*(1+m.understeer_coeff*(35/3.6)**2)),
+                    -np.deg2rad(18), np.deg2rad(18))
+    m.current_control = np.tile([35/3.6, steer], m.N)
+    for _ in range(3):
+        m.model.update_states(*xy, yaw)
+        m.previous_steering = steer
+        m.get_control()
+    assert m.last_solution_accurate, m.failure_reason

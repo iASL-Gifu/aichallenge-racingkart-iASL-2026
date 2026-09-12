@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "lane_idx": 2,
+  "parameters": {
+    "bicycle_model.length": 1.087,
+    "bicycle_model.width": 1.6,
+    "collision_geometry.length": 2.064,
+    "collision_geometry.width": 1.45,
+    "collision_geometry.rear_axle_to_center": 0.522,
+    "mpc.delta_max_deg": 18.0,
+    "mpc.steer_rate_max": 2.0,
+    "mpc.steering_tire_angle_gain_var": 1.68,
+    "mpc.v_max": 35.0,
+    "mpc.understeer_coeff": 0.001
+  },
+  "profile_sha256": "6f68e400405e4289f5eac904440a591819a748fe0059a2b3d89866d1b0a08561",
+  "sources": {
+    "env/centerline/traj_center_mincurv_capped.csv": "42e1846c0b8649301ee38f541d8a29f3f5884988628a34004db59668d47e6d46",
+    "env/centerline/waypoint_bounds_center_mincurv_capped.csv": "ebb56565b40ac24f8acc2fb18e6752c284ccb659f25e06722a35aa646c69f84e",
+    "multi_purpose_mpc_ros/core/reference_path.py": "19fda6794db68a32ce5b34b1495541f2e7a530e27b2c47bbf95fe671b2a6610f",
+    "env/min_curv/occupancy_grid_map.yaml": "3e29ac529fe078ffba1000118b285b1c40a4e9787e1ea79a64e6d9c2040c738a",
+    "env/min_curv/occupancy_grid_map.pgm": "c32f680e7378c9908bf9f2c59c0c2b242c1884ed46133d2bc6831c45e8fc5d65"
+  },
+  "metrics": {
+    "max_curvature": 0.26727344357343596,
+    "max_steering_deg": 17.640000000001454,
+    "max_steering_rate": 1.1309523828590538,
+    "design_speed_mps": 9.722222222222221,
+    "min_body_wall_clearance_m": 0.3625286352714893,
+    "min_body_grid_distance_m": 0.41231056256176607,
+    "sweep_step_m": 0.05,
+    "body_width_m": 1.6,
+    "body_longitudinal_interval_m": [
+      -1.032,
+      1.554
+    ]
+  }
+}

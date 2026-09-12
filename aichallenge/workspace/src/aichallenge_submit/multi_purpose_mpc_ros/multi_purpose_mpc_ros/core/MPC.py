@@ -435,12 +435,15 @@ class MPC:
         self.use_max_kappa_pred = use_max_kappa_pred
         # 既存の初期化
         self.current_recovery_prediction = None
+        self.current_prediction_times = None
         self.current_prediction = None
         self.infeasibility_counter = 0
         self.solve_time_budget_ms = 20.0
         self.max_prediction_fallback_cycles = 3
         self.prediction_outer_boundary_guard = 0.0
         self.wall_body_half_length = 1.554
+        self.wall_body_center_offset = 0.
+        self.wall_body_half_width = .5*self.model.width
         self.prediction_lateral_tolerance = 0.02
         self.lane_constraint_retry_relaxation_m = (
             0.0, 0.10, 0.20, 0.35, 0.50, 0.70, 0.90, 1.20)
@@ -711,8 +714,12 @@ class MPC:
                     / self.model.length
                 )
             ur[n*self.nu:(n+1)*self.nu] = [v_ref, kappa_cmd_ref]
+            # linearize() uses the base path curvature as its expansion point.
+            # Steering reservation changes the objective, not that expansion
+            # point: using its advanced target here would shift the predicted
+            # vehicle dynamics as well as the desired input.
             uq[n * self.nx:(n+1)*self.nx] = B_lin.dot(
-                [v_ref, kappa_cmd_ref]) - f
+                [v_ref, kappa_ref / max(curvature_gain, 1e-3)]) - f
 
             # Set spatial reference e_y to target lane center with vehicle safety offset
             target_lane = getattr(self.model.reference_path, 'target_lane_idx', None)
@@ -985,12 +992,12 @@ class MPC:
             wp = self.model.reference_path.get_waypoint(self.model.wp_id + n)
             wl, wu = wall_center_bounds(
                 float(wp.lb), float(wp.ub), course_margin=OUTER_COURSE_MARGIN,
-                half_width=.5 * self.model.width, guard=self.prediction_outer_boundary_guard)
+                half_width=self.wall_body_half_width, guard=self.prediction_outer_boundary_guard)
             for sign in (-1., 1.):
                 row = len(wall_lower)
                 wall_rows.extend((row, row))
                 wall_cols.extend((n * self.nx, n * self.nx + 1))
-                wall_values.extend((1., sign * self.wall_body_half_length))
+                wall_values.extend((1., self.wall_body_center_offset + sign * self.wall_body_half_length))
                 wall_lower.append(wl)
                 wall_upper.append(wu)
         A_wall = sparse.csc_matrix((wall_values, (wall_rows, wall_cols)),
@@ -1010,9 +1017,19 @@ class MPC:
         uineq_basic = np.hstack([xmax_dyn, umax_dyn])
 
         # ステアリングレート制約の境界
-        max_delta_change = self.max_steering_rate * self.model.Ts
-        lineq_rate = -max_delta_change * np.ones(self.n_rate_constraints)
-        uineq_rate = max_delta_change * np.ones(self.n_rate_constraints)
+        # Inputs are commanded curvature, and adjacent predictions are a WP
+        # apart (not one control tick). Since |d atan(L*k)/dk| <= L, this
+        # conservative conversion guarantees the tire-angle rate limit at
+        # every feasible speed, using the maximum allowed forward speed.
+        max_curvature_changes = np.array([
+            self.max_steering_rate * float(
+                self.model.reference_path.get_waypoint(self.model.wp_id + i + 1)
+                - self.model.reference_path.get_waypoint(self.model.wp_id + i))
+            / max(float(umax[0]), 1e-3) / self.model.length
+            for i in range(self.n_rate_constraints)
+        ])
+        lineq_rate = -max_curvature_changes
+        uineq_rate = max_curvature_changes
 
         t_constraints2 = time.perf_counter()
         cpu_constraints2 = time.thread_time() if detail_enabled else 0.
@@ -1022,13 +1039,17 @@ class MPC:
         u = np.hstack([ueq, uineq_basic, uineq_rate, wall_upper])
 
         # コスト行列
-        P = self.P_base
+        # Common positive scaling preserves the Q/R/QN ratios and optimum.
+        # Keep the large tracking weights out of OSQP's numerical units; use
+        # a fixed penalty below so adaptive rho does not undo this balance.
+        objective_scale = 1e-6
+        P = self.P_base * objective_scale
 
         q = np.hstack([
             -np.tile(np.diag(self.Q.toarray()), N) * xr[:-self.nx],
             -self.QN.dot(xr[-self.nx:]),
             -np.tile(np.diag(self.R.toarray()), N) * ur
-        ])
+        ]) * objective_scale
 
         t_vector = time.perf_counter()
         cpu_vector = time.thread_time() if detail_enabled else 0.
@@ -1039,7 +1060,10 @@ class MPC:
             # "Workspace already setup!" エラーになるため、必ず新しいインスタンスを生成する。
             self.optimizer = osqp.OSQP()
             self.A0 = A_full.copy()
-            self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, warm_start=False, verbose=False)
+            self.optimizer.setup(
+                P=P, q=q, A=A_full, l=l, u=u,
+                warm_start=False, verbose=False,
+                rho=10.0, adaptive_rho=False, polish=True)
             self.osqp_initialized = True
 
             
@@ -1093,6 +1117,16 @@ class MPC:
             self.update = 0
                         
     def _solve_with_runtime_timing(self):
+        # A private corridor probe starts a new OSQP instance, but can use the
+        # last accepted primal iterate without sharing mutable solver state.
+        hint = getattr(self, '_continuity_warm_start', None)
+        self._continuity_warm_start = None
+        if hint is not None:
+            horizon = (self.N if self.model.reference_path.circular else
+                       min(self.N, self.model.reference_path.n_waypoints-self.model.wp_id))
+            if (len(hint) == self.nx*(horizon+1)+self.nu*horizon
+                    and np.isfinite(hint).all()):
+                self.optimizer.warm_start(x=hint)
         diagnostics = getattr(self, '_runtime_diagnostics', None)
         if diagnostics is None or not diagnostics.active:
             return self.optimizer.solve()
@@ -1277,9 +1311,10 @@ class MPC:
                 wp = self.model.reference_path.get_waypoint(self.model.wp_id + n)
                 wl, wu = wall_center_bounds(
                     float(wp.lb), float(wp.ub), course_margin=OUTER_COURSE_MARGIN,
-                    half_width=.5 * self.model.width,
+                    half_width=self.wall_body_half_width,
                     guard=self.prediction_outer_boundary_guard,
-                    heading_error=float(x[n, 1]), half_length=self.wall_body_half_length)
+                    heading_error=float(x[n, 1]), half_length=self.wall_body_half_length,
+                    body_center_offset=self.wall_body_center_offset)
                 if not wl - .01 <= float(x[n, 0]) <= wu + .01:
                     raise ValueError(f"MPC body-wall constraint violated at wp={self.model.wp_id+n}")
             candidate_prediction = self.update_prediction(x, N)
@@ -1307,12 +1342,14 @@ class MPC:
             self.previous_steering = delta
 
             # Commit the candidate only after solver and geometry validation.
+            self.last_solution_primal = np.array(dec.x, copy=True)
             self.current_control = control_signals
             self.current_recovery_prediction = tuple(
                 (float(state.x), float(state.y), float(state.psi))
                 for state in (
                     self.model.s2t(self.model.reference_path.get_waypoint(self.model.wp_id+n), x[n, :])
                     for n in range(N)))
+            self.current_prediction_times = tuple(float(t) for t in x[:N, 2])
             self.current_prediction = candidate_prediction
             self.collision_prediction_context = (
                 candidate_prediction, self.update_prediction(x,N,start_index=0))

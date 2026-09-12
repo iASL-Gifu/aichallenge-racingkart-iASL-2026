@@ -43,7 +43,7 @@ reference_path:
   l0_precomputed_heading_gain: 0.25
   lane_precomputed_reference_csvs:
     - "env/centerline/l0_reference_wp220_340.csv"
-    - "env/centerline/l2_reference_wp235_340.csv"
+    - "env/centerline/l2_reference_wp190_340.csv"
   lane_precomputed_heading_gain: 1.0
 
   resolution: 0.6
@@ -213,6 +213,7 @@ center_lane_rejoin_stability:
 
 # 既定の車体寸法。事前参照の生成と読み込みで同じ条件を検証する。
 collision_geometry:
+  ego_position_origin: rear_axle # GNSS/base_link。車体中心へYaw方向に+0.522m変換
   length: 2.064
   width: 1.45
   rear_axle_to_center: 0.522
@@ -444,6 +445,7 @@ stuck_recovery:
   generic_reverse_min_distance: 0.5 # [m] 前方車由来でないReverseは、MPC有効だけではこの実後退量未満でDRIVEへ戻さない
   straight_reentry_enabled: true # スタック復帰（境界内外共通。前進:左/直進/右、後退:直進）
   straight_reentry_speed: 1.0 # [m/s] 前進・後退の復帰速度。実装上限1.0m/s
+  forward_turn_overlap_allowance: 0.03 # [m] 左右の前進復帰のみ。終端の重なり改善とWP方位誤差2度超の改善が必要
   reverse_overlap_allowance: 0.03 # [m] 後退予測途中の最大食い込み増加上限。終端は総量減少・最大値初期以下。0で単調改善
   straight_reentry_probe_distance: 2.0 # [m] 各候補の物理衝突検証距離。重なり減少→WP方位改善→WP接近の順で比較
   straight_reentry_success_cycles: 8 # 安全な前進候補・実前進・MPC正常・通常前進指令を連続確認して終了

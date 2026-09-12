@@ -6,7 +6,8 @@ operates on duck-typed messages whose attributes match
 and reusable from non-ROS contexts (e.g. offline replay of rosbag CSVs).
 """
 
-from .collision_geometry import body_pose
+from .collision_geometry import (body_pose, linear_prediction_position,
+                                 prediction_times_from_observation)
 from dataclasses import replace
 
 import math
@@ -563,20 +564,22 @@ class V2XVehicleTracker:
         return self._velocity_valid.get(vehicle_id, False)
 
     def predict_positions(
-        self, vehicle_id: str, t_samples
+        self, vehicle_id: str, t_samples, *, now=None
     ) -> List[Tuple[float, float]]:
         buf = self._samples.get(vehicle_id)
         if not buf:
             return []
         _t_last, x_last, y_last = buf[-1]
         vx, vy = self._velocities.get(vehicle_id, (0.0, 0.0))
-        return [(x_last + vx * t, y_last + vy * t) for t in t_samples]
+        if now is not None:
+            t_samples = prediction_times_from_observation(_t_last, now, t_samples)
+        return [linear_prediction_position(x_last, y_last, (vx, vy), t) for t in t_samples]
 
     def active_vehicle_ids(self) -> List[str]:
         return list(self._active)
 
-    def predict_all(self, t_samples) -> Dict[str, List[Tuple[float, float]]]:
-        return {vid: self.predict_positions(vid, t_samples) for vid in self._active}
+    def predict_all(self, t_samples, *, now=None) -> Dict[str, List[Tuple[float, float]]]:
+        return {vid: self.predict_positions(vid, t_samples, now=now) for vid in self._active}
 
 
 def predictions_to_obstacles(predictions, vehicle_radius: float, obstacle_cls=None):

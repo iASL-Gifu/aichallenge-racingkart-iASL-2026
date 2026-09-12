@@ -503,3 +503,19 @@ def test_shadow_rejects_any_failed_commit_gate(override):
     values = _valid_shadow_kwargs()
     values.update(override)
     assert not overtake_shadow_solution_acceptable(**values)
+
+
+def test_map_forecast_and_body_sweep_share_observation_time_and_velocity_model():
+    from multi_purpose_mpc_ros.collision_geometry import (
+        prediction_times_from_observation, linear_prediction_position)
+    tracker = V2XVehicleTracker(v_max_safety=30., position_jump_threshold=20.)
+    tracker.update(_msg(0., [('d2', 0., 0.)]))
+    tracker.update(_msg(.5, [('d2', 5., 2.5)]))
+    times = [0., .25, 2.]
+    offsets = prediction_times_from_observation(.5, .7, times)
+    expected = [linear_prediction_position(5., 2.5, tracker.velocity('d2'), t)
+                for t in offsets]
+    actual = tracker.snapshot().predict_all(times, now=.7)['d2']
+    assert actual == pytest.approx(expected)
+    assert actual[0] == pytest.approx((7., 3.5))
+    assert actual[-1] == pytest.approx((27., 13.5))
