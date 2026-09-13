@@ -155,17 +155,29 @@ def test_stationary_window_survives_cycle_time_older_than_previous_gnss_sample()
     assert len(c._boundary_stop_samples) == 21
 
 
-@pytest.mark.parametrize('yaw_ns,expected',[(3_589_999_919,True),(3_604_999_919,False),(2_900_000_000,False)])
+@pytest.mark.parametrize('yaw_ns,expected',[(3_589_999_919,True),(3_604_999_919,True),
+                                           (3_649_999_919,False),(2_900_000_000,False)])
 def test_collision_metadata_uses_current_clock_and_tolerates_float_roundoff(yaw_ns,expected):
     from pathlib import Path
     import textwrap
     source=(Path(__file__).parents[1]/'multi_purpose_mpc_ros/mpc_controller.py').read_text()
-    start=source.index('        self._collision_ego_yaw = float(pose.theta)',source.index('        #オドメトリ(x,y,yaw,v)取得'))
+    start=source.index('        # Snapshot messages once:',source.index('        #オドメトリ(x,y,yaw,v)取得'))
     end=source.index('        self._collision_ego_alignment = None',start)
     def msg(ns):
-        return NS(header=NS(stamp=NS(sec=ns//1_000_000_000,nanosec=ns%1_000_000_000),frame_id='map'))
+        return NS(header=NS(stamp=NS(sec=ns//1_000_000_000,nanosec=ns%1_000_000_000),frame_id='map'),
+                  pose=NS(pose=NS(position=NS(x=1.,y=2.))))
     c=NS(_collision_now=3.55,_gnss_pose=msg(3_549_999_920),_odom=msg(yaw_ns),
+         _map=Mock(),
          get_clock=lambda:NS(now=lambda:NS(nanoseconds=3_589_999_919)))
-    exec(textwrap.dedent(source[start:end]),{'self':c,'pose':NS(theta=0.)})
+    original = c._gnss_pose
+    def clock_with_callback():
+        c._gnss_pose = msg(4_000_000_000)
+        c._gnss_pose.pose.pose.position.x = 99.
+        return NS(now=lambda:NS(nanoseconds=3_589_999_919))
+    c.get_clock = clock_with_callback
+    ns={'self':c, 'collision':Mock(), 'odom_to_pose_2d':lambda m:NS(theta=0.,x=0.,y=0.)}
+    exec(textwrap.dedent(source[start:end]),ns)
     assert c._collision_ego_metadata[2] is expected
     assert c._collision_now == 3_589_999_919/1e9
+    assert ns['pose'].x == 1.
+    assert ns['position_msg'] is original

@@ -44,7 +44,7 @@ def recovery_speed_limit(path):
 def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
              previous_steering=0., steering_step=math.inf, overlap=None, min_reverse_distance=.1, reverse_clear=None, target_heading=None, preferred_steering=0., allow_forward=True, forward_turn_clear=None, wall_escape_clear=None, excluded=(),
              steering_rate=math.inf, motion_speed=1., measured_speed=0.,
-             retained=None, only_motion=None, failure_path_clear=None, prepare_steering=False):
+             retained=None, retained_distance=None, only_motion=None, failure_path_clear=None, prepare_steering=False, compare_retained_turns=True, recompare=False, retry_clear=None, connection_check=None):
     """Choose WP-directed forward motion, otherwise straight reverse.
 
     Neither corridor membership nor corridor improvement participates in this
@@ -52,17 +52,26 @@ def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
     """
     if retained is not None:
         # Recompute from the CURRENT pose; never execute a cached path.
-        options = dict(target=target, distance=distance, wheelbase=wheelbase,
+        options = dict(target=target, distance=(distance if retained_distance is None else retained_distance), wheelbase=wheelbase,
             steering_limit=steering_limit, clear=clear, previous_steering=previous_steering,
             steering_step=steering_step, overlap=overlap, min_reverse_distance=min_reverse_distance,
             reverse_clear=reverse_clear, target_heading=target_heading,
             preferred_steering=preferred_steering, allow_forward=allow_forward,
             forward_turn_clear=forward_turn_clear, wall_escape_clear=wall_escape_clear,
             excluded=excluded, steering_rate=steering_rate, motion_speed=motion_speed,
-            measured_speed=measured_speed, only_motion=retained, failure_path_clear=failure_path_clear, prepare_steering=prepare_steering)
+            measured_speed=measured_speed, only_motion=retained, failure_path_clear=failure_path_clear, prepare_steering=prepare_steering, retry_clear=retry_clear, connection_check=connection_check)
         held, why = evaluate(pose, **options)
         if held is not None:
-            if held.direction == 1 and abs(held.steering) < .01:
+            if recompare:
+                options['only_motion'] = None
+                options['distance'] = distance
+                alternative, _ = evaluate(pose, **options)
+                if (alternative is not None
+                        and alternative.wall_reduction >= held.wall_reduction-1e-6
+                        and (alternative.heading_improvement > held.heading_improvement+math.radians(5.)
+                             or alternative.wall_reduction > held.wall_reduction+.01)):
+                    return alternative, 'periodic_improvement'
+            if not recompare and compare_retained_turns and held.direction == 1 and abs(held.steering) < .01:
                 turns = []
                 for steering in (steering_limit, -steering_limit):
                     options['only_motion'] = (1, steering)
@@ -117,7 +126,7 @@ def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
         steering = max(-steering_limit, min(steering_limit, steering))
         path = trajectory(1, steering, distance)
         alternatives.append((1, steering, path))
-        if key(1, steering) in excluded:
+        if key(1, steering) in excluded and retry_clear is None:
             reasons.append(f'forward/{requested:+.3f}:measured_no_progress')
             continue
         def checked_forward(candidate_path):
@@ -136,10 +145,10 @@ def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
             return safe, reason
         safe, reason = checked_forward(path)
         full_reason = reason
-        # Shorten only wall-limited paths. Every shorter trajectory is rebuilt
+        # Shorten wall- or vehicle-limited paths. Every shorter trajectory is rebuilt
         # at its stopping-distance speed and checked against walls AND traffic.
         if not safe and reason.startswith(('wall_overlap_', 'new_wall_contact_at_step=',
-                                            'static_collision_at_step=')):
+                                            'static_collision_at_step=', 'vehicle_collision=')):
             lengths = sorted({distance*.75, distance*.5, distance*.25,
                               distance*.125, minimum_distance}, reverse=True)
             for length in lengths:
@@ -150,6 +159,10 @@ def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
                 if safe:
                     path = prefix
                     break
+        if safe and key(1, steering) in excluded:
+            if retry_clear is None or not retry_clear(1, steering, path):
+                reasons.append(f'forward/{requested:+.3f}:measured_no_progress')
+                continue
         end_x, end_y, _ = path[-1]
         improvement = start_distance-math.hypot(target[0]-end_x, target[1]-end_y)
         heading_gain = heading_error(yaw)-heading_error(path[-1][2])
@@ -175,6 +188,39 @@ def evaluate(pose, *, target, distance, wheelbase, steering_limit, clear,
         candidates.sort(key=lambda motion: (-motion.wall_reduction,
                                             -motion.heading_improvement,
                                             -motion.improvement, abs(motion.steering)))
+        if connection_check is not None:
+            # Try the best safe prefixes first. The callback checks the whole
+            # prefix + endpoint MPC with one traffic time origin.
+            paired_candidates = []
+            for candidate in candidates:
+                # End the preparatory turn early when it can already connect;
+                # keep stopping distance and steering ramp in every short trial.
+                for length in (1., .5):
+                    if length >= distance or length < minimum_distance:
+                        continue
+                    prefix = trajectory(1, candidate.steering, length)
+                    if failure_path_clear is not None and not failure_path_clear(prefix)[0]:
+                        continue
+                    if not clear(prefix)[0]:
+                        continue
+                    if key(1, candidate.steering) in excluded and (retry_clear is None
+                            or not retry_clear(1, candidate.steering, prefix)):
+                        continue
+                    end = prefix[-1]
+                    paired_candidates.append(Motion(1, candidate.steering, prefix,
+                        start_distance-math.hypot(target[0]-end[0],target[1]-end[1]),
+                        initial_overlap-float(overlap(end)) if overlap else 0.,
+                        heading_error(yaw)-heading_error(end[2]), recovery_speed_limit(prefix)))
+                    break
+                else:
+                    paired_candidates.append(candidate)
+            for candidate in paired_candidates:
+                accepted, why = connection_check(candidate)
+                if accepted:
+                    return candidate, 'forward_mpc_connection'
+                reasons.append('connection:' + why)
+            # Preserve safe wall escape if no full connection exists. It must
+            # not create a lane admission or a normal-MPC handoff certificate.
         return candidates[0], ('forward_heading_recovery' if candidates[0].improvement <= .01
                                and candidates[0].heading_improvement > 0. else 'forward_to_waypoint')
     path = rollout(pose, -1, 0., distance, wheelbase)
@@ -314,6 +360,38 @@ class RecoveryAttempts:
         self.wall_failures = []
         self.improving_until = -math.inf
         self.improving_key = None
+        self.failed_conditions = {}
+        self.execution_condition = None
+
+    @staticmethod
+    def condition(steering, path, initial_steering):
+        length = sum(math.hypot(b[0]-a[0], b[1]-a[1])
+                     for a, b in zip(path, path[1:]))
+        return (length, abs(steering-initial_steering))
+
+    def retry_is_improved(self, direction, steering, path, initial_steering):
+        """Called only AFTER the new path passes physical and traffic checks.
+
+        Every failed condition remains a veto unless the new executable length
+        or steering preparation improves materially. Time alone never retries.
+        """
+        key = (direction, 0 if abs(steering) < .01 else (1 if steering > 0 else -1))
+        records = self.failed_conditions.get(key, ())
+        if direction != 1 or not records or len(records) >= 32:
+            return False
+        length, error = self.condition(steering, path, initial_steering)
+        return (math.isfinite(length) and math.isfinite(error)
+                and all(length >= old_length+.25 or error <= old_error-.10
+                        for old_length, old_error in records))
+
+    def executing(self, direction, steering, path, initial_steering):
+        key = (direction, 0 if abs(steering) < .01 else (1 if steering > 0 else -1))
+        condition = self.condition(steering, path, initial_steering)
+        # Keep the conditions at the beginning of the measured attempt. The
+        # remaining horizon may shorten as the vehicle advances.
+        if self.anchor is None or self.anchor[0] != key or self.execution_condition is None:
+            self.execution_condition = (key, condition)
+        self.excluded.discard(key)
 
     def remember_wall_return(self, pose, steering):
         """Record failed spatial poses, not an entire steering direction."""
@@ -355,6 +433,7 @@ class RecoveryAttempts:
                 self.failure_position, self.failure_position[2], self.failure_overlap,
                 *pose, overlap):
             self.excluded.clear()
+            self.failed_conditions.clear()
             self.failure_position = None
         key = (direction, 0 if abs(steering) < .01 else (1 if steering > 0 else -1))
         if not commanded or direction == 0:
@@ -373,9 +452,13 @@ class RecoveryAttempts:
         if moved and improved:
             self.improving_until = now+1.5
             self.improving_key = key
+            self.execution_condition = None
             self.anchor = (key, now, pose, overlap)
         elif now-start >= 1.5:
             self.excluded.add(key)
+            if self.execution_condition is not None and self.execution_condition[0] == key:
+                self.failed_conditions.setdefault(key, []).append(self.execution_condition[1])
+                self.failed_conditions[key] = self.failed_conditions[key][:32]
             self.failure_position = pose
             self.failure_overlap = overlap
             self.anchor = None

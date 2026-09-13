@@ -98,11 +98,16 @@ def test_hybrid_objective_overrides_lane_only_with_matching_boundary_weights(mpc
         mpc.set_soft_lateral_reference()
 
 
+@pytest.mark.parametrize('hybrid', [False, True])
+@pytest.mark.parametrize('physical_clear', [False, True])
 @pytest.mark.parametrize('kind', ['overtake', 'race'])
 @pytest.mark.parametrize('fail', [False, True])
-def test_real_probe_call_sites_are_isolated_and_clear_hybrid_weights(mpc, kind, fail, monkeypatch):
+def test_real_probe_call_sites_are_isolated_and_clear_hybrid_weights(mpc, kind, fail, monkeypatch, hybrid, physical_clear):
     path = mpc.model.reference_path
     c = SimpleNamespace(
+        _hybrid_overtake_enabled=hybrid, _mpc=mpc,
+        _odom=SimpleNamespace(twist=SimpleNamespace(twist=SimpleNamespace(linear=SimpleNamespace(x=1.)))),
+        _mpc_prediction_path_is_clear=Mock(return_value=physical_clear),
         _overtake=OvertakeSession(probe=ShadowProbe(vehicle_id='d2', lane_idx=0)),
         _mpc_safety_recovery_active=False, _post_reverse_full_width_recovery_active=False,
         _reference_path=path, _reference_pathN_center=path,
@@ -117,6 +122,12 @@ def test_real_probe_call_sites_are_isolated_and_clear_hybrid_weights(mpc, kind, 
         _race_rejoin_probe_required_success_cycles=2,
         _mpcN_race=mpc, _carN_race=mpc.model,
         get_logger=Mock(return_value=Mock()))
+    from .test_hybrid_integration import controller as hybrid_controller
+    defaults = hybrid_controller()
+    for key, value in vars(defaults).items():
+        if key.startswith('_hybrid_overtake_') and key != '_hybrid_overtake_enabled':
+            setattr(c, key, value)
+    c._l2_inward_offset_zones = []
     c._probe_corridor = MethodType(controller_method('_probe_corridor'), c)
     before = path_state(path)
     solve = mpc.get_control
@@ -124,7 +135,11 @@ def test_real_probe_call_sites_are_isolated_and_clear_hybrid_weights(mpc, kind, 
         pass
     def checked_solve():
         assert mpc.model.reference_path is not path
-        assert mpc.lane_transition_weights is None
+        if kind == "overtake" and hybrid:
+            assert mpc.lane_transition_weights is not None
+            assert mpc.lane_transition_weights[0] < 1.
+        else:
+            assert mpc.lane_transition_weights is None
         result = solve()
         assert path_state(path) == before
         if fail:
@@ -144,3 +159,7 @@ def test_real_probe_call_sites_are_isolated_and_clear_hybrid_weights(mpc, kind, 
             assert fail
     assert mpc.model.reference_path is path
     assert path_state(path) == before
+    assert c._mpc is mpc
+    if kind == 'overtake' and not physical_clear:
+        assert c._overtake.probe.success_cycles == 0
+        assert not c._overtake.probe.confirmed

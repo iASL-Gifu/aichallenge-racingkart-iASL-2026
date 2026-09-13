@@ -321,3 +321,21 @@ def test_actual_old_corridor_monitor_cannot_preempt_l1(owner):
     assert eval(expression, values)
     setattr(c, owner, True)
     assert not eval(expression, values)
+
+
+@pytest.mark.parametrize('lane', [0, 2])
+@pytest.mark.parametrize('speed', [0., 5., 12.])
+def test_shadow_entry_matches_live_reference_without_mutating_session(lane, speed):
+    import copy
+    from multi_purpose_mpc_ros.core.overtake_reference import prepare_entry_reference
+    c = controller()
+    shadow = copy.copy(c._mpcN_center)
+    shadow.model = SimpleNamespace(wp_id=c._carN_center.wp_id,
+        spatial_state=copy.copy(c._carN_center.spatial_state),
+        reference_path=c._reference_pathN_center)
+    before = copy.deepcopy(c._overtake.hybrid)
+    prepare_entry_reference(c, shadow, lane, speed)
+    assert c._overtake.hybrid == before
+    reference(c, lane=lane, speed=speed)
+    np.testing.assert_allclose(shadow.soft_lateral_targets, c._mpcN_center.soft_lateral_targets)
+    np.testing.assert_allclose(shadow.lane_transition_weights, c._mpcN_center.lane_transition_weights)

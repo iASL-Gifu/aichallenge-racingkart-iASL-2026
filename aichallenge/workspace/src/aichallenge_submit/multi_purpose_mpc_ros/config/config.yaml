@@ -38,8 +38,8 @@ reference_path:
   center_csv_path: "env/centerline/traj_center_mincurv_capped.csv"
   # 追い越し・追従フラグ時の境界線CSV（センターライン基準）
   center_bounds_csv_path: "env/centerline/waypoint_bounds_center_mincurv_capped.csv"
-  # Oldと同じ区間。現在の設計条件で補間・車体掃引を検証した参照。
-  l0_precomputed_reference_csv: "env/centerline/l0_reference_wp220_290.csv"
+  # L0単独読み込みも、壁余裕を拡大した共通のWP130～340参照を使用。
+  l0_precomputed_reference_csv: "env/centerline/l0_reference_wp130_340.csv"
   l0_precomputed_heading_gain: 0.25
   lane_precomputed_reference_csvs:
     - "env/centerline/l0_reference_wp130_340.csv"
@@ -58,6 +58,17 @@ reference_path:
   # use_border_cells_topic: true
 
 trajectory_switch:
+  # 通常速度車への新規追越しのみ。Shadow/壁/他車の安全判定は別途必須。
+  normal_follow_zones:
+    - {start_wp: 216, end_wp: 270}
+  normal_follow_prepare_distance_m: 0.0 # WP185〜215の旋回終了後にL1接続を開始
+  pass_opportunity_enabled: true
+  pass_opportunity_acceleration: 1.0 # [m/s^2] 追越し見込み用の加速度。実指令上限ではなく、a_max以下で使用
+  pass_opportunity_max_seconds: 8.0 # 抜き切るまでの予測上限
+  pass_opportunity_distance: 80.0 # 参照速度の確認距離（通過幅の保証ではない）
+  pass_opportunity_min_gain: 2.0 # m/s: 最低見込み速度差（5.4km/h）
+  pass_opportunity_speed_reserve: 0.5 # m/s: 参照速度から引く見込み余裕
+  pass_opportunity_clearance: 3.0 # m: 対象位置を越えて確保する距離
   enter_center_wps: 18   # 前方車がこのWaypoint差未満ならCenterへ切り替え
   exit_center_wps: 20    # Center中はこのWaypoint差を超えるまで維持
   overtake_latch_max_distance: 35.0 # [m] 遠方から追越し対象をラッチしShadow検証を開始
@@ -115,6 +126,14 @@ trajectory_switch:
   l0_entry_prohibited_zones: [] # OFF: 現在のTrajectoryでは全区間で安全検証済みL0追越しを許可
   # Center WP基準。周回境界前後では通常車への新規L2追越しを禁止し、
   # L0（rear-onlyは無視、front-onlyは追従）→L1の順で選択する。
+  # Center WP基準。追越し困難時はカーブ内側で追従し、外側へ譲らない。
+  curve_lane_priority_prepare_distance_m: 30.0
+  curve_lane_priority_zones:
+    - {start_wp: 30, end_wp: 60, lane: 0}
+    - {start_wp: 80, end_wp: 105, lane: 2}
+    # 手前のWP155〜180の旋回とL2→L0を重ねない。曲率が小さくなる入口から準備。
+    - {start_wp: 185, end_wp: 215, lane: 0, prepare_distance_m: 0.0}
+  l0_priority_prepare_distance_m: 50.0 # [m] 横移動20m＋変更待機2秒×約10m/s＋検証余裕10m
   l2_entry_restricted_zones:
     - {start_wp: 325, end_wp: 6}
   l2_entry_restricted_override_speed_kmh: 10.0 # [km/h] 未満の低速前方車だけL2を許可
@@ -192,7 +211,7 @@ follow_control:
 
 center_lane_rejoin_stability:
   enabled: true
-  constraint_diagnostics_enabled: true # L1 probeおよびL0/L2 SafetyRecovery時に境界幅・障害物・予測区間を詳細出力
+  constraint_diagnostics_enabled: false # L1 probeおよびL0/L2 SafetyRecovery時に境界幅・障害物・予測区間を詳細出力
   constraint_diagnostics_points: 5 # 有効幅が狭い順に出力する予測点数
   max_heading_error_deg: 8.0 # Center軌道に対する方位誤差
   max_lateral_speed: 0.8     # [m/s] odom横速度と方位誤差からの推定値の大きい方
@@ -223,6 +242,8 @@ bicycle_model:
   width: 1.6   # +safety margin
 
 mpc:
+  minimal_logging: true
+  runtime_diagnostics_enabled: false
   N: 15
   # Q: [e_y(横ずれ), e_psi(ヨー角ずれ), t]
   # R: [v, delta]
@@ -231,8 +252,8 @@ mpc:
   R10: [100000.0,100.0]
   a_min: -2.5 # m/s^2
   a_max: 2.5 # m/s^2
-  delta_max_deg: 18.0 # degrees
-  steer_rate_max: 2.00 # rad/s max_steering_rate
+  delta_max_deg: 22.8 # degrees
+  steer_rate_max: 1.50 # rad/s max_steering_rate
   control_rate: 40.0 # Hz Ts=1/control_rate
   solve_time_budget_ms: 30.0 # 初回失敗後、安全マージンを緩和する追加再試行だけの時間上限
   max_prediction_fallback_cycles: 3 # 古い予測・制御列を再利用できる最大連続失敗周期

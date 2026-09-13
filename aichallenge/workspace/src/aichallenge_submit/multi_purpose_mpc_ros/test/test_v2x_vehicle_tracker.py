@@ -519,3 +519,13 @@ def test_map_forecast_and_body_sweep_share_observation_time_and_velocity_model()
     assert actual == pytest.approx(expected)
     assert actual[0] == pytest.approx((7., 3.5))
     assert actual[-1] == pytest.approx((27., 13.5))
+
+
+def test_problem_zone_all_vehicles_still_requires_identified_valid_target():
+    for target, valid, expected in [('d2', True, True), ('d2', False, False), (None, True, False)]:
+        assert outer_lane_problem_slow_override_active(
+            latched_target_id=None, opponent_vehicle_id=target,
+            velocity_valid=valid, allow_all_vehicles=True) is expected
+    assert not outer_lane_problem_slow_override_active(
+        latched_target_id=None, opponent_vehicle_id='d2',
+        velocity_valid=True, allow_all_vehicles=False)

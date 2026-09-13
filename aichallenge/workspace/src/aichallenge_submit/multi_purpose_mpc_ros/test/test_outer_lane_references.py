@@ -42,8 +42,8 @@ def test_dense_geometry_and_body_envelope(lane,start):
     np.testing.assert_allclose(rows['kappa'],kappa,atol=1e-9)
     assert metrics['max_steering_deg'] < CFG['mpc']['delta_max_deg']
     assert metrics['max_steering_rate'] < design.max_rate
-    assert metrics['min_body_wall_clearance_m'] >= .25
-    assert metrics['min_body_grid_distance_m'] >= .25
+    assert metrics['min_body_wall_clearance_m'] >= .45
+    assert metrics['min_body_grid_distance_m'] >= .45
 
 
 @pytest.mark.parametrize('lane', [0,2])

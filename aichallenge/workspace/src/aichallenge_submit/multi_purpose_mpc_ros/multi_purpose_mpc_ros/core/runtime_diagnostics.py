@@ -6,8 +6,15 @@ import os
 from pathlib import Path
 import time
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import wraps
+
+
+def detail_scope(owner, name):
+    """Optional detailed timing without changing control-stage boundaries."""
+    diagnostics = getattr(owner, '_runtime_diagnostics', None)
+    return (diagnostics.measure_detail(name) if diagnostics is not None
+            else nullcontext())
 
 
 def summary(values):
@@ -78,6 +85,18 @@ class RuntimeDiagnostics:
         row['wall_max_ms'] = max(row['wall_max_ms'], wall_ms)
         row['cpu_max_ms'] = max(row['cpu_max_ms'], cpu_ms)
         row['exceptions'] += bool(error)
+
+    def start_detail(self):
+        if not self.recording_detail():
+            return None
+        return self.start, time.perf_counter(), time.thread_time()
+
+    def finish_detail(self, name, token):
+        # Do not attribute an interrupted/previous cycle to the current one.
+        if token is None or not self.recording_detail() or token[0] != self.start:
+            return
+        self.record_detail(name, (time.perf_counter()-token[1])*1000,
+                           (time.thread_time()-token[2])*1000)
 
     @contextmanager
     def measure_detail(self, name):
@@ -156,6 +175,7 @@ class RuntimeDiagnostics:
         elapsed = now-self.last_report
         if elapsed < self.interval:
             return None
+        context = context() if callable(context) else context
         cpu = time.process_time()
         result = dict(window_wall_sec=round(elapsed, 3), pid=os.getpid(),
                       period_ms=1000*self.period,

@@ -233,3 +233,56 @@ def test_detail_phase_records_exception_without_masking_it():
             raise ValueError('original')
     assert diag.details['phase']['calls'] == 1
     assert diag.details['phase']['exceptions'] == 1
+
+
+def test_report_builds_context_only_when_output_is_due(monkeypatch):
+    from unittest.mock import Mock
+    clock=SimpleNamespace(wall=0., process=0.)
+    monkeypatch.setattr(module,'time',SimpleNamespace(
+        perf_counter=lambda:clock.wall,process_time=lambda:clock.process))
+    diag=module.RuntimeDiagnostics(.025,1.)
+    context=Mock(return_value={'wp':123})
+    assert diag.report(context) is None
+    context.assert_not_called()
+    clock.wall=1.
+    data=json.loads(diag.report(context).split(' ',1)[1])
+    context.assert_called_once()
+    assert data['context']['wp']==123
+
+
+def test_split_detail_timer_does_not_change_stage_and_ignores_old_cycle(monkeypatch):
+    clock = SimpleNamespace(wall=1., cpu=.1)
+    monkeypatch.setattr(module.time, 'perf_counter', lambda: clock.wall)
+    monkeypatch.setattr(module.time, 'thread_time', lambda: clock.cpu)
+    diag = module.RuntimeDiagnostics(.025)
+    assert diag.start_detail() is None
+    diag.begin(0.)
+    stage = diag.stage_start
+    token = diag.start_detail()
+    clock.wall += .030
+    clock.cpu += .020
+    diag.finish_detail('postsolve.speed_limits', token)
+    row = diag.details['postsolve.speed_limits']
+    assert row['wall_total_ms'] == pytest.approx(30.)
+    assert row['cpu_total_ms'] == pytest.approx(20.)
+    assert diag.stage_start == stage
+    diag.begin(1.)
+    diag.finish_detail('stale', token)
+    assert 'stale' not in diag.details
+
+
+def test_optional_detail_scope_preserves_exception_and_inactive_behavior():
+    owner = SimpleNamespace()
+    with module.detail_scope(owner, 'absent'):
+        pass
+    owner._runtime_diagnostics = module.RuntimeDiagnostics(.025)
+    with module.detail_scope(owner, 'inactive'):
+        pass
+    assert not owner._runtime_diagnostics.details
+    owner._runtime_diagnostics.begin(0.)
+    with pytest.raises(ValueError, match='original'):
+        with module.detail_scope(owner, 'path_check.wall'):
+            raise ValueError('original')
+    row = owner._runtime_diagnostics.details['path_check.wall']
+    assert row['calls'] == 1
+    assert row['exceptions'] == 1

@@ -8,6 +8,7 @@ from skimage.morphology import remove_small_holes
 from skimage.draw import line_aa
 import matplotlib.patches as plt_patches
 import math
+from copy import deepcopy
 
 # Colors
 OBSTACLE = '#2E4053'
@@ -156,9 +157,33 @@ class Map:
         return bool(np.all(cells[disk] != 0))
 
     def static_body_is_free(self, body, geometry, padding=0.0):
-        return self.static_body_collision_detail(body, geometry, padding) is None
+        return self._static_body_collision_evidence(body, geometry, padding) is None
+
+    def begin_collision_cycle(self):
+        """Cache only immutable static-map footprint evidence for this tick."""
+        self._body_collision_cache = {}
+        self._recovery_prefix_failures = {}
 
     def static_body_collision_detail(self, body, geometry, padding=0.0, *, include_cells=False):
+        return deepcopy(self._static_body_collision_evidence(body, geometry, padding, include_cells=include_cells))
+
+    def _static_body_collision_evidence(self, body, geometry, padding=0.0, *, include_cells=False):
+        """Private borrowed evidence; callers must never mutate it."""
+        cache = getattr(self, '_body_collision_cache', None)
+        if cache is None:
+            return self._compute_static_body_collision_detail(
+                body, geometry, padding, include_cells=include_cells)
+        key = (id(self.data_backup), self.resolution, tuple(self.origin),
+               self.width, self.height, body, geometry, padding, include_cells)
+        if key not in cache:
+            if len(cache) >= 4096:
+                cache.clear()
+            cache[key] = self._compute_static_body_collision_detail(
+                body, geometry, padding, include_cells=include_cells)
+        # Evidence contains mutable sets/lists; callers cannot poison reuse.
+        return cache[key]
+
+    def _compute_static_body_collision_detail(self, body, geometry, padding=0.0, *, include_cells=False):
         """Return collision evidence, or None for a free oriented footprint."""
         if not body.position_valid or not body.yaw_valid:
             return {"reason": "invalid_body"}
@@ -178,12 +203,17 @@ class Map:
                       pixel_bounds=[xmin, xmax, ymin, ymax])
         if xmin < 0 or ymin < 0 or xmax >= self.width or ymax >= self.height:
             return dict(detail, reason="out_of_map")
+        # A free axis-aligned superset proves the oriented footprint is free.
+        # Keep out-of-map/invalid-body checks above this fast path.
+        occupied_region = self.data_backup[ymin:ymax+1, xmin:xmax+1] == 0
+        if not occupied_region.any():
+            return None
         iy, ix = np.ogrid[ymin:ymax+1, xmin:xmax+1]
         dx, dy = (ix-cx)*res, -(iy-cy)*res
         cell_padding = .5*res*(abs(c)+abs(sn))
         overlap = ((np.abs(dx*c+dy*sn) <= hl+cell_padding)
                    & (np.abs(-dx*sn+dy*c) <= hw+cell_padding))
-        occupied = overlap & (self.data_backup[ymin:ymax+1, xmin:xmax+1] == 0)
+        occupied = overlap & occupied_region
         rows, cols = np.nonzero(occupied)
         if len(rows):
             px, py = xmin+int(cols[0]), ymin+int(rows[0])
@@ -197,24 +227,94 @@ class Map:
                         first_pixel=[px, py], first_world=list(self.m2w(px, py)))
         return None
 
-    def static_recovery_path_is_clear(self, bodies, geometry, *, temporary_depth_increase=0., recovery_contact_slide=False):
-        """Allow shrinking continuous wall contact, rejecting new contact patches."""
-        if not math.isfinite(temporary_depth_increase) or temporary_depth_increase < 0.:
-            return False, 'invalid_overlap_allowance'
+    def static_recovery_path_is_clear(self, bodies, geometry, *, temporary_depth_increase=0., recovery_contact_slide=False, wall_margin=.05):
+        """Separate physical contact, wall clearance and inter-sample coverage.
+
+        The same padding is used throughout a path so changing the padding
+        itself cannot masquerade as decreasing overlap during recovery.
+        """
+        from .wall_constraints import swept_sample_padding
+        if not math.isfinite(wall_margin) or wall_margin < 0.:
+            return False, 'invalid_wall_margin'
         if not bodies:
             return False, 'empty_path'
-        # Use identical swept padding at every sample, including the start.
-        padding = .05
-        for a, b in zip(bodies, bodies[1:]):
-            if not a.yaw_valid or not b.yaw_valid:
-                return False, 'invalid_ego_body'
-            angle = abs(math.atan2(math.sin(b.yaw-a.yaw), math.cos(b.yaw-a.yaw)))
-            padding = max(padding, .05 + math.hypot(b.x-a.x, b.y-a.y) + geometry.radius*angle)
+        sweep = swept_sample_padding(bodies, geometry)
+        if not math.isfinite(sweep):
+            return False, 'invalid_ego_body'
+        safe, reason = self._static_recovery_samples_are_clear(
+            bodies, geometry, padding=wall_margin+sweep,
+            temporary_depth_increase=temporary_depth_increase,
+            recovery_contact_slide=recovery_contact_slide)
+        if not safe:
+            return False, reason + f', contact=clearance_or_sweep, wall_margin={wall_margin:.3f}, sweep_padding={sweep:.6f}'
+        if safe and reason == 'clear':
+            # Expanded samples prove both physical and continuous clearance.
+            # Avoid a second raster scan for the overwhelmingly common case.
+            return True, reason
+        # Margin-only overlap cannot authorize a newly contacting real body.
+        physical, physical_reason = self._static_recovery_samples_are_clear(
+            bodies, geometry, padding=0., temporary_depth_increase=temporary_depth_increase,
+            recovery_contact_slide=recovery_contact_slide)
+        if not physical:
+            return False, physical_reason + ', contact=physical'
+        if safe and reason == 'wall_escape' and physical and physical_reason == 'clear':
+            for i, (a, b) in enumerate(zip(bodies, bodies[1:]), 1):
+                if not self._physical_segment_is_clear(a, b, geometry):
+                    return False, f'new_wall_contact_at_step={i}, contact=physical_sweep'
+        return safe, reason
+
+    def _physical_segment_is_clear(self, a, b, geometry, depth=0):
+        """Prove a margin-only escape never crosses a wall between samples."""
+        from dataclasses import replace
+        from .wall_constraints import swept_sample_padding
+        pad = swept_sample_padding((a, b), geometry)
+        if (self.static_body_is_free(a, geometry, pad)
+                and self.static_body_is_free(b, geometry, pad)):
+            return True
+        if depth >= 8:
+            return False  # Cannot establish continuous clearance; do not guess.
+        angle = math.atan2(math.sin(b.yaw-a.yaw), math.cos(b.yaw-a.yaw))
+        mid = replace(a, x=(a.x+b.x)/2, y=(a.y+b.y)/2, yaw=a.yaw+angle/2,
+                      uncertainty=max(a.uncertainty,b.uncertainty),
+                      lateral_uncertainty=max(a.lateral_padding,b.lateral_padding))
+        if not self.static_body_is_free(mid, geometry):
+            return False
+        return (self._physical_segment_is_clear(a, mid, geometry, depth+1)
+                and self._physical_segment_is_clear(mid, b, geometry, depth+1))
+
+    def _static_recovery_samples_are_clear(self, bodies, geometry, *, padding,
+                                         temporary_depth_increase=0., recovery_contact_slide=False):
+        import re
+        cache=getattr(self, '_recovery_prefix_failures', None)
+        bodies=tuple(bodies)
+        key=(id(self.data_backup), self.resolution, tuple(self.origin), self.width,
+             self.height, geometry, padding, temporary_depth_increase, recovery_contact_slide)
+        if cache is not None:
+            for prefix,result in cache.get(key, ()):
+                if len(bodies)>=len(prefix) and bodies[:len(prefix)]==prefix:
+                    return result
+        result=self._compute_static_recovery_samples_are_clear(
+            bodies,geometry,padding=padding,temporary_depth_increase=temporary_depth_increase,
+            recovery_contact_slide=recovery_contact_slide)
+        # End-of-path improvement is not a prefix property. Only failures at
+        # a particular checked sample may veto another identical prefix.
+        match=re.search(r'_at_step=(\d+)',result[1]) if not result[0] else None
+        if cache is not None and match:
+            if len(cache)>=128:cache.clear()
+            entries=cache.setdefault(key,[])
+            if len(entries)>=64:entries.pop(0)
+            entries.append((bodies[:int(match.group(1))+1],result))
+        return result
+
+    def _compute_static_recovery_samples_are_clear(self, bodies, geometry, *, padding,
+                                         temporary_depth_increase=0., recovery_contact_slide=False):
+        if not math.isfinite(temporary_depth_increase) or temporary_depth_increase < 0.:
+            return False, 'invalid_overlap_allowance'
         initial_max_depth = initial_depth = previous_depth = 0.
         previous_cells = set()
         previous_max_depth = 0.
         for i, body in enumerate(bodies):
-            detail = self.static_body_collision_detail(body, geometry, padding, include_cells=True)
+            detail = self._static_body_collision_evidence(body, geometry, padding, include_cells=True)
             if detail is not None and detail['reason'] != 'occupied_cell':
                 return False, f"static_collision_at_step={i}, detail={detail}"
             cells = detail['occupied_cells'] if detail else set()

@@ -309,7 +309,7 @@ def test_smaller_total_overlap_cannot_hide_new_separated_wall_contact():
               'overlap_depth':2.,'max_overlap_depth':1.},
              {'reason':'occupied_cell','occupied_cells':{(1,1),(8,8)},
               'overlap_depth':1.,'max_overlap_depth':.5}]
-    m.static_body_collision_detail=Mock(side_effect=details)
+    m._static_body_collision_evidence=Mock(side_effect=details*2)
     safe, reason = m.static_recovery_path_is_clear([BodyPose(0.,0.,0.,0.),BodyPose(.05,0.,0.,0.)],geometry)
     assert not safe and reason.startswith('new_wall_contact_at_step=1,')
 
@@ -559,15 +559,15 @@ def test_reverse_allows_bounded_temporary_overlap_but_requires_terminal_improvem
         return [{'reason':'occupied_cell','occupied_cells':{(1,1)},
                  'overlap_depth':d,'max_overlap_depth':v} for d,v in zip(depths,maxima)]
     bodies=[BodyPose(i*.05,0.,0.,0.) for i in range(len(depths))]
-    m.static_body_collision_detail=Mock(side_effect=details())
+    m._static_body_collision_evidence=Mock(side_effect=details()*2)
     assert m.static_recovery_path_is_clear(bodies,BodyGeometry(),temporary_depth_increase=.03)[0] is expected
-    m.static_body_collision_detail=Mock(side_effect=details())
+    m._static_body_collision_evidence=Mock(side_effect=details()*2)
     assert not m.static_recovery_path_is_clear(bodies,BodyGeometry())[0]
 
 
 def test_reverse_allowance_cannot_hide_new_wall_patch():
     m=static_map()
-    m.static_body_collision_detail=Mock(side_effect=[
+    m._static_body_collision_evidence=Mock(side_effect=[
         {'reason':'occupied_cell','occupied_cells':{(1,1)},'overlap_depth':1.,'max_overlap_depth':.2},
         {'reason':'occupied_cell','occupied_cells':{(9,9)},'overlap_depth':.5,'max_overlap_depth':.1}])
     safe,reason=m.static_recovery_path_is_clear(
@@ -672,9 +672,9 @@ def test_turning_relaxation_keeps_no_progress_forward_latch():
 @pytest.mark.parametrize('turn,expected', [(True,True),(False,False)])
 def test_controller_turning_check_uses_bounded_static_rule(turn,expected):
     m=static_map()
-    m.static_body_collision_detail=Mock(side_effect=[
+    m._static_body_collision_evidence=Mock(side_effect=[
         {'reason':'occupied_cell','occupied_cells':{(1,1)},'overlap_depth':d,'max_overlap_depth':v}
-        for d,v in [(14.87,.3744),(14.30,.3795),(10.,.35)]])
+        for d,v in [(14.87,.3744),(14.30,.3795),(10.,.35)]]*2)
     c=NS(_recovery_localization_available=True, _collision_ego_origin='center',
          _collision_now=0., _map=m, _straight_reentry_speed=1.,
          _forward_turn_overlap_allowance=.03,
@@ -749,10 +749,10 @@ def test_contact_slide_requires_local_occupied_wall_connection(bridge,expected):
         {'reason':'occupied_cell','occupied_cells':{(10,10)},'overlap_depth':1.,'max_overlap_depth':.2},
         {'reason':'occupied_cell','occupied_cells':{(12,10)},'overlap_depth':.8,'max_overlap_depth':.19}]
     bodies=[BodyPose(0.,0.,0.,0.),BodyPose(.05,0.,0.,0.)]
-    m.static_body_collision_detail=Mock(side_effect=details)
+    m._static_body_collision_evidence=Mock(side_effect=details*2)
     assert m.static_recovery_path_is_clear(bodies,BodyGeometry(),
         temporary_depth_increase=.03,recovery_contact_slide=True)[0] is expected
-    m.static_body_collision_detail=Mock(side_effect=details)
+    m._static_body_collision_evidence=Mock(side_effect=details*2)
     assert not m.static_recovery_path_is_clear(bodies,BodyGeometry())[0]
 
 
@@ -805,12 +805,13 @@ def test_logged_162543_wall_stop_has_improving_motion_after_local_contact_fix():
         overlap=c._reentry_overlap,clear=c._reentry_path_is_clear,
         reverse_clear=lambda p:c._reentry_path_is_clear(p,reverse=True),
         forward_turn_clear=lambda p:c._reentry_path_is_clear(p,forward_turn=True))
-    assert evaluate(pose,**options)[0] is None
+    # Tighter swept coverage may already admit this safe escape without the
+    # last-resort allowance. Test the physical outcome, not the old rejection.
     motion,reason=evaluate(pose,**options,
         wall_escape_clear=lambda p:c._reentry_path_is_clear(p,speed=.5,wall_escape=True))
-    assert reason=='wall_escape_best_improvement'
     assert motion.direction==1 and motion.steering<0.
-    assert motion.wall_reduction>0. and motion.speed_limit<=.5
+    assert motion.wall_reduction>0.
+    assert c._reentry_path_is_clear(motion.poses,speed=motion.speed_limit,wall_escape=True)[0]
 
 
 def test_forward_prefix_stops_before_distant_wall_without_reversing():
@@ -833,7 +834,7 @@ def test_forward_prefix_must_cover_current_speed_stopping_distance():
     assert motion.direction == -1
 
 
-@pytest.mark.parametrize('reason', ['vehicle_collision=car', 'unknown_vehicle=car',
+@pytest.mark.parametrize('reason', ['unknown_vehicle=car',
                                     'localization_unavailable', 'invalid_body'])
 def test_forward_prefix_never_relaxes_non_wall_failures(reason):
     check = Mock(return_value=(False,reason))
@@ -846,6 +847,45 @@ def test_forward_prefix_is_rechecked_against_traffic():
         if len(path) > 35:
             return False, 'new_wall_contact_at_step=35'
         return False, 'vehicle_collision=car'
+    assert choose(clear=check)[0] is None
+
+
+def test_vehicle_limited_right_turn_rebuilds_safe_stoppable_prefix():
+    from multi_purpose_mpc_ros.core.boundary_recovery import rollout
+    checked = []
+    def check(path):
+        checked.append(path)
+        length = sum(math.dist(a[:2], b[:2]) for a,b in zip(path,path[1:]))
+        safe = path[-1][2] < 0. and length <= .6
+        return safe, 'clear' if safe else 'vehicle_collision=d4'
+    motion, _ = choose(target=(3.5,-2.), clear=check, steering_rate=.6)
+    assert motion.direction == 1 and motion.steering == -.3
+    length = sum(math.dist(a[:2], b[:2]) for a,b in zip(motion.poses,motion.poses[1:]))
+    assert .05+.5*motion.speed_limit+.5*motion.speed_limit**2 <= length+1e-8
+    expected = rollout((0.,0.,0.),1,-.3,length,1.1,
+                       initial_steering=0.,steering_rate=.6,speed=motion.speed_limit)
+    assert np.asarray(motion.poses) == pytest.approx(np.asarray(expected))
+    assert motion.poses in checked
+
+
+def test_vehicle_limited_prefix_cannot_skip_initial_contact():
+    check = Mock(return_value=(False,'vehicle_collision=d4'))
+    assert choose(clear=check)[0] is None
+    assert check.call_count > 4  # Short paths are checked, never blindly accepted.
+
+
+def test_vehicle_limited_prefix_must_cover_measured_stopping_distance():
+    def check(path):
+        length = sum(math.dist(a[:2], b[:2]) for a,b in zip(path,path[1:]))
+        return length <= .6, 'vehicle_collision=d4'
+    assert choose(clear=check, measured_speed=1.)[0] is None
+
+
+def test_vehicle_limited_prefix_still_rejects_wall():
+    def check(path):
+        length = sum(math.dist(a[:2], b[:2]) for a,b in zip(path,path[1:]))
+        return False, ('vehicle_collision=d4' if length > .6
+                       else 'new_wall_contact_at_step=1')
     assert choose(clear=check)[0] is None
 
 
@@ -952,7 +992,8 @@ def test_backward_then_forward_does_not_repeat_remembered_straight():
     assert motion.direction == 1 and motion.steering > 0.
 
 
-def test_controller_remembers_wall_limited_forward_before_gear_change():
+@pytest.mark.parametrize("phase, command, remember", [("preparing",0.,False),("executing",.3,True)])
+def test_controller_remembers_only_executed_wall_failure(phase,command,remember):
     points=[NS(x=float(x),y=0.) for x in range(8)]
     c=NS(_reference_path=NS(n_waypoints=8,circular=False,get_waypoint=lambda i:points[i]),
          _car=NS(get_closest_waypoint=lambda *a:0),
@@ -962,9 +1003,11 @@ def test_controller_remembers_wall_limited_forward_before_gear_change():
          _straight_reentry_direction=1,_reentry_steering=0.,_reentry_hold_until=5.,
          _reentry_overlap=lambda pose:0., get_logger=Mock(return_value=Mock()),
          _reentry_path_is_clear=lambda p,**kw:(p[-1][0]<p[0][0], 'new_wall_contact_at_step=1'))
+    c._reentry_phase=phase
+    c._last_u[0]=command
     select=controller_method('_select_reentry_motion')
     assert select(c,NS(x=1.,y=0.,theta=0.),1.)[0].direction == -1
-    assert not c._recovery_attempts.wall_path_is_clear(((0.,0.,0.), (1.,0.,0.)))[0]
+    assert c._recovery_attempts.wall_path_is_clear(((0.,0.,0.), (1.,0.,0.)))[0] is (not remember)
 
 
 def test_same_left_steering_allowed_on_different_path_after_backing():

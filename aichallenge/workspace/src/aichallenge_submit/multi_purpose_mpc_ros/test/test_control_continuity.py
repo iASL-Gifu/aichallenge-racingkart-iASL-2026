@@ -88,6 +88,22 @@ def prepare_change(c):
     c._overtake.hybrid.travelled = .7
 
 
+def test_prepass_pause_and_anchor_restore_together_without_double_pause():
+    c = fake_controller()
+    c._collision_now = 5.
+    c._prepass_soft_guidance_key = ('d2', 2, id(c._reference_path))
+    c._prepass_soft_guidance_started_at = 1.
+    c._prepass_soft_guidance_paused_at = 3.
+    saved = CorridorState.capture(c)
+    c._collision_now = 7.
+    c._prepass_soft_guidance_key = ('d2', 0, id(c._reference_path))
+    saved.restore_progress(c, pause=True)
+    assert c._prepass_soft_guidance_key[1] == 2
+    assert c._prepass_soft_guidance_started_at == 3.
+    assert c._prepass_soft_guidance_paused_at == 5.
+    assert c._prepass_soft_guidance_paused_at - c._prepass_soft_guidance_started_at == 2.
+
+
 def test_rejected_proposal_restores_reference_corridor_and_progress(monkeypatch):
     c = fake_controller()
     prepare_change(c)
@@ -109,6 +125,8 @@ def test_rejected_proposal_restores_reference_corridor_and_progress(monkeypatch)
 
 def test_unsafe_previous_corridor_requests_recovery(monkeypatch):
     c = fake_controller()
+    saved = object()
+    c._remaining_mpc_plan = saved
     prepare_change(c)
     candidate = copy.copy(c._mpc)
     candidate.infeasibility_counter = 1
@@ -119,6 +137,7 @@ def test_unsafe_previous_corridor_requests_recovery(monkeypatch):
     command, _ = c._solve_with_corridor_commit(NS(), 1.)
     assert command[0] == 0.
     assert c._mpc.recovery_requested and c._corridor_hold_failed
+    assert c._remaining_mpc_plan is saved
 
 
 def test_holding_horizon_rebases_by_waypoint_without_rewinding_pose():
@@ -485,3 +504,30 @@ def test_actual_arrival_times_change_crossing_vehicle_verdict_without_disabling_
     m.current_prediction_times = (0.,1.,2.)
     _, conflicting_times = timed_mpc_path(m, NS(x=0.,y=0.,theta=0.))
     assert not cg.swept_path_clear(bodies, conflicting_times, target, (0.,2.), geometry)
+
+
+@pytest.mark.parametrize('reason', ['clear', 'wall', 'vehicle_collision=d2', 'unknown_vehicle=d3'])
+def test_held_corridor_rejection_can_only_use_independently_checked_remainder(reason):
+    c = continuation_controller()
+    c._corridor_hold_failed = True
+    c._mpc.infeasibility_counter = 0  # solve succeeded, additional check rejected
+    c._mpc.recovery_requested = True
+    c._mpc.failure_reason = 'held corridor is no longer executable'
+    c._continuation_path_is_clear.return_value = reason == 'clear', reason
+    result = c._continue_checked_mpc(NS(x=.06,y=0.,theta=0.), 2., 10.025, np.array([0.,.3]), False)
+    assert c._mpc_continuation_active == (reason == 'clear')
+    assert (result[0] > 0.) == (reason == 'clear')
+    c._continuation_path_is_clear.assert_called_once()
+    assert c._mpc.recovery_requested and c._corridor_hold_failed
+    assert c._remaining_mpc_plan.stamp == 10.
+
+
+def test_held_corridor_remainder_expires_even_when_solver_failure_counter_is_zero():
+    c = continuation_controller()
+    c._corridor_hold_failed = True
+    c._mpc.infeasibility_counter = 0
+    c._mpc.recovery_requested = True
+    c._continue_checked_mpc(NS(x=.06,y=0.,theta=0.), 2., 10.1, np.array([0.,.3]), False)
+    assert not c._mpc_continuation_active
+    assert c._mpc_continuation_reason == 'expired'
+    c._continuation_path_is_clear.assert_not_called()

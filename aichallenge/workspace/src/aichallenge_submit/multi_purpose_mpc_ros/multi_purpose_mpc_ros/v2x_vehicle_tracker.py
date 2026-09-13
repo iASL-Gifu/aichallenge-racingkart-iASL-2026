@@ -156,13 +156,14 @@ def prepass_recovery_timeout_expired(
 
 def outer_lane_problem_slow_override_active(
     *, latched_target_id, opponent_vehicle_id, velocity_valid: bool,
+    allow_all_vehicles: bool = False,
 ) -> bool:
     """Require a real, velocity-qualified target for the local exception."""
     return bool(
         opponent_vehicle_id is not None
         and velocity_valid
-        and latched_target_id is not None
-        and latched_target_id == opponent_vehicle_id
+        and (allow_all_vehicles or (latched_target_id is not None
+             and latched_target_id == opponent_vehicle_id))
     )
 
 

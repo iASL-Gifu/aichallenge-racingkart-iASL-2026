@@ -35,7 +35,9 @@ def test_display_defaults_off_and_enabled_rate_is_bounded():
     assert c._collision_body_publisher.publish.call_count == 3
 
 
-def test_swept_samples_reused_across_targets_without_reusing_verdict():
+def test_swept_samples_reused_across_targets_without_reusing_verdict(monkeypatch):
+    # Exercise narrow-phase sample sharing independently of the far-target filter.
+    monkeypatch.setattr(cg, '_segment_definitely_separated', lambda *args: False)
     cg._sweep_ego_samples.cache_clear()
     a = cg.BodyPose(0., 0., 0., 0.)
     b = replace(a, x=1., yaw=.1)

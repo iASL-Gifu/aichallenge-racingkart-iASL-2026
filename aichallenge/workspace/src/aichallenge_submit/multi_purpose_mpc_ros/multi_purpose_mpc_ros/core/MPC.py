@@ -1212,11 +1212,12 @@ class MPC:
             if not self._current_constraint_bounds_invalid:
                 dec = self._solve_with_runtime_timing()
             if self.debug_counter % 20 == 0:
-                print(
-                    "invalid constraint bounds"
-                    if dec is None else dec.info.status,
-                    flush=True,
-                )
+                if getattr(self, 'verbose_logging', True):
+                    print(
+                        "invalid constraint bounds"
+                        if dec is None else dec.info.status,
+                        flush=True,
+                    )
             t2 = time.perf_counter()
 
             if self._current_constraint_bounds_invalid or is_primal_infeasible(dec):
@@ -1278,11 +1279,12 @@ class MPC:
 
                     if is_valid_osqp_solution(dec):
                         if self.last_solved_wp_id != self.model.wp_id:
-                            print(
-                                "[LaneConstraintRetry] solved with "
-                                f"lane_relaxation={lane_relaxation:.2f}m",
-                                flush=True,
-                            )
+                            if getattr(self, 'verbose_logging', True):
+                                print(
+                                    "[LaneConstraintRetry] solved with "
+                                    f"lane_relaxation={lane_relaxation:.2f}m",
+                                    flush=True,
+                                )
                         break
                     if not is_primal_infeasible(dec):
                         break
@@ -1363,14 +1365,16 @@ class MPC:
             max_delta = np.max(np.abs(control_signals[1:len(control_signals)//3*2:2]))
 
             if self.infeasibility_counter > (N - 1):
-                print(f'Problem solved after {self.infeasibility_counter} infeasible iterations')
+                if getattr(self, 'verbose_logging', True):
+                    print(f'Problem solved after {self.infeasibility_counter} infeasible iterations')
             self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
 
         except (TypeError, ValueError) as error:
             self.failure_reason = str(error)
             if self.debug_counter % 20 == 0:
-                print(f"[MPCFallback] {error}", flush=True)
+                if getattr(self, 'verbose_logging', True):
+                    print(f"[MPCFallback] {error}", flush=True)
             failure_cycle = self.infeasibility_counter + 1
             fallback_id = nu * failure_cycle
             fallback_prediction_valid = (
@@ -1412,8 +1416,10 @@ class MPC:
 
         if self.infeasibility_counter > (N - 1) and self.infeasibility_counter % 100 == 0:
             now = datetime.now().strftime("%H:%M:%S.%f")
-            print('No control signal computed!')
-            print(now)
+            if getattr(self, 'verbose_logging', True):
+                print('No control signal computed!')
+            if getattr(self, 'verbose_logging', True):
+                print(now)
 
         self.debug_counter += 1
 
@@ -1430,16 +1436,17 @@ class MPC:
         if self.debug_counter % 80 == 0:
             now = datetime.now().strftime("%H:%M:%S.%f")
             total_ms = (t2-t0)*1000
-            print(
-                f"N={N} "
-                f"build={(t1-t0)*1000:.1f}ms "
-                f"solve={(t2-t1)*1000:.1f}ms "
-                f"total={total_ms:.1f}ms "
-                f"target={1000*self.model.Ts:.1f}ms "
-                f"waypoint={self.model.wp_id} "
-                f"time={now}",
-                flush=True
-            )
+            if getattr(self, 'verbose_logging', True):
+                print(
+                    f"N={N} "
+                    f"build={(t1-t0)*1000:.1f}ms "
+                    f"solve={(t2-t1)*1000:.1f}ms "
+                    f"total={total_ms:.1f}ms "
+                    f"target={1000*self.model.Ts:.1f}ms "
+                    f"waypoint={self.model.wp_id} "
+                    f"time={now}",
+                    flush=True
+                )
         
 
         return u, max_delta

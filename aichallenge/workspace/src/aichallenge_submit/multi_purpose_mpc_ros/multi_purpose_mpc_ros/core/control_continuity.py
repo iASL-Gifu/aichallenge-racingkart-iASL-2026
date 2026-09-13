@@ -19,6 +19,7 @@ HORIZON_FIELDS = REFERENCE_FIELDS[4:]
 # These are application progress, not target/side selection or traffic proof.
 PROGRESS_FIELDS = (
     '_lane_decision', '_applied_corridor_mode', '_constraint_transition_until',
+    '_l1_entry_waiting',
     '_last_lane_change_time', '_hybrid_reference_key', '_l1_probe_constraint_applied',
     '_l1_soft_rejoin_started_at', '_l1_soft_rejoin_start_e_y',
     '_l1_soft_rejoin_effective_ramp_sec', '_l1_soft_rejoin_full_strength_logged',
@@ -27,7 +28,8 @@ PROGRESS_FIELDS = (
     '_initial_start_soft_l0_effective_ramp_sec', '_initial_start_soft_l0_full_strength_logged',
     '_initial_start_soft_l0_curvature_shift', '_initial_start_soft_l0_last_update_sec',
     '_prepass_soft_guidance_started_at', '_prepass_soft_guidance_start_e_y',
-    '_prepass_soft_guidance_ramp_sec',
+    '_prepass_soft_guidance_ramp_sec', '_prepass_soft_guidance_key',
+    '_prepass_soft_guidance_paused_at',
     '_race_rejoin_handoff_started_at', '_race_rejoin_handoff_start_e_y',
     '_race_rejoin_handoff_effective_ramp_sec', '_race_rejoin_handoff_guidance_ready',
 )
@@ -48,45 +50,52 @@ class CorridorState:
 
     @classmethod
     def capture(cls, controller):
-        m = controller._mpc
-        return cls(
-            m.model.reference_path, m.model.reference_path.target_lane_idx,
-            m.model.reference_path.is_overtaking,
-            {k: copy.deepcopy(getattr(m, k)) for k in REFERENCE_FIELDS},
-            int(m.model.wp_id),
-            {k: copy.deepcopy(getattr(controller, k)) for k in PROGRESS_FIELDS
-             if hasattr(controller, k)},
-            copy.deepcopy(controller._overtake.hybrid),
-            controller._overtake.accepted_key, controller._overtake.target_id,
-            float(getattr(controller, '_collision_now', 0.)))
+        from multi_purpose_mpc_ros.core.runtime_diagnostics import detail_scope
+        with detail_scope(controller, 'state_copy.corridor_capture'):
+            m = controller._mpc
+            return cls(
+                m.model.reference_path, m.model.reference_path.target_lane_idx,
+                m.model.reference_path.is_overtaking,
+                {k: copy.deepcopy(getattr(m, k)) for k in REFERENCE_FIELDS},
+                int(m.model.wp_id),
+                {k: copy.deepcopy(getattr(controller, k)) for k in PROGRESS_FIELDS
+                 if hasattr(controller, k)},
+                copy.deepcopy(controller._overtake.hybrid),
+                controller._overtake.accepted_key, controller._overtake.target_id,
+                float(getattr(controller, '_collision_now', 0.)))
 
     def apply(self, mpc):
         # Rebase horizon-indexed objectives to the current waypoint. Never
         # rewind the measured pose, traffic, speed limits, or map observations.
-        advance = (int(mpc.model.wp_id) - self.wp) % self.path.n_waypoints
-        if advance > self.path.n_waypoints // 2:
-            advance -= self.path.n_waypoints
-        mpc.model.reference_path.target_lane_idx = self.lane
-        mpc.model.reference_path.is_overtaking = self.overtaking
-        for key, value in self.reference.items():
-            value = copy.deepcopy(value)
-            if key in HORIZON_FIELDS and value is not None and len(value):
-                indexes = np.clip(np.arange(len(value)) + advance, 0, len(value)-1)
-                value = np.asarray(value)[indexes].copy()
-            setattr(mpc, key, value)
+        from multi_purpose_mpc_ros.core.runtime_diagnostics import detail_scope
+        with detail_scope(mpc, 'state_copy.corridor_apply'):
+            advance = (int(mpc.model.wp_id) - self.wp) % self.path.n_waypoints
+            if advance > self.path.n_waypoints // 2:
+                advance -= self.path.n_waypoints
+            mpc.model.reference_path.target_lane_idx = self.lane
+            mpc.model.reference_path.is_overtaking = self.overtaking
+            for key, value in self.reference.items():
+                value = copy.deepcopy(value)
+                if key in HORIZON_FIELDS and value is not None and len(value):
+                    indexes = np.clip(np.arange(len(value)) + advance, 0, len(value)-1)
+                    value = np.asarray(value)[indexes].copy()
+                setattr(mpc, key, value)
 
-    def restore_progress(self, controller, *, pause=False):
-        elapsed = max(float(getattr(controller, '_collision_now', self.stamp))-self.stamp, 0.) if pause else 0.
-        for key, value in self.progress.items():
-            if value is not None and (key.endswith('_started_at')
-                    or key in ('_constraint_transition_until', '_last_lane_change_time',
-                               '_initial_start_soft_l0_last_update_sec')):
-                value += elapsed
-            setattr(controller, key, copy.deepcopy(value))
-        # Never resurrect another target's pass or its clearance evidence.
-        if controller._overtake.target_id == self.target:
-            controller._overtake.hybrid = copy.deepcopy(self.hybrid)
-            controller._overtake.accepted_key = self.accepted_key
+    def restore_progress(self, controller, *, pause=False, restore_manoeuvre=True):
+        from multi_purpose_mpc_ros.core.runtime_diagnostics import detail_scope
+        with detail_scope(controller, 'state_copy.progress_restore'):
+            elapsed = max(float(getattr(controller, '_collision_now', self.stamp))-self.stamp, 0.) if pause else 0.
+            for key, value in self.progress.items():
+                if value is not None and (key.endswith('_started_at')
+                        or key in ('_constraint_transition_until', '_last_lane_change_time',
+                                   '_initial_start_soft_l0_last_update_sec',
+                                   '_prepass_soft_guidance_paused_at')):
+                    value += elapsed
+                setattr(controller, key, copy.deepcopy(value))
+            # Never resurrect another target's pass or its clearance evidence.
+            if restore_manoeuvre and controller._overtake.target_id == self.target:
+                controller._overtake.hybrid = copy.deepcopy(self.hybrid)
+                controller._overtake.accepted_key = self.accepted_key
 
     def equivalent(self, other):
         return (self.path is other.path and self.lane == other.lane
@@ -132,6 +141,37 @@ class CorridorState:
         return True
 
 
+def postpass_alternative(controller, candidate):
+    """Scope an outer continuation to the completed pass and ordinary rejoin.
+
+    Safety owners and a new traffic/policy manoeuvre always take precedence.
+    The caller must solve and collision-check this geometry before using it.
+    """
+    state = getattr(controller, '_postpass_outer_corridor', None)
+    if not isinstance(state, CorridorState):
+        return None
+    if (state.path is not candidate.path or state.target != candidate.target
+            or state.target != getattr(controller, '_overtake_completed_target_id', None)
+            or candidate.lane not in (None, 1, state.lane)):
+        return None
+    if (getattr(controller, '_stuck_recovery_until', None) is not None
+            or getattr(controller, '_straight_reentry_active', False)):
+        return None
+    if any(getattr(controller, key, False) for key in (
+            '_postpass_rejoin_suppressed', '_manual_recovery_reset_pending',
+            '_follow_only', '_follow_escape_active', '_prepass_retry_after_reverse',
+            '_manual_control_override', '_mpc_safety_recovery_active',
+            '_post_reverse_full_width_recovery_active', '_parallel_abort_active',
+            '_prepass_fallback_recovery_active', '_prepass_fallback_follow_active',
+            '_l1_safety_recovery_active', '_l1_rejoin_backoff_active')):
+        return None
+    # A fixed outer request belongs to geographic policy or the next pass;
+    # regular admission already handles that, so end the rejoin alternative.
+    if candidate.lane in (0, 2):
+        return None
+    return state
+
+
 def timed_mpc_path(mpc, pose, delay=0.):
     """Densify the accepted spatial solution with its own time state.
 
@@ -163,51 +203,55 @@ def timed_mpc_path(mpc, pose, delay=0.):
 
 def fork_solver(mpc):
     """Private mutable solver/model/boundaries; immutable map is shared."""
-    result = copy.copy(mpc)
-    # Timing wrappers close over the original bound method. Copying them would
-    # run a candidate build on the live MPC and corrupt its solver state.
-    for key, value in vars(mpc).items():
-        if hasattr(value, '_timing_original'):
-            result.__dict__.pop(key, None)
-    result._runtime_role = lambda: 'corridor_probe_mpc'
-    for key, value in vars(mpc).items():
-        if isinstance(value, (np.ndarray, dict, list)):
-            setattr(result, key, copy.deepcopy(value))
-    result.model = copy.copy(mpc.model)
-    result.model.temporal_state = copy.deepcopy(mpc.model.temporal_state)
-    result.model.spatial_state = copy.deepcopy(mpc.model.spatial_state)
-    path = copy.copy(mpc.model.reference_path)
-    path.waypoints = [copy.copy(wp) for wp in path.waypoints]
-    path.border_cells = copy.deepcopy(path.border_cells)
-    path.unsafe_static_fallback_wp_ids = []
-    result.model.reference_path = path
-    result.model.current_waypoint = path.get_waypoint(result.model.wp_id)
-    result.optimizer = type(mpc.optimizer)()
-    result.osqp_initialized = False
-    result._continuity_warm_start = copy.deepcopy(getattr(mpc, 'last_solution_primal', None))
-    return result
+    from multi_purpose_mpc_ros.core.runtime_diagnostics import detail_scope
+    with detail_scope(mpc, 'state_copy.solver_fork'):
+        result = copy.copy(mpc)
+        # Timing wrappers close over the original bound method. Copying them would
+        # run a candidate build on the live MPC and corrupt its solver state.
+        for key, value in vars(mpc).items():
+            if hasattr(value, '_timing_original'):
+                result.__dict__.pop(key, None)
+        result._runtime_role = lambda: 'corridor_probe_mpc'
+        for key, value in vars(mpc).items():
+            if isinstance(value, (np.ndarray, dict, list)):
+                setattr(result, key, copy.deepcopy(value))
+        result.model = copy.copy(mpc.model)
+        result.model.temporal_state = copy.deepcopy(mpc.model.temporal_state)
+        result.model.spatial_state = copy.deepcopy(mpc.model.spatial_state)
+        path = copy.copy(mpc.model.reference_path)
+        path.waypoints = [copy.copy(wp) for wp in path.waypoints]
+        path.border_cells = copy.deepcopy(path.border_cells)
+        path.unsafe_static_fallback_wp_ids = []
+        result.model.reference_path = path
+        result.model.current_waypoint = path.get_waypoint(result.model.wp_id)
+        result.optimizer = type(mpc.optimizer)()
+        result.osqp_initialized = False
+        result._continuity_warm_start = copy.deepcopy(getattr(mpc, 'last_solution_primal', None))
+        return result
 
 
 def adopt_solver(mpc, candidate):
     """Keep public model/path identities and adopt the exact checked solution."""
-    model, path = mpc.model, mpc.model.reference_path
-    role = getattr(mpc, '_runtime_role', None)
-    checked_path = candidate.model.reference_path
-    for key in ('border_cells', 'last_constraint_bounds', 'unsafe_static_fallback_wp_ids',
-                'rect_points', 'upper_cols', 'lower_cols', 'free_segs', 'select_free_segs',
-                'modified_ub', 'modified_lb'):
-        if hasattr(checked_path, key):
-            setattr(path, key, getattr(checked_path, key))
-    for original, checked in zip(getattr(path, 'waypoints', ()), getattr(checked_path, 'waypoints', ())):
-        for key in ('ub_sm', 'lb_sm', 'dynamic_border_cells'):
-            setattr(original, key, getattr(checked, key, None))
-    model.__dict__.update(candidate.model.__dict__)
-    model.reference_path = path
-    model.current_waypoint = path.get_waypoint(model.wp_id)
-    mpc.__dict__.update(candidate.__dict__)
-    mpc.model = model
-    if role is not None:
-        mpc._runtime_role = role
+    from multi_purpose_mpc_ros.core.runtime_diagnostics import detail_scope
+    with detail_scope(mpc, 'state_copy.solver_adopt'):
+        model, path = mpc.model, mpc.model.reference_path
+        role = getattr(mpc, '_runtime_role', None)
+        checked_path = candidate.model.reference_path
+        for key in ('border_cells', 'last_constraint_bounds', 'unsafe_static_fallback_wp_ids',
+                    'rect_points', 'upper_cols', 'lower_cols', 'free_segs', 'select_free_segs',
+                    'modified_ub', 'modified_lb'):
+            if hasattr(checked_path, key):
+                setattr(path, key, getattr(checked_path, key))
+        for original, checked in zip(getattr(path, 'waypoints', ()), getattr(checked_path, 'waypoints', ())):
+            for key in ('ub_sm', 'lb_sm', 'dynamic_border_cells'):
+                setattr(original, key, getattr(checked, key, None))
+        model.__dict__.update(candidate.model.__dict__)
+        model.reference_path = path
+        model.current_waypoint = path.get_waypoint(model.wp_id)
+        mpc.__dict__.update(candidate.__dict__)
+        mpc.model = model
+        if role is not None:
+            mpc._runtime_role = role
 
 
 def fresh_solution(mpc):
@@ -317,3 +361,34 @@ class RemainingPlan:
             path.append((x, y, yaw))
             times.append(t)
         return (np.array([command_speed, command_delta]), path, times), 'checked_rollout'
+
+
+def l1_entry_confirmed(controller, now, ready, duration):
+    """Continuous measured entry readiness, independent of request timers."""
+    since = getattr(controller, '_l1_application_stable_since', None)
+    if not ready or not math.isfinite(now):
+        controller._l1_application_stable_since = None
+        return False
+    if since is None or now < since:
+        since = now
+    controller._l1_application_stable_since = since
+    return now - since >= max(duration, 0.) - 1e-9
+
+
+def prepass_return_alternative(controller, candidate):
+    """Keep geometric guidance after target expiry, never its traffic proof."""
+    state = getattr(controller, '_prepass_return_corridor', None)
+    if not isinstance(state, CorridorState) or state.path is not candidate.path:
+        return None
+    if getattr(controller, '_stuck_recovery_until', None) is not None:
+        return None
+    if any(getattr(controller, key, False) for key in (
+            '_postpass_rejoin_suppressed', '_manual_control_override',
+            '_manual_recovery_reset_pending', '_straight_reentry_active',
+            '_mpc_safety_recovery_active', '_post_reverse_full_width_recovery_active',
+            '_parallel_abort_active', '_follow_escape_active',
+            '_prepass_retry_after_reverse', '_prepass_fallback_follow_active',
+            '_prepass_fallback_blocked', '_prepass_fallback_recovery_active',
+            '_l1_safety_recovery_active', '_l1_rejoin_backoff_active')):
+        return None
+    return state

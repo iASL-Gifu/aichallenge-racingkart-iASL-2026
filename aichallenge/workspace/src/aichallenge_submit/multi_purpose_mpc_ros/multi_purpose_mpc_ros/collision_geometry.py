@@ -187,7 +187,49 @@ def prediction_times_from_observation(stamp, now, times):
 
 def linear_prediction_position(x, y, velocity, time):
     """Same held-velocity forecast for MPC obstacles and body-sweep checks."""
-    return x+velocity[0]*time, y+velocity[1]*time
+    return _linear_prediction_position(x, y, velocity[0], velocity[1], time)
+
+
+@lru_cache(maxsize=4096)
+def _linear_prediction_position(x, y, vx, vy, time):
+    return x+vx*time, y+vy*time
+
+
+def begin_prediction_cycle():
+    """MPC obstacles and additional sweeps share exact forecasts this tick."""
+    _linear_prediction_position.cache_clear()
+    from .core.wall_constraints import wall_center_bounds
+    wall_center_bounds.cache_clear()
+
+
+def _segment_definitely_separated(a, b, t0, t1, target, velocity, geometry,
+                                  padding, target_padding, clearance):
+    """Disjoint circle-expanded AABBs imply every original sweep test is clear.
+
+    Use the entire linear target segment, not just its current position.
+    Unknown/invalid geometry always falls through to the existing narrow test.
+    """
+    values = (a.x, a.y, b.x, b.y, target.x, target.y, geometry.length,
+              geometry.width, a.uncertainty, b.uncertainty, a.lateral_padding,
+              b.lateral_padding, target.uncertainty, target.lateral_padding,
+              padding, target_padding, clearance)
+    if not target.yaw_valid or not all(math.isfinite(v) for v in values):
+        return False
+    if min(values[6:]) < 0.:
+        return False
+    hl = (geometry.length + clearance)/2
+    hw = (geometry.width + clearance)/2
+    er = math.hypot(hl+max(a.uncertainty,b.uncertainty)+padding,
+                    hw+max(a.lateral_padding,b.lateral_padding)+padding)
+    tr = math.hypot(hl+target.uncertainty+target_padding,
+                    hw+target.lateral_padding+target_padding)
+    x0, y0 = linear_prediction_position(target.x, target.y, velocity, t0)
+    x1, y1 = linear_prediction_position(target.x, target.y, velocity, t1)
+    radius = er+tr+1e-9
+    return (max(a.x,b.x)+radius < min(x0,x1)
+            or max(x0,x1)+radius < min(a.x,b.x)
+            or max(a.y,b.y)+radius < min(y0,y1)
+            or max(y0,y1)+radius < min(a.y,b.y))
 
 
 def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
@@ -216,6 +258,9 @@ def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
                                                     a.lateral_padding, b.lateral_padding)
         padding = distance/(2*steps) + radius*abs(angle)/(2*steps)
         target_padding = math.hypot(vx,vy)*(t1-t0)/(2*steps)
+        if _segment_definitely_separated(
+                a, b, t0, t1, target, velocity, geometry, padding, target_padding, clearance):
+            continue
         ego_samples = _sweep_ego_samples(a, b, steps, angle, padding)
         for j, ego in enumerate(ego_samples):
             ratio = (j+.5)/steps
@@ -243,11 +288,12 @@ def _body_distance(a, b, geometry):
                for u, v in zip(edges, edges[1:]))
 
 
-def separating_forward_path_clear(poses, times, target, velocity, geometry, clearance=.1):
-    """Allow only initial clearance-margin overlap that forward motion resolves.
+def separating_path_clear(poses, times, target, velocity, geometry, clearance=.1, *, reverse=False):
+    """Allow only initial clearance-margin overlap that the selected motion resolves.
 
     Keep all physical uncertainty and continuous-sweep padding. This exception
-    never applies to reverse, unknown yaw, physical overlap, or a new contact.
+    never applies to unknown yaw, physical overlap, or a new contact.
+    Reverse uses the same separation checks, with the longitudinal sign inverted.
     """
     if (not target.yaw_valid or not poses or not all(p.yaw_valid for p in poses)
             or not swept_path_clear(poses, times, target, velocity, geometry, clearance=0.)):
@@ -262,7 +308,8 @@ def separating_forward_path_clear(poses, times, target, velocity, geometry, clea
     cleared = False
     for a, b, t0, t1 in zip(poses, poses[1:], times, times[1:]):
         dx, dy = b.x-a.x, b.y-a.y
-        if dx*math.cos(a.yaw)+dy*math.sin(a.yaw) < -1e-9:
+        direction = -1. if reverse else 1.
+        if direction*(dx*math.cos(a.yaw)+dy*math.sin(a.yaw)) < -1e-9:
             return False
         angle = math.atan2(math.sin(b.yaw-a.yaw), math.cos(b.yaw-a.yaw))
         steps = max(1, math.ceil(math.hypot(dx,dy)/.025),
@@ -284,3 +331,33 @@ def separating_forward_path_clear(poses, times, target, velocity, geometry, clea
                 return False
             cleared = cleared or overlap is False
     return cleared and previous > initial+1e-3
+
+
+def separating_forward_path_clear(poses, times, target, velocity, geometry, clearance=.1):
+    """Compatibility entry point for forward-only clearance separation."""
+    return separating_path_clear(poses, times, target, velocity, geometry, clearance)
+
+
+def current_target_body(controller, vehicle_id):
+    """Project the observation to the same t=0 used by swept-path checks.
+
+    Do not change target_body(): path prediction still needs its original stamp.
+    Origin uncertainty and dimensions are preserved without relaxation.
+    """
+    body = target_body(controller, vehicle_id)
+    if body is None or not body.position_valid:
+        return None
+    now = float(getattr(controller, '_collision_now', body.stamp))
+    age = now - body.stamp
+    if not math.isfinite(age) or age < 0.:
+        return None
+    if age == 0.:
+        return body
+    tracker = controller._v2x_tracker
+    if not tracker.has_velocity_estimate(vehicle_id):
+        return None
+    velocity = tracker.velocity(vehicle_id)
+    if not all(math.isfinite(v) for v in velocity):
+        return None
+    x, y = linear_prediction_position(body.x, body.y, velocity, age)
+    return replace(body, x=x, y=y, stamp=now)
