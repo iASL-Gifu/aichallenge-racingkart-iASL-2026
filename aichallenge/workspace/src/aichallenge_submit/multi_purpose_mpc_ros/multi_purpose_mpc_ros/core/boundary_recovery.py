@@ -464,6 +464,29 @@ class RecoveryAttempts:
             self.anchor = None
 
 
+def release_non_wall_motion_deadlock(forward_progress, attempts, overlap):
+    """Forget no-motion vetoes after both drive directions were actuator-blocked.
+
+    This is deliberately limited to a wall-free measured pose.  Collision and
+    remembered wall-return evidence remain intact, so every retried trajectory
+    must still pass the normal wall and traffic checks.
+    """
+    if (forward_progress is None or attempts is None
+            or forward_progress.reason != 'no_measured_motion'
+            or not math.isfinite(overlap) or overlap > 1e-6
+            or (-1, 0) not in attempts.excluded):
+        return False
+    forward_progress.failed_pose = None
+    forward_progress.reason = ''
+    forward_progress.anchor = None
+    attempts.excluded.clear()
+    attempts.failed_conditions.clear()
+    attempts.execution_condition = None
+    attempts.failure_position = None
+    attempts.anchor = None
+    return True
+
+
 class MotionStart:
     """Arm stall recovery only after measured travel, without simulator state."""
     def __init__(self):

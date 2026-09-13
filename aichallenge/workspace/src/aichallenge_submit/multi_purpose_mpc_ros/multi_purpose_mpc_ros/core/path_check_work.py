@@ -54,6 +54,22 @@ def wall_clear(controller, bodies, geometry, *, allowance=0., slide=False):
     return work.cached(work.wall, key, 'wall', compute)
 
 
+def traffic_clear_with_detail(controller, bodies, times, target, velocity, geometry, *, reverse=False):
+    bodies, times, velocity = tuple(bodies), tuple(times), tuple(velocity)
+    def compute():
+        detail = collision.swept_path_collision_detail(
+            bodies, times, target, velocity, geometry)
+        if detail is None or collision.separating_path_clear(
+                bodies, times, target, velocity, geometry, reverse=reverse):
+            return True, None
+        return False, detail
+    work = getattr(controller, '_path_check_work', None)
+    if work is None:
+        return compute()
+    key = ('detail', bodies, times, target, velocity, geometry, reverse)
+    return work.cached(work.traffic, key, 'traffic', compute)
+
+
 def traffic_clear(controller, bodies, times, target, velocity, geometry, *, reverse=False):
     bodies, times, velocity = tuple(bodies), tuple(times), tuple(velocity)
     def compute():

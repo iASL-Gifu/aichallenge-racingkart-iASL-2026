@@ -232,28 +232,25 @@ def _segment_definitely_separated(a, b, t0, t1, target, velocity, geometry,
             or max(y0,y1)+radius < min(a.y,b.y))
 
 
-def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
-    """Conservative continuous-segment check, including translation and yaw sweep.
-
-    Times are relative to the target observation. Subdivision bounds cost;
-    insufficient/invalid evidence never grants a spacing-control bypass.
-    """
-    if (len(poses) < 2 or len(times) != len(poses) or not target.position_valid
-            or not all(p.position_valid for p in poses)
-            or not all(math.isfinite(t) and t >= 0 for t in times)
-            or not all(math.isfinite(v) for v in velocity)):
-        return False
+def swept_path_collision_detail(poses, times, target, velocity, geometry, clearance=0.1):
+    """Return the first conservative swept collision and its source."""
+    invalid = (len(poses) < 2 or len(times) != len(poses) or not target.position_valid
+               or not all(p.position_valid for p in poses)
+               or not all(math.isfinite(t) and t >= 0 for t in times)
+               or not all(math.isfinite(v) for v in velocity))
+    if invalid:
+        return {'contact': 'invalid_evidence'}
     vx, vy = velocity
     count = 0
-    for a, b, t0, t1 in zip(poses, poses[1:], times, times[1:]):
+    for segment, (a, b, t0, t1) in enumerate(zip(poses, poses[1:], times, times[1:])):
         if t1 < t0 or not a.yaw_valid or not b.yaw_valid:
-            return False
+            return {'contact': 'invalid_evidence', 'segment': segment}
         distance = math.hypot(b.x-a.x, b.y-a.y)
         angle = math.atan2(math.sin(b.yaw-a.yaw), math.cos(b.yaw-a.yaw))
         steps = max(1, math.ceil(distance/.1), math.ceil(abs(angle)/.05), math.ceil((t1-t0)/.1))
         count += steps
         if count > 512:
-            return False
+            return {'contact': 'invalid_evidence', 'segment': segment}
         radius = geometry.radius + math.sqrt(2)*max(a.uncertainty, b.uncertainty,
                                                     a.lateral_padding, b.lateral_padding)
         padding = distance/(2*steps) + radius*abs(angle)/(2*steps)
@@ -269,9 +266,27 @@ def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
             other = replace(target, x=ox, y=oy,
                             uncertainty=target.uncertainty+target_padding,
                             lateral_uncertainty=target.lateral_padding+target_padding)
-            if overlaps(ego,other,geometry,margin=clearance) is not False:
-                return False
-    return True
+            if overlaps(ego, other, geometry, margin=clearance) is not False:
+                nominal_ego = replace(ego, uncertainty=0., lateral_uncertainty=0.)
+                nominal_other = replace(other, uncertainty=0., lateral_uncertainty=0.)
+                nominal = overlaps(nominal_ego, nominal_other, geometry, margin=0.) is True
+                envelope = overlaps(ego, other, geometry, margin=0.) is True
+                contact = ('nominal_body_contact' if nominal else
+                           'uncertainty_or_sweep_overlap' if envelope else
+                           'clearance_margin_overlap')
+                return {'contact': contact, 'segment': segment, 'sample': j,
+                        'time': time, 'ego': (ego.x, ego.y), 'target': (ox, oy)}
+    return None
+
+
+def swept_path_clear(poses, times, target, velocity, geometry, clearance=0.1):
+    """Conservative continuous-segment check, including translation and yaw sweep.
+
+    Times are relative to the target observation. Subdivision bounds cost;
+    insufficient/invalid evidence never grants a spacing-control bypass.
+    """
+    return swept_path_collision_detail(
+        poses, times, target, velocity, geometry, clearance) is None
 
 
 def _body_distance(a, b, geometry):

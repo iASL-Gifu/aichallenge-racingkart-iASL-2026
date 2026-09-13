@@ -6819,7 +6819,7 @@ class MPCController(Node):
     def _reentry_path_is_clear(self, path, speed=None, reverse=False, forward_turn=False, wall_escape=False, times=None):
         """Check physical static bodies and moving traffic, not corridor membership."""
         from types import SimpleNamespace
-        from multi_purpose_mpc_ros.core.path_check_work import wall_clear, traffic_clear, prepare_bodies
+        from multi_purpose_mpc_ros.core.path_check_work import wall_clear, traffic_clear_with_detail, prepare_bodies
         from multi_purpose_mpc_ros.core.runtime_diagnostics import detail_scope
         if not self._recovery_localization_available:
             return False, 'localization_unavailable'
@@ -6866,9 +6866,21 @@ class MPCController(Node):
                 observation_times = collision.prediction_times_from_observation(
                     target.stamp, self._collision_now, times)
                 velocity = self._v2x_tracker.velocity(vid)
-                if not traffic_clear(
-                        self, bodies, observation_times, target, velocity, geometry, reverse=reverse):
-                    return False, f'vehicle_collision={vid}'
+                clear, detail = traffic_clear_with_detail(
+                    self, bodies, observation_times, target, velocity, geometry, reverse=reverse)
+                if not clear:
+                    detail = detail or {}
+                    reason = f'vehicle_collision={vid},contact={detail.get("contact", "unknown")}'
+                    if 'segment' in detail:
+                        reason += f',segment={detail["segment"]}'
+                    if 'sample' in detail:
+                        reason += f',sample={detail["sample"]}'
+                    if 'time' in detail:
+                        reason += f',time={detail["time"]:.3f}'
+                    if 'ego' in detail and 'target' in detail:
+                        reason += (f',ego=({detail["ego"][0]:.3f},{detail["ego"][1]:.3f})'
+                                   f',target=({detail["target"][0]:.3f},{detail["target"][1]:.3f})')
+                    return False, reason
         return True, static_reason
 
     def _reentry_mpc_path_is_valid(self, pose, command):
@@ -7368,14 +7380,36 @@ class MPCController(Node):
             self.get_logger().info(
                 '[RecoveryMotionObserved] GNSS travel >=0.30m and measured speed >0.15m/s; '
                 'stall recovery enabled')
+        current_overlap = (
+            self._reentry_overlap((pose.x, pose.y, pose.theta))
+            if valid else math.inf)
         was_blocked = self._forward_progress.blocked
         self._forward_progress.update(
             stamp if stamp is not None else now_sec, pose.x, pose.y,
-            self._reentry_overlap((pose.x, pose.y, pose.theta)) if valid else 0.,
+            current_overlap if valid else 0.,
             valid=valid, heading=float(pose.theta), reverse=valid and self._current_gear_is_reverse(),
             forward=(valid and self._enable_control and not self._collision_evidence_hold
                      and not self._intentional_follow_stop_active
                      and self._current_gear_is_drive() and self._last_u[0] > .15))
+        from multi_purpose_mpc_ros.core.boundary_recovery import release_non_wall_motion_deadlock
+        if release_non_wall_motion_deadlock(
+                self._forward_progress,
+                getattr(self, '_recovery_attempts', None),
+                current_overlap):
+            # Both a validated DRIVE attempt and a validated straight REVERSE
+            # attempt produced no measured motion at a wall-free pose.  With no
+            # external run-permit signal this is indistinguishable from an
+            # imposed stop.  Re-open the candidates from DRIVE; their physical
+            # wall/traffic checks still run before any command is issued.
+            self._reentry_hold_until = 0.0
+            self._reentry_approved_motion = None
+            self._reentry_phase = 'idle'
+            self._straight_reentry_direction = 0
+            self._straight_reentry_pre_reverse_until = None
+            self.get_logger().warn(
+                '[RecoveryExternalStopRetry] forward and reverse commands both '
+                'made no measured progress at a wall-free pose; retrying fresh '
+                'safe candidates from DRIVE', throttle_duration_sec=5.0)
         if self._forward_progress.blocked and not was_blocked:
             self.get_logger().warn(
                 f'[RecoveryForwardNoProgress] {self._forward_progress.reason}; '
